@@ -21,8 +21,8 @@ ARG COMPILE_CUSTOM_KERNELS=1
 
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
 
-RUN yum --setopt=sslverify=false update -y && \
-    yum --setopt=sslverify=false install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+RUN yum update -y && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
     rm -rf /var/cache/yum
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
