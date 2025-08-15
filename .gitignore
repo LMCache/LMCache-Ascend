@@ -1,0 +1,9 @@
+.ruff_cache
+_version.py
+build
+*.so
+*.pyc
+.pytest_cache
+
+# Ascend Specific
+fusion_result.json

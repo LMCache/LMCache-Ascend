@@ -1,0 +1,118 @@
+[build-system]
+requires = [
+    "setuptools>=61.0",
+    "setuptools_scm[toml]>=6.2",
+    "torch",
+    "torch-npu",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmcache-ascend"
+authors = [
+    { name = "LMCache Team", email = "lmcacheteam@gmail.com" },
+    { name = "GingFung Matthew Yeung", email = "gingfung.matthew.yeung@huawei.com" },
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+description = "LMCache on Ascend NPU"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: GPU",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+requires-python = ">=3.10,<3.13"
+dynamic = ["dependencies", "version"]
+
+[project.urls]
+homepage = "https://docs.lmcache.ai"
+source = "https://github.com/LMCache/LMCache-Ascend"
+issues = "https://github.com/LMCache/LMCache-Ascend"
+
+[tool.setuptools_scm]
+version_file = "lmcache_ascend/_version.py"
+# do not include +gREV local version, required for Test PyPI upload
+local_scheme = "no-local-version"
+
+[tool.setuptools.packages.find]
+where = [""]
+include = ["lmcache_ascend", "lmcache_ascend*"]
+
+[tool.ruff]
+# same as Black's default line length
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    # "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    #"SIM",
+    # Ruff does not support isort's import_headings feature, yet.
+    # "I",
+    # flake8-logging-format
+    #"G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+]
+
+[tool.ruff.lint.isort]
+# same as .isort.cfg
+from-first = true
+# not supported yet
+# import-heading-future=Future
+# import-heading-stdlib=Standard
+# import-heading-thirdparty=Third Party
+# import-heading-firstparty=First Party
+# import-heading-localfolder=Local
+
+[tool.mypy]
+modules = ["lmcache_ascend", "tests"]
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+disable_error_code = [
+    "annotation-unchecked",
+    "union-attr",
+    "var-annotated",
+    "arg-type",
+    "call-arg",
+    "import-untyped",
+    "attr-defined",
+    "return-value",
+    "assignment",
+    "call-overload",
+    "misc",
+]
+
+ignore_missing_imports = true
+explicit_package_bases = true
+
+# TODO: tighten MyPy checks by enabling these checks over time.
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+
+follow_imports = "silent"
