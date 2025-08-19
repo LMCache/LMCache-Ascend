@@ -127,6 +127,31 @@ cd /workspace/LMCache-Ascend
 python3 -m pip install -v --no-build-isolation -e .
 ```
 
+### Usage
+
+We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
+
+#### Online serving
+```bash
+python \
+    -m vllm.entrypoints.openai.api_server \
+    --port 8100 \
+    --model /data/models/Qwen/Qwen3-32B \
+    --trust-remote-code \
+    --disable-log-requests \
+    --block-size 128 \
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+```
+
+#### Offline
+```python
+ktc = KVTransferConfig(
+        kv_connector="LMCacheAscendConnectorV1Dynamic",
+        kv_role="kv_both",
+        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
+    )
+```
+
 ## FAQ
 
 1. Why do I have HostRegisterError ? 
