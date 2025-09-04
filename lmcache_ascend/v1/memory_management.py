@@ -19,6 +19,15 @@ import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+_IS_310P = None
+
+def is_310p():
+    global _IS_310P
+    if _IS_310P is None:
+        from lmcache_ascend import _build_info
+        _IS_310P = _build_info.__soc_version__.lower().startwith("ascend310p")
+    return _IS_310P
+
 
 # NOTE (Gingfung): it is not really used in v1, mainly for testing.
 class AscendPinMemoryAllocator(PinMemoryAllocator):
@@ -32,7 +41,9 @@ class AscendPinMemoryAllocator(PinMemoryAllocator):
         self.buffer = torch.empty(
             size, dtype=torch.uint8, device="cpu", pin_memory=True
         )
-        lmc_ops.host_register(self.buffer)
+
+        if not is_310p():
+            lmc_ops.host_register(self.buffer)
 
         if use_paging:
             assert "shape" in kwargs, (
@@ -66,7 +77,9 @@ class AscendMixedMemoryAllocator(MixedMemoryAllocator):
         self.buffer = torch.empty(
             size, dtype=torch.uint8, device="cpu", pin_memory=True
         )
-        lmc_ops.host_register(self.buffer)
+
+        if not is_310p():
+            lmc_ops.host_register(self.buffer)
 
         if use_paging:
             assert "shape" in kwargs, (

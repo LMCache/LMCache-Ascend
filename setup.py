@@ -7,6 +7,7 @@ import sys
 # Third Party
 from setuptools import find_packages, setup, Extension
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
 
@@ -58,6 +59,22 @@ def _get_npu_soc():
             raise RuntimeError(f"Retrieve SoC version failed: {e}")
     return _soc_version
 
+class custom_build_info(build_py):
+
+    def run(self):
+        soc_version = _get_npu_soc()
+        if not soc_version:
+            raise ValueError(
+                "SOC version is not set. Please set SOC_VERSION environment variable."
+            )
+
+        package_dir = os.path.join(ROOT_DIR, "lmcache_ascend", "_build_info.py")
+        with open(package_dir, "w+") as f:
+            f.write('# Auto-generated file\n')
+            f.write(f"__soc_version__ = '{soc_version}'\n")
+        logging.info(
+            f"Generated _build_info.py with SOC version: {soc_version}")
+        super().run()
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwargs) -> None:
@@ -178,6 +195,7 @@ class CustomAscendCmakeBuildExt(build_ext):
 def ascend_extension():
     print("Building Ascend extensions")
     return [CMakeExtension(name="lmcache_ascend.c_ops")], {
+        "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt
     }
 
