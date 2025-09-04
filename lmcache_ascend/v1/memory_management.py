@@ -25,7 +25,7 @@ def is_310p():
     global _IS_310P
     if _IS_310P is None:
         from lmcache_ascend import _build_info
-        _IS_310P = _build_info.__soc_version__.lower().startwith("ascend310p")
+        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
 
 
