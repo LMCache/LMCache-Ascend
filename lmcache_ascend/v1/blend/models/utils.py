@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import Dict
+
+# Third Party
+from torch import nn
+
+# First Party
+from lmcache.logging import init_logger
+
+logger = init_logger(__name__)
+
+
+# TODO (Jiayi): Need to infer the model type from vllm model
+
+
+def infer_model_from_vllm(vllm_model, blender):
+    model_name = type(vllm_model).__name__
+    if model_name == "LlamaForCausalLM":
+        # First Party
+        from lmcache_ascend.v1.blend.models.llama import LMCLlamaModel
+
+        return LMCLlamaModel(vllm_model, blender)
+    else:
+        raise NotImplementedError(
+            f"Model type {model_name} is not supported in LMCache."
+        )
+
+
+class VLLMModelTracker:
+    _vllm_models: Dict[str, nn.Module] = {}
+
+    @classmethod
+    def register_model(
+        cls,
+        instance_id: str,
+        vllm_model: nn.Module,
+    ):
+        """
+        Register a vllm model by instance_id.
+        """
+        logger.info(f"Registering vllm model for {instance_id}")
+        if instance_id not in cls._vllm_models:
+            cls._vllm_models[instance_id] = vllm_model
+        else:
+            logger.warning(
+                f"vllm model for {instance_id} already registered, doing nothing."
+            )
+
+    @classmethod
+    def get_model(
+        cls,
+        instance_id: str,
+    ) -> nn.Module:
+        """
+        Get the vllm model by instance_id.
+        """
+        if instance_id not in cls._vllm_models:
+            raise ValueError(f"vllm model for {instance_id} not found.")
+        return cls._vllm_models[instance_id]

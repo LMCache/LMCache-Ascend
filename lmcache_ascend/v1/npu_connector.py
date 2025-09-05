@@ -8,6 +8,7 @@ import torch
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector import (
+    VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
@@ -16,6 +17,8 @@ import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
+class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
+    pass
 
 class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:

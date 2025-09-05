@@ -4,6 +4,8 @@ build
 *.so
 *.pyc
 .pytest_cache
+.env
 
 # Ascend Specific
 fusion_result.json
+kernel_meta
