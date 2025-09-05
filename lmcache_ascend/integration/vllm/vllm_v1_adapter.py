@@ -19,10 +19,8 @@ from lmcache.integration.vllm.vllm_adapter import (
 )
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import (
-    VLLMBufferLayerwiseGPUConnector,
-)
 from lmcache_ascend.v1.npu_connector import (
+    VLLMBufferLayerwiseNPUConnector,
     VLLMPagedMemNPUConnectorV2,
     VLLMPagedMemLayerwiseNPUConnector,
 )
@@ -132,7 +130,14 @@ def init_lmcache_engine(
     if config.use_layerwise:
         if config.enable_blending:
             # Use layerwise connector for blending
-            raise NotImplementedError("Blending is not yet supported for Ascend.")
+            vllm_gpu_connector = VLLMBufferLayerwiseNPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
         else:
             vllm_gpu_connector = VLLMPagedMemLayerwiseNPUConnector(
                 hidden_dim_size,
