@@ -91,8 +91,8 @@ if __name__ == '__main__':
     )
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
     with build_llm_with_lmcache(model, blend=not args.no_blend) as llm:
-        llm.generate({"prompt_token_ids": chunk1_prompt}, sampling_params=sampling_params)
-        llm.generate({"prompt_token_ids": chunk2_prompt}, sampling_params=sampling_params)
+        llm.generate({"prompt_token_ids": chunk1_prompt + blend_special_str}, sampling_params=sampling_params)
+        llm.generate({"prompt_token_ids": chunk2_prompt + blend_special_str}, sampling_params=sampling_params)
         llm.generate({"prompt_token_ids": chunk3_prompt}, sampling_params=sampling_params)
         outputs1 = llm.generate({"prompt_token_ids": prompt}, sampling_params=sampling_params)
         print(f"Output: {outputs1[0].outputs[0].text}")
