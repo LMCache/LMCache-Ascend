@@ -21,6 +21,9 @@ def infer_model_from_vllm(vllm_model, blender):
         from lmcache_ascend.v1.blend.models.llama import LMCLlamaModel
 
         return LMCLlamaModel(vllm_model, blender)
+    elif model_name == "Qwen3ForCausalLM":
+        from lmcache_ascend.v1.blend.models.qwen3 import LMCQwen3Model
+        return LMCQwen3Model(vllm_model, blender)
     else:
         raise NotImplementedError(
             f"Model type {model_name} is not supported in LMCache."

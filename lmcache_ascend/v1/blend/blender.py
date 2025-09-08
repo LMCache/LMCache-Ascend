@@ -56,6 +56,7 @@ class LMCBlender:
         layer_id: int,
         attn_output: Optional[torch.Tensor],
         attn_metadata,
+        **kwargs
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
@@ -74,7 +75,10 @@ class LMCBlender:
             )
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
-        q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
+        if 'qk_post_processing' in kwargs:
+            q, k = kwargs['qk_post_processing'](q, k, attn_layer, self.metadata.positions)
+        else:
+            q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
             diff_k = torch.sum(

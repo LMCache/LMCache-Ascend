@@ -9,3 +9,11 @@ The git diff file is at `examples/blending/since_b5b7e0ecc765adfec4ec4efdd14bfc7
 `python script.py model_path 0.05` should yield no connector (ie `# #`) while `python script.py model_path 1.0` should.
 
 The latter should yield the same result as `python script.py model_path 1.0 --no-blend`, although some precision issues may cause some difference.
+
+## Tested Models
+
+```
+Qwen/Qwen3-8B
+mistralai/Ministral-8B-Instruct-2410
+meta-llama/Meta-Llama-3.1-8B-Instruct
+```

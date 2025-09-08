@@ -9,12 +9,23 @@ from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnMetadata
 from lmcache_ascend.v1.blend.models.models import LMCModel
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
 
-class LMCLlamaModel(LMCModel):
+def qk_post_processing(q, k, attn_layer, positions):
+    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // attn_layer.head_dim, attn_layer.head_dim)
+    q_by_head = attn_layer.q_norm(q_by_head)
+    q = q_by_head.view(q.shape)
+    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // attn_layer.head_dim, attn_layer.head_dim)
+    k_by_head = attn_layer.k_norm(k_by_head)
+    k = k_by_head.view(k.shape)
+    q, k = attn_layer.rotary_emb(positions, q, k)
+    return q, k
+
+class LMCQwen3Model(LMCModel):
+
+    # ref: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L353 https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L268
     def compute_layer(
         self,
         input_ids: torch.Tensor,
     ):
-        print("!!!!!compute_layer llama")
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
         residual = None
 
@@ -34,11 +45,17 @@ class LMCLlamaModel(LMCModel):
             max_seq_len=input_ids.shape[0],
         )
 
+        no_more_queries = False
+
+        # print(f"{len(self.vllm_model.model.layers)=}, {self.vllm_model.model.start_layer=} {self.vllm_model.model.end_layer=}")
         for idx, layer in enumerate(
             self.vllm_model.model.layers[
                 self.vllm_model.model.start_layer : self.vllm_model.model.end_layer
             ]
         ):
+            if no_more_queries:
+                yield
+                continue
             # TODO(Jiayi) The last layer doesn't have to be computed
             # hidden_states, residual = layer(positions, hidden_states, residual)
 
@@ -51,6 +68,11 @@ class LMCLlamaModel(LMCModel):
             # hidden_states = self.self_attn(positions=positions,
             #                            hidden_states=hidden_states)
 
+            # # According to HF transformers
+            # residual = hidden_states
+            # hidden_states = layer.input_layernorm(hidden_states)
+            # #
+
             qkv, _ = layer.self_attn.qkv_proj(hidden_states)
             q, k, v = qkv.split(
                 [
@@ -61,28 +83,40 @@ class LMCLlamaModel(LMCModel):
                 dim=-1,
             )
 
-            q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, idx, attn_output, attn_metadata
-            )
-
             num_heads = self.vllm_attn_layers[idx].num_heads
             num_kv_heads = self.vllm_attn_layers[idx].num_kv_heads
             head_size = self.vllm_attn_layers[idx].head_size
+
+            q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
+                q, k, v, residual, idx, attn_output, attn_metadata, qk_post_processing=qk_post_processing
+            )
+            if q.numel() == 0:
+                no_more_queries = True
+                yield
+                continue
 
             q = q.view(-1, num_heads, head_size)
             k = k.view(-1, num_kv_heads, head_size)
             v = v.view(-1, num_kv_heads, head_size)
             attn_output = attn_output.view(-1, num_heads, head_size)
 
-            attn_output = self.lmc_attn_layers[idx].forward_contiguous(
-                q, k, v, attn_output, attn_metadata, blend_metadata=self.blender.metadata
-            )
+            attn_output = self.lmc_attn_layers[idx].forward_contiguous(q, k, v, attn_output, attn_metadata, blend_metadata=self.blender.metadata, layer_id=idx)
+            # print(f"{attn_output.shape=} {attn_output.device=}")
 
             attn_output = attn_output.view(-1, num_heads * head_size)
             k = k.view(-1, num_kv_heads * head_size)
             v = v.view(-1, num_kv_heads * head_size)
 
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
+            # print(f"{hidden_states.shape=} {hidden_states.device=}")
+
+            # # According to hf transformers
+            # hidden_states = residual + hidden_states
+            # residual = hidden_states
+            # hidden_states = layer.post_attention_layernorm(hidden_states)
+            # hidden_states = layer.mlp(hidden_states)
+            # hidden_states = residual + hidden_states
+            # #
 
             # Fully Connected
             hidden_states, residual = layer.post_attention_layernorm(
