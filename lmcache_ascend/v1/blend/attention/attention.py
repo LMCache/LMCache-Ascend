@@ -57,7 +57,7 @@ def eager_attention_causal(
 
     out.copy_(attn_output)
     del attn_output
-    torch.cuda.empty_cache()
+    torch.npu.empty_cache()
 
 class LMCFlashAttnBackend(AttentionInterface):
     """

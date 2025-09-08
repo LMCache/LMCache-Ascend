@@ -132,9 +132,9 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     hidden_dim = head_size * 8
     num_tokens = 10
 
-    dumb_q = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    dumb_k = torch.rand((num_tokens, hidden_dim), device="cuda", dtype=torch.bfloat16)
-    positions = torch.arange(num_tokens, device="cuda")
+    dumb_q = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    dumb_k = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    positions = torch.arange(num_tokens, device="npu")
 
     q1 = dumb_q.clone()
     k1 = dumb_k.clone()
