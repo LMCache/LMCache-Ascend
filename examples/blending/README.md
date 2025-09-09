@@ -17,3 +17,10 @@ Qwen/Qwen3-8B
 mistralai/Ministral-8B-Instruct-2410
 meta-llama/Meta-Llama-3.1-8B-Instruct
 ```
+
+## Notes
+
+Current attention backend utilizes transformer style attention. This is because cacheblend requires custom causal attention masks.
+
+Ideally in LMCache 0.3.3 `SegmentTokenDatabase`, `self.sep_tokens = self.tokenizer.encode(config.blend_special_str, add_special_tokens=False)` instead of `self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]` should be used to extract separation tokens.
+For now, in the script for qwen tokenizers that do not have `BOS`, as in the example script, individual chunk caching should be done like `llm.generate({"prompt_token_ids": chunk1_prompt + blend_special_str}, sampling_params=sampling_params)` insetad of `llm.generate({"prompt_token_ids": chunk1_prompt}, sampling_params=sampling_params)`.
