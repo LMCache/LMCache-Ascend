@@ -47,7 +47,6 @@ class LMCQwen3Model(LMCModel):
 
         no_more_queries = False
 
-        # print(f"{len(self.vllm_model.model.layers)=}, {self.vllm_model.model.start_layer=} {self.vllm_model.model.end_layer=}")
         for idx, layer in enumerate(
             self.vllm_model.model.layers[
                 self.vllm_model.model.start_layer : self.vllm_model.model.end_layer
@@ -101,14 +100,12 @@ class LMCQwen3Model(LMCModel):
             attn_output = attn_output.view(-1, num_heads, head_size)
 
             attn_output = self.lmc_attn_layers[idx].forward_contiguous(q, k, v, attn_output, attn_metadata, blend_metadata=self.blender.metadata, layer_id=idx)
-            # print(f"{attn_output.shape=} {attn_output.device=}")
 
             attn_output = attn_output.view(-1, num_heads * head_size)
             k = k.view(-1, num_kv_heads * head_size)
             v = v.view(-1, num_kv_heads * head_size)
 
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
-            # print(f"{hidden_states.shape=} {hidden_states.device=}")
 
             # # According to hf transformers
             # hidden_states = residual + hidden_states

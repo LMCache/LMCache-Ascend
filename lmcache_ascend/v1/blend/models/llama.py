@@ -14,7 +14,6 @@ class LMCLlamaModel(LMCModel):
         self,
         input_ids: torch.Tensor,
     ):
-        print("!!!!!compute_layer llama")
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
         residual = None
 
