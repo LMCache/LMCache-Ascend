@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Union
+from typing import List, Union, Optional
 
 # Third Party
 import torch
@@ -22,14 +22,15 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
 class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
+        self.device = kv_caches[0].device
+        assert self.device.type == "npu", "The device should be Ascend NPU."
+        idx = self.device.index
+        if idx in self.kv_cache_pointers_on_gpu:
+            return self.kv_cache_pointers_on_gpu[idx]
         self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
-        device = kv_caches[0].device
-        assert device.type == "npu", "The device should be Ascend NPU."
-        idx = device.index
-        if idx not in self.kv_cache_pointers_on_gpu:
-            self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-                self.num_layers, dtype=torch.int64, device=device
-            )
+        self.kv_cache_pointers_on_gpu[idx] = torch.empty(
+            self.num_layers, dtype=torch.int64, device=self.device
+        )
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
@@ -91,11 +92,14 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            assert self.gpu_buffer_allocator is not None
+            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
+                self.gpu_buffer_allocator.allocate(
+                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                )
             )
             assert tmp_gpu_buffer_obj is not None, (
-                "Failed to allocate GPU buffer in GPUConnector"
+                "Failed to allocate NPU buffer in NPUConnector"
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
@@ -122,21 +126,21 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                     else:
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id][0],
-                            self.kvcaches[layer_id][1],
+                            self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             False,
                             True,
+                            self.vllm_two_major
                         )
 
                 if self.use_gpu:
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id][0],
-                        self.kvcaches[layer_id][1],
+                        self.kvcaches[layer_id],
                         slot_mapping_full,
                         False,
                         True,
+                        self.vllm_two_major
                     )
         yield
 
@@ -207,11 +211,14 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
 
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
-            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            assert self.gpu_buffer_allocator is not None
+            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
+                self.gpu_buffer_allocator.allocate(
+                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                )
             )
             assert tmp_gpu_buffer_obj is not None, (
-                "Failed to allocate GPU buffer in GPUConnector"
+                "Failed to allocate NPU buffer in NPUConnector"
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
@@ -226,11 +233,11 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                 if self.use_gpu:
                     lmc_ops.single_layer_kv_transfer(
                         tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id][0],
-                        self.kvcaches[layer_id][1],
+                        self.kvcaches[layer_id],
                         slot_mapping_full,
                         True,
                         True,
+                        self.vllm_two_major,
                     )
                 for start, end, memory_obj in zip(
                     starts, ends, memory_objs_layer, strict=False
@@ -244,11 +251,11 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                     else:
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id][0],
-                            self.kvcaches[layer_id][1],
+                            self.kvcaches[layer_id],
                             slot_mapping[start:end],
                             True,
                             True,
+                            self.vllm_two_major,
                         )
 
             yield

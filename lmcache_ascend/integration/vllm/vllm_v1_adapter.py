@@ -7,16 +7,27 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 # will disabled torch.jit
 from torch_npu.contrib import transfer_to_npu
 
+
+from vllm.config import (
+    VllmConfig
+)
+from vllm.distributed.parallel_state import (
+    get_tp_group,
+)
+from vllm.utils import get_kv_cache_torch_dtype
+import torch
+
 # First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import ENGINE_NAME, lmcache_get_config
-from lmcache.integration.vllm.vllm_adapter import (
-    VLLM_CACHE_CONFIG,
-    VLLM_MODEL_CONFIG,
-    VLLM_PARALLEL_CONFIG,
-    VLLM_SCHEDULER_CONFIG,
-    need_gpu_interm_buffer,
+from lmcache.integration.vllm.utils import (
+    ENGINE_NAME,
+    mla_enabled
 )
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    need_gpu_interm_buffer,
+    _calculate_draft_layers
+)
+
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache_ascend.v1.npu_connector import (
@@ -26,86 +37,65 @@ from lmcache_ascend.v1.npu_connector import (
 )
 from lmcache.logging import init_logger
 
-# Third Party
-import torch
-from vllm.config import (
-    CacheConfig,
-    ModelConfig,
-    ParallelConfig,
-    SchedulerConfig,
-)
-from vllm.utils import get_kv_cache_torch_dtype
-
 logger = init_logger(__name__)
 
 
 # We need to patch this function due to connector modification
 def init_lmcache_engine(
-    model_config: ModelConfig,
-    parallel_config: ParallelConfig,
-    cache_config: CacheConfig,
-    scheduler_config: SchedulerConfig,
-) -> Optional[LMCacheEngine]:
+    lmcache_config: LMCacheEngineConfig,
+    vllm_config: "VllmConfig"
+) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
     `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
     variable is not set, this function will return None.
 
-    :param model_config: The model configuration in vLLM.
-    :type model_config: ModelConfig
-    :param parallel_config: The parallel configuration in vLLM.
-    :type parallel_config: ParallelConfig
-    :param cache_config: The KV cache configuration in vLLM.
-    :type cache_config: CacheConfig
-    :param scheduler_config: The scheduler configuration in vLLM.
-    :type scheduler_config: SchedulerConfig
+    :param lmcache_config: The LMCache configuration.
+    :type lmcache_config: LMCacheEngineConfig
+    :param vllm_config: The vLLM configuration.
+    :type vllm_config: VllmConfig
 
-    :return: The initialized LMCache engine or None (if the environment variable
-        `LMCACHE_CONFIG_FILE` is not set).
-    :rtype: Optional[LMCacheEngine]
+    :return: The initialized LMCache engine
+    :rtype: LMCacheEngine
     """
-    if LMCacheEngineBuilder.get(ENGINE_NAME) is not None:
-        return None
+    
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+        return curr_engine
 
-    global VLLM_CACHE_CONFIG
-    global VLLM_PARALLEL_CONFIG
-    global VLLM_MODEL_CONFIG
-    global VLLM_SCHEDULER_CONFIG
-    VLLM_CACHE_CONFIG = cache_config
-    VLLM_PARALLEL_CONFIG = parallel_config
-    VLLM_MODEL_CONFIG = model_config
-    VLLM_SCHEDULER_CONFIG = scheduler_config
+    model_config = vllm_config.model_config
+    parallel_config = vllm_config.parallel_config
+    cache_config = vllm_config.cache_config
 
-    config = lmcache_get_config()
-
-    assert isinstance(config, LMCacheEngineConfig), (
+    assert isinstance(lmcache_config, LMCacheEngineConfig), (
         "LMCache v1 configuration is should be passed."
     )
 
     kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
 
-    use_mla = False
-    if (
-        hasattr(model_config, "use_mla")
-        and isinstance(model_config.use_mla, bool)
-        and model_config.use_mla
+    use_mla = mla_enabled(model_config)
+    if use_mla and (
+        lmcache_config.remote_serde != "naive"
+        and lmcache_config.remote_serde is not None
     ):
-        use_mla = True
-
-    if use_mla and (config.remote_serde != "naive" and config.remote_serde is not None):
         raise ValueError("MLA only works with naive serde mode..")
 
     # construct kv shape (for mem pool)
     num_layer = model_config.get_num_layers(parallel_config)
-    chunk_size = config.chunk_size
+    num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
+    num_layer += num_draft_layers
+    chunk_size = lmcache_config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
-    logger.info(f"use mla: {use_mla}, kv shape: {kv_shape}")
+    logger.info(
+        f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
+    )
 
     # Change current device.
-    torch.cuda.device(parallel_config.rank)
-    device = torch.device(f"cuda:{parallel_config.rank}")
+    num_gpus = torch.npu.device_count()
+    local_rank = parallel_config.rank % num_gpus
+    torch.npu.set_device(local_rank)
+    device = torch.device(f"npu:{local_rank}")
     metadata = LMCacheEngineMetadata(
         model_config.model,
         parallel_config.world_size,
@@ -115,20 +105,20 @@ def init_lmcache_engine(
         kv_shape,
         use_mla,
     )
-
-    use_gpu = need_gpu_interm_buffer(config)
+    use_gpu = need_gpu_interm_buffer(lmcache_config)
     vllm_gpu_connector: Union[
+        VLLMBufferLayerwiseNPUConnector,
         VLLMPagedMemNPUConnectorV2,
         VLLMPagedMemLayerwiseNPUConnector,
     ]
 
-    if use_mla and config.use_layerwise:
+    if use_mla and lmcache_config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
-    if config.use_layerwise:
-        if config.enable_blending:
+    if lmcache_config.use_layerwise:
+        if lmcache_config.enable_blending:
             # Use layerwise connector for blending
             vllm_gpu_connector = VLLMBufferLayerwiseNPUConnector(
                 hidden_dim_size,
@@ -157,8 +147,14 @@ def init_lmcache_engine(
             device=device,
             use_mla=use_mla,
         )
+    tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME, config, metadata, vllm_gpu_connector
+        ENGINE_NAME,
+        lmcache_config,
+        metadata,
+        vllm_gpu_connector,
+        tpg.broadcast,
+        tpg.broadcast_object,
     )
 
     return engine
