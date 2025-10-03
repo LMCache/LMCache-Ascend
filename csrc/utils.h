@@ -15,9 +15,10 @@
  */
 #pragma once
 
-#include "kernels/types.h"
+#include <string>
 #include <c10/core/ScalarType.h>
 #include <torch/torch.h>
+#include "kernels/types.h"
 #include "managed_mem.h"
 
 namespace vllm_ascend {
@@ -41,3 +42,5 @@ T* get_kernel_ptr(TENSOR_TYPE& tensor) {
         TORCH_CHECK(false, "Invalid device. Device must be ascend (PrivateUseOne) or pinned cpu.");
     }
 }
+
+std::string get_npu_pci_bus_id(int device);

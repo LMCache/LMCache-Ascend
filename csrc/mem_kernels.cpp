@@ -3,7 +3,7 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
-#include "utils.h"
+#include "types.h"
 #include "tiling/platform/platform_ascendc.h"
 #include <pybind11/pybind11.h>
 #include <Python.h>

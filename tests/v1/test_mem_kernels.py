@@ -4,21 +4,24 @@ from typing import List
 import random
 
 # Third Party
-from utils import (
+import pytest
+import torch
+import torch_npu
+
+# First Party
+from lmcache.v1.memory_management import PinMemoryAllocator
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
+
+# Local
+from .utils import (
     check_mem_obj_equal,
     check_paged_kv_cache_equal,
     generate_kv_cache_paged,
     generate_kv_cache_paged_list_tensors,
     generate_mla_kv_cache_paged_list_tensors,
 )
-import pytest
-import torch
-
-# First Party
-from lmcache_ascend.v1.memory_management import (
-    AscendPinMemoryAllocator as PinMemoryAllocator,
-)
-import lmcache.c_ops as lmc_ops
 
 
 def _tuple_kv_to_blob(
@@ -58,7 +61,7 @@ def _slice_kv_at(
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_extract_and_load_back(num_tokens):
-    device = "cuda"
+    device = "npu"
 
     num_blocks = 1000
     block_size = 16
@@ -158,7 +161,7 @@ def test_extract_and_load_back(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel(num_tokens):
-    device = "cuda"
+    device = "npu"
 
     num_blocks = 1000
     block_size = 16
@@ -214,9 +217,9 @@ def test_multi_layer_kernel(num_tokens):
     )
     for i in range(32):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
-
-    # NOTE (Gingfung): Ascend kernels require kv_cache_pointers to be on dev
-    kv_cache_pointers = kv_cache_pointers.cuda()
+    
+    # on ascend kv_cache_pointers need to be on device
+    kv_cache_pointers = kv_cache_pointers.npu()
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -259,9 +262,8 @@ def test_multi_layer_kernel(num_tokens):
     )
     for i in range(32):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
-
-    # NOTE (Gingfung): Ascend kernels require kv_cache_pointers to be on dev
-    kv_cache_pointers_new = kv_cache_pointers_new.cuda()
+    
+    kv_cache_pointers_new = kv_cache_pointers_new.npu()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -286,7 +288,7 @@ def test_multi_layer_kernel(num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel_use_mla(num_tokens):
-    device = "cuda"
+    device = "npu"
 
     num_blocks = 1000
     block_size = 64
@@ -338,9 +340,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     )
     for i in range(num_layers):
         kv_cache_pointers[i] = kv_cache[i].data_ptr()
-
-    # NOTE (Gingfung): Ascend kernels require kv_cache_pointers to be on dev
-    kv_cache_pointers = kv_cache_pointers.cuda()
+    
+    kv_cache_pointers = kv_cache_pointers.npu()
 
     memory_obj_new_list = []
     start_event = torch.cuda.Event(enable_timing=True)
@@ -389,9 +390,8 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     )
     for i in range(num_layers):
         kv_cache_pointers_new[i] = kv_cache_new[i].data_ptr()
-
-    # NOTE (Gingfung): Ascend kernels require kv_cache_pointers to be on dev
-    kv_cache_pointers_new = kv_cache_pointers_new.cuda()
+    
+    kv_cache_pointers_new = kv_cache_pointers_new.npu()
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
@@ -424,7 +424,7 @@ def test_multi_layer_kernel_use_mla(num_tokens):
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 @pytest.mark.parametrize("token_major", [True, False])
 def test_single_layer_kernel(num_tokens, token_major):
-    device = "cuda"
+    device = "npu"
 
     num_layers = 32
     num_blocks = 1000
@@ -454,19 +454,19 @@ def test_single_layer_kernel(num_tokens, token_major):
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache[layer_id][0],
-            kv_cache[layer_id][1],
+            kv_cache[layer_id],
             slot_mapping,
             True,
             token_major,
+            True,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache_new[layer_id][0],
-            kv_cache_new[layer_id][1],
+            kv_cache_new[layer_id],
             slot_mapping,
             False,
             token_major,
+            True,
         )
 
     check_paged_kv_cache_equal(

@@ -6,7 +6,8 @@
     // #pragma message("Undefining PROF_ERROR from ascend_hal.h before NPU headers")
     #undef PROF_ERROR
 #endif
-
+#include <iostream>
+#include <string>
 #include <sys/mman.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include "driver/ascend_hal_define.h"
@@ -28,7 +29,7 @@ bool is_version_at_least_25(const std::string& version_str);
 // Gets the current device offsetting on ASCEND_RT_VISIBLE_DEVICES when needed
 int get_device();
 // Uregisters the malloced hostPtr
-void unregisterPtr(void* ptr);
+void hal_host_unregister_ptr(void* ptr);
 // Swaps the host memory allocated to a tensor with the given hostPtr
 void swap_tensor_ptr(void* hostPtr, torch::Tensor& original_tensor);
 
@@ -56,30 +57,33 @@ void HostRegisteredMemoryManager::unregisterAll(){
 
 // Register a pointer through high level APIs (aclrt) return devPtr
 // Returns the created RegisteredMemoryRecord
-RegisteredMemoryRecord HostRegisteredMemoryManager::registerHostPtr(void* hostPtr, size_t bufferSize) { // torch::Tensor& tensor){
+RegisteredMemoryRecord* HostRegisteredMemoryManager::registerHostPtr(void* hostPtr, size_t bufferSize) { // torch::Tensor& tensor){
     TORCH_CHECK(!(hostPtr == nullptr || bufferSize == 0), "Error: hostPtr cannot be null and bufferSize must be greater than 0.");
     const std::unique_lock<std::shared_mutex> guard(this->mux);
 
     // Check if the host pointer is already registered
     if (this->allocatedMap.count(hostPtr)) {
-        return this->allocatedMap[hostPtr];
+        return &this->allocatedMap[hostPtr];
     }
     
     void* devPtr;
     aclError err = aclrtHostRegister(hostPtr, static_cast<uint64_t>(bufferSize), 
         ACL_HOST_REGISTER_MAPPED, (void**)&devPtr);
-    TORCH_CHECK(err == 0, "Unable to host register the host ptr: " + std::to_string(err));
+    if (err != ACL_SUCCESS) {
+        std::cerr << "Unable to aclrtHostRegister: " << err << std::endl;
+        return nullptr;
+    }
 
     this->allocatedMap.emplace(hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr), 
-            reinterpret_cast<uintptr_t>(devPtr), bufferSize});
+            reinterpret_cast<uintptr_t>(devPtr), bufferSize, -1});
 
-    return this->allocatedMap[hostPtr];
+    return &this->allocatedMap[hostPtr];
 };
 
 // Register a pointer through low level APIs (HAL). Allocates a new pinned host memory
 // This should be used for driver versions, where cannot rely on aclrtHostRegister()
 // Returns the created RegisteredMemoryRecord
-RegisteredMemoryRecord HostRegisteredMemoryManager::halRegisterHostPtr(size_t bufferSize){
+RegisteredMemoryRecord* HostRegisteredMemoryManager::halRegisterHostPtr(void* hostPtr, size_t bufferSize){
     // We allocate a new chunk of memory, register it, and replace the tensor.
     // Essentially, the halHostRegister function requires a ptr given by mmap.
     TORCH_CHECK((bufferSize >= 0), "Error: bufferSize must be greater than 0.");
@@ -87,14 +91,12 @@ RegisteredMemoryRecord HostRegisteredMemoryManager::halRegisterHostPtr(size_t bu
 
     void* devPtr;
     int device = get_device();
-    void* hostPtr;
-    // Allocate and register
-    hostPtr = mmap(nullptr, bufferSize, PROT_FLAGS, MAP_FLAGS, -1, 0);
-    TORCH_CHECK(hostPtr != MAP_FAILED, "Unable to alloc memory with mmap.");
-    auto ret = madvise(reinterpret_cast<void*>(hostPtr), bufferSize, MADV_HUGEPAGE);
     auto drvRet = halHostRegister((void*)hostPtr, static_cast<UINT64>(bufferSize),
         HOST_MEM_MAP_DEV_PCIE_TH, (UINT32)device, (void**)&devPtr);
-    TORCH_CHECK(drvRet == 0, "Unable to register host memory with hal: " + std::to_string(drvRet))
+    if (drvRet != 0) {
+        std::cerr << "Unable to halHostRegister: " << drvRet << std::endl;
+        return nullptr;
+    }
 
     // Lock the memory and fail if impossible to lock
     auto lockErr = mlock(reinterpret_cast<void*>(hostPtr), bufferSize);
@@ -110,20 +112,38 @@ RegisteredMemoryRecord HostRegisteredMemoryManager::halRegisterHostPtr(size_t bu
     }
     
     this->allocatedMap.emplace(hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr), 
-        reinterpret_cast<uintptr_t>(devPtr), bufferSize});
+        reinterpret_cast<uintptr_t>(devPtr), bufferSize, static_cast<int32_t>(device)});
 
-    return this->allocatedMap[hostPtr];
+    return &this->allocatedMap[hostPtr];
 };
 
-void HostRegisteredMemoryManager::unregisterMemory(void* hostPtr) {
+int HostRegisteredMemoryManager::aclUnregisterHostPtr(void* hostPtr) {
     TORCH_CHECK(hostPtr != nullptr, "Error: hostPtr cannot be null.");
     
     // we don't actually mind if it doesn't unregister, 
     // at context destroy it should be unregister anyway.
     const std::unique_lock<std::shared_mutex> guard(this->mux);
+    if (this->allocatedMap.count(hostPtr) == 0) {
+        // we probably did not register anyway
+        return 0;
+    }
     aclError err = aclrtHostUnregister(hostPtr);
     this->allocatedMap.erase(hostPtr);
+    return static_cast<int>(err);
 };
+
+int HostRegisteredMemoryManager::halUnregisterHostPtr(void* hostPtr) {
+    TORCH_CHECK(hostPtr != nullptr, "Error: hostPtr cannot be null.");
+    const std::unique_lock<std::shared_mutex> guard(this->mux);
+    if (this->allocatedMap.count(hostPtr) == 0) {
+        // we probably did not register anyway
+        return 0;
+    }
+    auto record = this->allocatedMap[hostPtr];
+    auto err = halHostUnregisterEx(reinterpret_cast<void*>(hostPtr), 
+            static_cast<UINT32>(record.device), HOST_MEM_MAP_DEV_PCIE_TH);
+    return static_cast<int>(err);
+}
 
 /*
 *    For now we only do a linear search as we probably won't have a long list of ptrs
@@ -260,7 +280,7 @@ int get_device(){
     return device;
 }
 
-void unregisterPtr(void* ptr) {
+void hal_host_unregister_ptr(void* ptr) {
     if (ptr){
         int device = get_device();
         auto& hmm = HostRegisteredMemoryManager::GetInstance();
@@ -286,7 +306,7 @@ void swap_tensor_ptr(void* hostPtr, torch::Tensor& original_tensor){
     int64_t numel = static_cast<int64_t>(original_tensor.nbytes());
     std::vector<int64_t> dims = {numel};
     torch::Tensor new_tensor_from_myptr = torch::from_blob(
-        hostPtr, dims, unregisterPtr, tensorOpsCpu);
+        hostPtr, dims, hal_host_unregister_ptr, tensorOpsCpu);
 
     original_tensor.set_(new_tensor_from_myptr.storage(), original_tensor.storage_offset(), 
         original_tensor.sizes(), original_tensor.strides());
@@ -294,8 +314,41 @@ void swap_tensor_ptr(void* hostPtr, torch::Tensor& original_tensor){
 
 } // namespace lmc
 
+/*
+* Caller should check whether this return nullptr for error handling.
+*/
+void* register_ptr(void* ptr, size_t size) {
+    // assumed this is a host ptr
+    TORCH_CHECK(ptr != nullptr, "ptr is a nullptr.");
+    auto& hmm = lmc::HostRegisteredMemoryManager::GetInstance();
+    std::string verString = lmc::get_driver_version();
+    lmc::RegisteredMemoryRecord* record;
 
-void* register_memory(torch::Tensor& tensor) {
+    if (lmc::is_version_at_least_25(verString)) { // New driver version, supports aclrtHostRegister()
+        record = hmm.registerHostPtr(ptr, size);
+    } else {
+        record = hmm.halRegisterHostPtr(ptr, size);
+    }
+
+    if (record == nullptr) {
+        return nullptr;
+    }
+
+    return reinterpret_cast<void*>(record->devptr);
+}
+
+int unregister_ptr(void* ptr) {
+    TORCH_CHECK(ptr != nullptr, "ptr is a nullptr.");
+    auto& hmm = lmc::HostRegisteredMemoryManager::GetInstance();
+    std::string verString = lmc::get_driver_version();
+    if (lmc::is_version_at_least_25(verString)) {
+        return hmm.aclUnregisterHostPtr(ptr);
+    } else {
+        return hmm.halUnregisterHostPtr(ptr);
+    }
+}
+
+void* register_tensor(torch::Tensor& tensor) {
     torch::Device device = tensor.device();
     if (!device.is_cpu() || !tensor.is_pinned()) {
         TORCH_CHECK(false, "Invalid device. Device must be CPU and tensor must be pinned.");
@@ -305,19 +358,30 @@ void* register_memory(torch::Tensor& tensor) {
     std::string verString = lmc::get_driver_version();
     if (lmc::is_version_at_least_25(verString)) { // New driver version, supports aclrtHostRegister()
         void* hostPtr = static_cast<void*>(tensor.data_ptr());
-        return (void*) hmm.registerHostPtr(hostPtr, tensorSize).devptr;
+        auto record = hmm.registerHostPtr(hostPtr, tensorSize);
+
+        return (void*) record->devptr;
     } else { // Old driver version, does not support aclrtHostRegister(), we have to use HAL.
         // We ask for a new registerd memory and substitute with the previously allocated.
-        lmc::RegisteredMemoryRecord record = hmm.halRegisterHostPtr(tensorSize);
-        lmc::swap_tensor_ptr((void*) record.ptr, tensor);
-        return (void*) record.devptr;
+        void* hostPtr;
+        // Allocate and register
+        hostPtr = mmap(nullptr, tensorSize, lmc::PROT_FLAGS, lmc::MAP_FLAGS, -1, 0);
+        TORCH_CHECK(hostPtr != MAP_FAILED, "Failed to mmap");
+        madvise(reinterpret_cast<void*>(hostPtr), tensorSize, MADV_HUGEPAGE);
+        auto record = hmm.halRegisterHostPtr(hostPtr, tensorSize);
+        if (record == nullptr) {
+            munmap(hostPtr, tensorSize);
+            TORCH_CHECK(false, "Failed to register memory");
+        }
+        lmc::swap_tensor_ptr((void*) record->ptr, tensor);
+        return (void*) record->devptr;
     }
 };
 
-void unregister_memory(torch::Tensor& tensor) {
+void unregister_tensor(torch::Tensor& tensor) {
     void* hostPtr = static_cast<void*>(tensor.data_ptr());
     auto& hmm = lmc::HostRegisteredMemoryManager::GetInstance();
-    hmm.unregisterMemory(hostPtr);
+    hmm.aclUnregisterHostPtr(hostPtr);
 };
 
 void* get_device_ptr(void* ptr) {
