@@ -10,6 +10,7 @@ struct RegisteredMemoryRecord {
     uintptr_t ptr;
     uintptr_t devptr;
     size_t buffSize;
+    int32_t device;
 };
 
 /* 
@@ -42,28 +43,33 @@ public:
     // Inputs: 
     // -hostPtr: host pointer of the allocated memory area to register on device
     // -bufferSize: size of the allocated memory area to register on device
-    RegisteredMemoryRecord  registerHostPtr(void* hostPtr, size_t bufferSize); //torch::Tensor& tensor); // 
+    RegisteredMemoryRecord*  registerHostPtr(void* hostPtr, size_t bufferSize); //torch::Tensor& tensor); // 
     // Register a pointer through low level APIs (hal)
     // This should be used for driver versions, where cannot rely on aclrtHostRegister()
     // Returns the created RegisteredMemoryRecord
     // Inputs: 
+    // -hostPtr: host pointer of the allocated memory area to register on device
     // -bufferSize: size of the allocated memory area to register on device
-    RegisteredMemoryRecord  halRegisterHostPtr(size_t bufferSize);
-    void                    unregisterMemory(void* hostPtr);
+    RegisteredMemoryRecord*  halRegisterHostPtr(void* hostPtr, size_t bufferSize);
+    int                    aclUnregisterHostPtr(void* hostPtr);
+    int                    halUnregisterHostPtr(void* hostPtr);
     void*                   getDevicePtr(void* hostPtr);
     size_t                  getRecordSize(void* hostPtr);
     void                    unregisterAll();
 };
 } // namespace lmc
 
+void* register_ptr(void* ptr, size_t size);
+int unregister_ptr(void* ptr);
+
 // Register a tensor on the current device
 // Inputs: 
 // -tensor: The tensor to register on the device
 // Returns the device ptr for that tensor
-void* register_memory(torch::Tensor& tensor);
+void* register_tensor(torch::Tensor& tensor);
 // Reverse of register
 // Inputs: 
 // -tensor: The tensor to register on the device
-void  unregister_memory(torch::Tensor& tensor);
+void  unregister_tensor(torch::Tensor& tensor);
 // Takes in input a host pointer, returns the corresponding device pointer
 void* get_device_ptr(void* ptr);

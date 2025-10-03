@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.16.0)
 project(c_ops)
 
 set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LMC_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
@@ -54,6 +55,7 @@ target_link_libraries(
   platform
   ascend_hal
   tiling_api
+  numa
 )
 
 
