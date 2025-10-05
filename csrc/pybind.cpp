@@ -15,6 +15,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(c_ops, m) {
   m.def("host_register", &register_tensor);
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+  m.def("multi_layer_kv_transfer_v2", &multi_layer_kv_transfer_v2);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
