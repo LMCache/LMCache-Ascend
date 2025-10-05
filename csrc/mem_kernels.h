@@ -11,6 +11,12 @@ void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache_ops::A
                                     const int32_t numLayers, const int64_t pageBuffSize, const int32_t numTokensChunk, 
                                     const bool page2L);
 
+void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, uint32_t blockDim, 
+                                    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 
+                                    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs, 
+                                    const int32_t numLayers, const int64_t pageBuffSize, const int32_t numTokensChunk, 
+                                    const bool page2L);
+
 void single_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, 
                                      uint32_t blockDim, void *stream, uint8_t *dstCacheTensor, 
                                      uint8_t *keyCachePtr, uint8_t *valueCachePtr,
@@ -26,6 +32,14 @@ void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_ops::As
 
 
 void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
+                             const torch::Tensor& key_value_ptrs, // [num_layers]
+                             const torch::Tensor& slot_mapping, // [num_tokens]
+                             const torch::Device& paged_memory_device,
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla);
+
+
+void multi_layer_kv_transfer_v2(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
                              const torch::Tensor& key_value_ptrs, // [num_layers]
                              const torch::Tensor& slot_mapping, // [num_tokens]
                              const torch::Device& paged_memory_device,
