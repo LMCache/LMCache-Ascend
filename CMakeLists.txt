@@ -8,10 +8,16 @@ project(c_ops)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LMC_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
+# TODO: remove in newer torch_npu ver.
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=0)
 
+set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
+
+# for the device kernels compilation
 set(SOC_VERSION ${SOC_VERSION})
 set(ARCH ${ARCH})
+# custom compile definition for kernels hostside compilation
+set(ASCEND_AICORE_ARCH ${ASCEND_AICORE_ARCH})
 
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRINGS "Build type Release/Debug (default Release)" FORCE)
