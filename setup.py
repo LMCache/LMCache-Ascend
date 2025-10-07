@@ -16,6 +16,7 @@ import sysconfig
 import subprocess
 import platform
 import shutil
+import configparser 
 
 
 ROOT_DIR = Path(__file__).parent
@@ -59,6 +60,24 @@ def _get_npu_soc():
             raise RuntimeError(f"Retrieve SoC version failed: {e}")
     return _soc_version
 
+def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
+    platform_config_path = os.path.join(ascend_path, f"{host_arch}-linux/data/platform_config")
+    ini_file = os.path.join(platform_config_path, f"{soc_version}.ini")
+
+    if not os.path.exists(ini_file):
+        raise ValueError(f"The file '{ini_file}' is not found, please check your SOC_VERSION")
+
+    # read the file and extract
+    logger.info(f"Extracting AIC Version from: {ini_file}")
+    cp = configparser.ConfigParser()
+    cp.read(ini_file)
+
+    aic_version = cp.get("version", "AIC_version")
+    logger.info(f"AIC Version: {aic_version}")
+
+    version_number = aic_version.split("-")[-1]
+    return version_number
+
 class custom_build_info(build_py):
 
     def run(self):
@@ -100,6 +119,8 @@ class CustomAscendCmakeBuildExt(build_ext):
         ascend_home_path = _get_ascend_home_path()
         env_path = _get_ascend_env_path()
         _soc_version = _get_npu_soc()
+        arch = platform.machine()
+        _aicore_arch = _get_aicore_arch_number(ascend_home_path, _soc_version, arch)
         _cxx_compiler = os.getenv("CXX")
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
@@ -127,7 +148,6 @@ class CustomAscendCmakeBuildExt(build_ext):
         # python include
         python_include_path = sysconfig.get_path("include", scheme="posix_prefix")
 
-        arch = platform.machine()
         install_path = os.path.join(BUILD_OPS_DIR, "install")
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
@@ -136,6 +156,7 @@ class CustomAscendCmakeBuildExt(build_ext):
             f"source {env_path} && "
             f"cmake -S {ROOT_DIR} -B {BUILD_OPS_DIR}"
             f"  -DSOC_VERSION={_soc_version}"
+            f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
             f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
