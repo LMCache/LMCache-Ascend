@@ -68,7 +68,7 @@ def test_extract_and_load_back(num_tokens):
     num_heads = 8
     head_size = 128
     dtype = torch.bfloat16
-    kv_cache = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
+    kv_cache = generate_kv_cache_paged(num_blocks, device, 32, num_heads, head_size, block_size, dtype)
 
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
@@ -137,7 +137,7 @@ def test_extract_and_load_back(num_tokens):
     )
 
     # Generate new paged kv_cache
-    kv_cache_new = generate_kv_cache_paged(num_blocks, device, block_size, dtype)
+    kv_cache_new = generate_kv_cache_paged(num_blocks, device, 32, num_heads, head_size, block_size, dtype)
 
     # New load back (zero-copy kernels)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
@@ -440,10 +440,10 @@ def test_single_layer_kernel(num_tokens, token_major):
     hidden_dim_size = num_heads * head_size
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, block_size, dtype
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
