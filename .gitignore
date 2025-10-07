@@ -5,6 +5,7 @@ build
 *.pyc
 .pytest_cache
 .env
+_build_info.py
 
 # Ascend Specific
 fusion_result.json
