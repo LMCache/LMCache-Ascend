@@ -68,18 +68,19 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, num_layers, num_heads, head_size, block_size=16, dtype=torch.bfloat16, use_mla=False
+    num_blocks, device, num_layers, num_heads, head_size, block_size=16, 
+    dtype=torch.bfloat16, use_mla=False, vllm_two_major=True,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
     where KV are in the same tensor
     """
     ret = []
-    n_heads = 1 if use_mla else num_heads
+    vllm_shapes = [2, num_blocks, block_size, num_heads, head_size] if vllm_two_major else [num_blocks, 2, block_size, num_heads, head_size]
     shape = (
         [num_blocks, block_size, head_size]
         if use_mla
-        else [2, num_blocks, block_size, n_heads, head_size]
+        else vllm_shapes
     )
 
     for i in range(num_layers):
@@ -191,13 +192,17 @@ def check_mem_obj_equal(left, right):
         assert (left_v[:, :, :] == right_v[:, :, :]).all()
 
 
-def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128):
+def check_paged_kv_cache_equal(left, right, slot_mapping, num_heads=8, head_size=128, vllm_two_major=True):
     """
     check whether two paged kv caches are the same at slot_mapping
     """
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
+        if not vllm_two_major:
+            left_kv = left_kv.transpose(0, 1)
+            right_kv = right_kv.transpose(0, 1)
+        
         left_k = left_kv[0].reshape(-1, num_heads, head_size)
         left_v = left_kv[1].reshape(-1, num_heads, head_size)
         right_k = right_kv[0].reshape(-1, num_heads, head_size)
