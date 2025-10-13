@@ -59,7 +59,8 @@ def init_lmcache_engine(
     :rtype: LMCacheEngine
     """
     
-    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+    curr_engine = LMCacheEngineBuilder.get(ENGINE_NAME)
+    if curr_engine:
         return curr_engine
 
     model_config = vllm_config.model_config
