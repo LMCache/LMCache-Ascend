@@ -427,36 +427,39 @@ def test_multi_layer_kernel_use_mla(num_tokens):
     mem_allocator.close()
 
 
+# TODO: MLA is not supported for layerwise yet
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("num_blocks", [1000])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_heads", [8, 1])
+@pytest.mark.parametrize("head_size", [128])
 @pytest.mark.parametrize("token_major", [True, False])
-def test_single_layer_kernel(num_tokens, token_major):
+@pytest.mark.parametrize("vllm_two_major", [True, False])
+def test_single_layer_kernel(num_tokens, num_layers, num_blocks, 
+                             block_size, num_heads, head_size, token_major, vllm_two_major):
     device = "npu"
-
-    num_layers = 32
-    num_blocks = 1000
-    block_size = 16
-    num_heads = 8
-    head_size = 128
+    kvs = 2
     hidden_dim_size = num_heads * head_size
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype, vllm_two_major=vllm_two_major
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype, vllm_two_major=vllm_two_major
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
     slot_mapping = torch.tensor(slot_mapping, device=device)
 
     if token_major:
         tmp_gpu_buffer = torch.empty(
-            (num_tokens, 2, hidden_dim_size), dtype=dtype, device=device
+            (num_tokens, kvs, hidden_dim_size), dtype=dtype, device=device
         )
     else:
         tmp_gpu_buffer = torch.empty(
-            (2, num_tokens, hidden_dim_size), dtype=dtype, device=device
+            (kvs, num_tokens, hidden_dim_size), dtype=dtype, device=device
         )
-
+    
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -464,7 +467,7 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             True,
             token_major,
-            True,
+            vllm_two_major,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
@@ -472,11 +475,14 @@ def test_single_layer_kernel(num_tokens, token_major):
             slot_mapping,
             False,
             token_major,
-            True,
+            vllm_two_major,
         )
-
+    torch.npu.synchronize()
     check_paged_kv_cache_equal(
         kv_cache,
         kv_cache_new,
         slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
+        vllm_two_major=vllm_two_major
     )
