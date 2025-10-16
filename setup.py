@@ -229,7 +229,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         for so_file in so_files:
             logger.info(f"  - {so_file}")
 
-        # Copy each file (same copying logic as above)
+        # Copy each file with improved path validation and duplicate handling compared to previous implementation
         for src_path in so_files:
             filename = os.path.basename(src_path)
             dst_path = os.path.join(os.path.dirname(build_lib_dir), filename)
