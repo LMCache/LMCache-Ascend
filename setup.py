@@ -17,7 +17,7 @@ import subprocess
 import platform
 import shutil
 import configparser 
-
+import glob
 
 ROOT_DIR = Path(__file__).parent
 
@@ -194,23 +194,62 @@ class CustomAscendCmakeBuildExt(build_ext):
         package_name = ext.name.split(".")[0]  # e.g., 'lmcache'
         src_dir = os.path.join(ROOT_DIR, package_name)
 
-        for root, _, files in os.walk(install_path):
-            for file in files:
-                if file.endswith(".so"):
-                    src_path = os.path.join(root, file)
-                    dst_path = os.path.join(os.path.dirname(build_lib_dir), file)
-                    if os.path.exists(dst_path):
-                        os.remove(dst_path)
+        # Expected file patterns (using glob patterns for flexibility)
+        expected_patterns = [
+            "c_ops*.so", 
+            "libcache_kernels.so"
+        ]
 
-                    if isinstance(
-                        self.distribution.get_command_obj("develop"), develop
-                    ):
-                        # For the ascend kernels
-                        src_dir_file = os.path.join(src_dir, file)
-                        shutil.copy(src_path, src_dir_file)
-                    shutil.copy(src_path, dst_path)
+        # Search for files matching our patterns
+        so_files = []
+        for pattern in expected_patterns:
+            # Search in main directory and common subdirectories
+            search_paths = [
+                install_path,
+                os.path.join(install_path, "lib"),
+                os.path.join(install_path, "lib64")
+            ]
+            
+            for search_path in search_paths:
+                if os.path.exists(search_path):
+                    matches = glob.glob(os.path.join(search_path, pattern))
+                    so_files.extend(matches)
 
-                    logger.info(f"Copied {file} to {dst_path}")
+        # For develop mode, also copy to source directory
+        is_develop_mode = isinstance(
+            self.distribution.get_command_obj("develop"), develop
+        )
+        # Remove duplicates
+        so_files = list(dict.fromkeys(so_files))
+
+        if not so_files:
+            raise RuntimeError(f"No .so files found matching patterns {expected_patterns}")
+
+        logger.info(f"Found {len(so_files)} .so files:")
+        for so_file in so_files:
+            logger.info(f"  - {so_file}")
+
+        # Copy each file (same copying logic as above)
+        for src_path in so_files:
+            filename = os.path.basename(src_path)
+            dst_path = os.path.join(os.path.dirname(build_lib_dir), filename)
+            
+            if os.path.abspath(src_path) != os.path.abspath(dst_path):
+                if os.path.exists(dst_path):
+                    os.remove(dst_path)
+                shutil.copy2(src_path, dst_path)
+                logger.info(f"Copied {filename} to {dst_path}")
+            
+            if is_develop_mode:
+                src_dir_file = os.path.join(src_dir, filename)
+                if os.path.abspath(src_path) != os.path.abspath(src_dir_file):
+                    if os.path.exists(src_dir_file):
+                        os.remove(src_dir_file)
+                    shutil.copy2(src_path, src_dir_file)
+                    logger.info(f"Copied {filename} to source directory: {src_dir_file}")
+
+        logger.info("All files copied successfully")
+
 
 
 def ascend_extension():
