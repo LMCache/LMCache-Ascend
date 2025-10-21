@@ -6,7 +6,7 @@ def _hash_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
         prefix_hash: Optional[int] = None,
-        extra_keys: Optional[list[Any]] = None,
+        extra_keys: Optional[List[Any]] = None,
     ) -> int:
         if isinstance(tokens, torch.Tensor):
             tokens_tuple = tuple(tokens.cpu().tolist())
