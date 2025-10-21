@@ -17,3 +17,9 @@ LMCBlenderBuilder.get_or_create = partial(get_or_create_blender, LMCBlenderBuild
 
 import lmcache.integration.vllm.vllm_v1_adapter
 lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = ascend_init_lmcache_engine
+
+# On OpenEuler and python3.10, the _hash_tokens func hash(None) seems to run into
+# ASLR lead to non-deterministic hashing for builtin hash
+import lmcache.v1.token_database
+from lmcache_ascend.v1.tokens_hash import _hash_tokens
+lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
