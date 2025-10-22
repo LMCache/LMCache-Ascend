@@ -43,21 +43,54 @@ def _get_ascend_env_path():
 
 
 def _get_npu_soc():
-    _soc_version = os.getenv("SOC_VERSION", None)
-    if _soc_version is None:
-        npu_smi_cmd = [
-            "bash",
-            "-c",
-            "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
-        ]
-        try:
-            _soc_version = subprocess.check_output(npu_smi_cmd, text=True).strip()
-            _soc_version = _soc_version.split("-")[0]
-            _soc_version = "Ascend" + _soc_version
-            return _soc_version
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrieve SoC version failed: {e}")
-    return _soc_version
+    """
+    Retrieves the NPU SoC version by parsing the output of the npu-smi command.
+
+    This function handles two known output formats:
+    1. Standard format with "Chip Name" (e.g., Ascend910B4).
+    2. A newer format with both "Chip Name" and "NPU Name" (e.g., Ascend910_9392).
+
+    Returns:
+        str: The determined SoC version string.
+    
+    Raises:
+        RuntimeError: If the npu-smi command fails or the output is malformed.
+    """
+    _soc_version = os.getenv("SOC_VERSION")
+    if _soc_version:
+        return _soc_version
+
+    try:
+        npu_smi_cmd = ["npu-smi", "info", "-t", "board", "-i", "0", "-c", "0"]
+        full_output = subprocess.check_output(npu_smi_cmd, text=True)
+
+        npu_info = {}
+        for line in full_output.strip().splitlines():
+            if ':' in line:
+                key, value = line.split(':', 1)
+                npu_info[key.strip()] = value.strip()
+
+        chip_name = npu_info.get("Chip Name", None)
+        npu_name = npu_info.get("NPU Name", None)
+
+        if not chip_name:
+            raise RuntimeError("Could not find 'Chip Name' in npu-smi output.")
+
+        if npu_name:
+            # New Format for npu-smi info on 910C machines: "Ascend910_9392"
+            _soc_version = f"{chip_name}_{npu_name}"
+        else:
+            # Old Format for npu-smi info on 910B machines: "Ascend910B4"
+            _soc_version = "Ascend" + chip_name
+
+        return _soc_version
+
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(f"Failed to execute npu-smi command and retrieve SoC version: {e}")
+    except RuntimeError as e:
+        # Re-raise the RuntimeError from our parsing logic
+        raise e
+
 
 class custom_build_info(build_py):
 
