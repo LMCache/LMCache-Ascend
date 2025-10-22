@@ -81,7 +81,10 @@ def _get_npu_soc():
             _soc_version = f"{chip_name}_{npu_name}"
         else:
             # Old Format for npu-smi info on 910B machines: "Ascend910B4"
-            _soc_version = "Ascend" + chip_name
+            if chip_name.startswith("Ascend"):
+                _soc_version = chip_name
+            else:
+                _soc_version = "Ascend" + chip_name
 
         return _soc_version
 
