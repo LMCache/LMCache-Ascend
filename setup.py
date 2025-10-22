@@ -87,11 +87,6 @@ def _get_npu_soc():
 
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         raise RuntimeError(f"Failed to execute npu-smi command and retrieve SoC version: {e}")
-    except RuntimeError as e:
-        # Re-raise the RuntimeError from our parsing logic
-        raise e
-
-
 class custom_build_info(build_py):
 
     def run(self):
