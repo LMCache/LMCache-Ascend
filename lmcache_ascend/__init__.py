@@ -23,3 +23,10 @@ lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = ascend_init_lmca
 import lmcache.v1.token_database
 from lmcache_ascend.v1.tokens_hash import _hash_tokens
 lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
+
+# Patching this as on some Ascend machines the kernel can set the NUMA node to
+# -1. If propagated in the NUMA mapping, this can cause failures to the caller.
+# The patch sanitizes negative values with None, and is up to the caller to handle it.
+import lmcache.v1.system_detection
+from lmcache_ascend.v1.system_detection import _read_from_sys
+lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys

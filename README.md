@@ -57,8 +57,8 @@ docker run -it \
     --privileged \
     --cap-add=SYS_RESOURCE \
     --cap-add=IPC_LOCK \
-    --port 8000:8000 \
-    --port 8001:8001 \
+    -p 8000:8000 \
+    -p 8001:8001 \
     --name lmcache-ascend-dev \
     -e ASCEND_VISIBLE_DEVICES=${DEVICE_LIST} \
     -e ASCEND_RT_VISIBLE_DEVICES=${DEVICE_LIST} \
