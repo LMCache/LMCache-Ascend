@@ -17,8 +17,10 @@ uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
         throw std::runtime_error("aclrtMallocHost failed: " + std::to_string(err));
     }
 
-    const char* socVersion = std::getenv("SOC_VERSION");
+    const char* socVersion = aclrtGetSocName();
 
+    // nullptr means that the chip version failed to be obtained. We cannot be sure about the
+    // version of the device. Unless we are sure that we deal with a 310 device, we try to register.
     if (socVersion == nullptr || std::string(socVersion).find("310") == std::string::npos) {
         // not 310p
         auto devPtr = register_ptr(ptr, size);
