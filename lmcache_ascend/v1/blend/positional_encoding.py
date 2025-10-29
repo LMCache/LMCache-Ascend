@@ -63,7 +63,7 @@ class FusedRope:
 
     def fused_encode(self, old_positions, new_positions, k):
         num_tokens = k.shape[0]
-        k = k.view(num_tokens, -1, self.head_size)
+        # k = k.view(num_tokens, -1, self.head_size)
         lmc_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
@@ -72,29 +72,7 @@ class FusedRope:
             self.cos_sin_cache.to(k.device),
             self.is_neox_style,
         )
-        k = k.view(num_tokens, -1)
-        return k
-
-    def __call__(self, old_positions, new_positions, k):
-        return self.fused_encode(old_positions, new_positions, k)
-
-class DummyFusedRope:
-    """
-    Directly use the fused kernel to ratate K cache from
-    the old positions to the new positions.
-    """
-
-    def __init__(self, rope, reverse_rope, is_neox_style):
-        self.rope = rope
-        self.reverse_rope = reverse_rope
-        self.is_neox_style = is_neox_style
-        self.head_size = rope.head_size
-        self.cos_sin_cache = rope.cos_sin_cache
-
-    def fused_encode(self, old_positions, new_positions, k):
-        q = torch.zeros_like(k)
-        q, k = self.reverse_rope(old_positions, q, k)
-        q, k = self.rope(new_positions, q, k)
+        # k = k.view(num_tokens, -1)
         return k
 
     def __call__(self, old_positions, new_positions, k):
@@ -158,7 +136,7 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
 
     max_k_error_fused = (k_pos2 - k_pos2_fused).abs().max()
 
-    logger.info(f"Max K error (fused): {max_k_error.item()}")
+    logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
 
     return max_q_error < 0.1 and max_k_error < 0.1 and max_k_error_fused < 0.1
 
@@ -202,8 +180,7 @@ def get_fused_rope(
     )
 
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
-    # fused_rope = FusedRope(rope, is_neox_style)
-    fused_rope = DummyFusedRope(rope, reverse_rope, is_neox_style)
+    fused_rope = FusedRope(rope, is_neox_style)
 
     correct = validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size)
     if not correct:
