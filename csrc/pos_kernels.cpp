@@ -83,7 +83,6 @@ void ComputeTilingParams(TilingParams& params, const at::Tensor& key, const at::
     ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSizePlatform);
     uint64_t maxUbSize = std::min(ubSizePlatform, static_cast<uint64_t>(UB_SIZE)); 
 
-    uint64_t dtypeSize = FP32_DTYPE_SIZE;
     GetDtypeInfo(key, params.tilingKey);
 
     uint64_t totalDataNum = params.numTokens;
@@ -95,8 +94,8 @@ void ComputeTilingParams(TilingParams& params, const at::Tensor& key, const at::
     uint64_t numHeadsMax = params.numHeads;
 
     uint64_t perTokenUbSize = params.isNeoxStyle == 1 ?
-        (numHeadsMax * (params.rotaryDim * 10 + params.headSize) * dtypeSize) :
-        (numHeadsMax * (params.rotaryDim * 12 + params.headSize) * dtypeSize);
+        (numHeadsMax * (params.rotaryDim * 10 + params.headSize) * FP32_DTYPE_SIZE) :
+        (numHeadsMax * (params.rotaryDim * 12 + params.headSize) * FP32_DTYPE_SIZE);
     uint64_t maxNPerLoopForUb = (perTokenUbSize == 0) ? 0 : (maxUbSize / perTokenUbSize);
     maxNPerLoopForUb = std::max(maxNPerLoopForUb, static_cast<uint64_t>(1));
 
@@ -138,7 +137,6 @@ void rotary_embedding_k_fused(
     uint8_t* keyOutPtr = keyPtr;
 
     auto aclStream = c10_npu::getCurrentNPUStream().stream();
-    const char* socName = aclrtGetSocName();
 
     at_npu::native::OpCommand cmd;
     cmd.Name("fused_rope");

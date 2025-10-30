@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Optional, Dict, Any, Callable, List
+from typing import Callable, List
 
 # Third Party
 import pytest
@@ -20,7 +20,7 @@ from lmcache_ascend.v1.blend.positional_encoding import (
 
 class DummyFusedRope:
     """
-    Directly use the fused kernel to ratate K cache from
+    Directly use the fused kernel to rotate K cache from
     the old positions to the new positions.
     """
 
