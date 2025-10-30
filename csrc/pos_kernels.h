@@ -2,7 +2,7 @@
 #include <ATen/ATen.h>
 #include <torch/torch.h>
 #include <torch/extension.h>
-#include "managed_mem.h"
+#include "utils.h"
 
 namespace kvcache_ops{
 

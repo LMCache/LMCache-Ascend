@@ -18,22 +18,26 @@
 #include "kernels/types.h"
 #include <c10/core/ScalarType.h>
 #include <torch/torch.h>
+#include "managed_mem.h"
 
 namespace vllm_ascend {
-kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType)
-{
-    if (scalarType == at::ScalarType::Float) {
-        return kvcache_ops::AscendType::FP32;
-    } else if (scalarType == at::ScalarType::BFloat16) {
-        return kvcache_ops::AscendType::BF16;
-    } else if (scalarType == at::ScalarType::Half) {
-        return kvcache_ops::AscendType::FP16;
-    } else if (scalarType == at::ScalarType::Long) {
-        return kvcache_ops::AscendType::INT64;
-    } else if (scalarType == at::ScalarType::Int) {
-        return kvcache_ops::AscendType::INT32;
-    } else {
-        TORCH_CHECK(false, "ScalarType not supported.");
-    }
-};
+    kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType);
 } // namespace vllm_ascend
+
+
+template <typename T, typename TENSOR_TYPE>
+T* get_kernel_ptr(TENSOR_TYPE& tensor) {
+    torch::Device device = tensor.device();
+    // NPU should be using PrivateUse1
+    if (device.is_privateuseone() || device.is_cuda()) {
+        return static_cast<T*>(tensor.data_ptr());
+    } else if (device.is_cpu()) {
+        // find device ptr based on the host pinned ptr
+        // because acl does not currently support HostGetDevicePointer API
+        void* devPtr = get_device_ptr(tensor.data_ptr());
+        TORCH_CHECK(devPtr != nullptr, "Unable to retrieve device ptr, is this a host registered pointer ?");
+        return reinterpret_cast<T*>(devPtr);
+    } else {
+        TORCH_CHECK(false, "Invalid device. Device must be ascend (PrivateUseOne) or pinned cpu.");
+    }
+}

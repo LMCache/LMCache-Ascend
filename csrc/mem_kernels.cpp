@@ -8,22 +8,6 @@
 #include <pybind11/pybind11.h>
 #include <Python.h>
 
-template <typename T, typename TENSOR_TYPE>
-T* get_kernel_ptr(TENSOR_TYPE& tensor) {
-    torch::Device device = tensor.device();
-    // NPU should be using PrivateUse1
-    if (device.is_privateuseone() || device.is_cuda()) {
-        return static_cast<T*>(tensor.data_ptr());
-    } else if (device.is_cpu()) {
-        // find device ptr based on the host pinned ptr
-        // because acl does not currently support HostGetDevicePointer API
-        void* devPtr = get_device_ptr(tensor.data_ptr());
-        TORCH_CHECK(devPtr != nullptr, "Unable to retrieve device ptr, is this a host registered pointer ?");
-        return reinterpret_cast<T*>(devPtr);
-    } else {
-        TORCH_CHECK(false, "Invalid device. Device must be ascend (PrivateUseOne) or pinned cpu.");
-    }
-}
 
 /**
  * Quickly offload KV cache from vLLM paged memory to the offloading buffer

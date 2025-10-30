@@ -9,21 +9,6 @@ namespace py = pybind11;
 
 namespace {
 
-constexpr uint32_t new_POSITION_INDEX = 0;
-constexpr uint32_t old_POSITION_INDEX = 1;
-constexpr uint32_t INPUT_KEY_IN_INDEX = 2;
-constexpr uint32_t INPUT_COSSINCACHE_INDEX = 3;
-
-constexpr uint32_t INPUT_KSTRIDE_INDEX = 0;
-constexpr uint32_t INPUT_IS_NEOXSTYLE_INDEX = 1;
-constexpr uint32_t INPUT_NUM_kHEADS_INDEX = 2;
-
-constexpr uint32_t INDEX_KEYOUT_OUTPUT = 0;
-
-static constexpr uint32_t TILING_BF16 = 20;
-static constexpr uint32_t TILING_FP16 = 21;
-static constexpr uint32_t TILING_FP32 = 22;
-
 constexpr uint32_t CORE_ALLOC_TOKENS_THRESHOLD = 4000;
 constexpr uint32_t CORE_NUM_SMALL_TOKENS = 8;
 constexpr uint32_t CORE_NUM_LARGE_TOKENS = 16;
@@ -58,14 +43,13 @@ struct TilingParams {
 
 
 void GetDtypeInfo(const at::Tensor& key, uint64_t& tilingKey) {
-    if (key.scalar_type() == at::ScalarType::BFloat16) {
-        tilingKey = TILING_BF16;
-    } else if (key.scalar_type() == at::ScalarType::Half) {
-        tilingKey = TILING_FP16;
-    } else if (key.scalar_type() == at::ScalarType::Float) {
-        tilingKey = TILING_FP32;
-    } else {
-        throw std::invalid_argument("Unavailable tensor type, only support BF16/FP16/FP32");
+    auto ascendType = vllm_ascend::get_dtype_from_torch(key.scalar_type());
+    tilingKey = static_cast<uint64_t>(ascendType);
+
+    if (ascendType != kvcache_ops::AscendType::BF16 &&
+        ascendType != kvcache_ops::AscendType::FP16 &&
+        ascendType != kvcache_ops::AscendType::FP32) {
+        throw std::invalid_argument("Unavailable tensor type for RoPE Tiling (only support BF16/FP16/FP32).");
     }
 }
 
@@ -132,24 +116,6 @@ void ComputeTilingParams(TilingParams& params, const at::Tensor& key, const at::
 }
 
 
-template <typename T, typename TENSOR_TYPE>
-T* GetPtr(TENSOR_TYPE& tensor) {
-    torch::Device device = tensor.device();
-    // NPU should be using PrivateUse1
-    if (device.is_privateuseone() || device.is_cuda()) {
-        return static_cast<T*>(tensor.data_ptr());
-    } else if (device.is_cpu()) {
-        // find device ptr based on the host pinned ptr
-        // because acl does not currently support HostGetDevicePointer API
-        void* devPtr = get_device_ptr(tensor.data_ptr());
-        TORCH_CHECK(devPtr != nullptr, "Unable to retrieve device ptr, is this a host registered pointer ?");
-        return reinterpret_cast<T*>(devPtr);
-    } else {
-        TORCH_CHECK(false, "Invalid device. Device must be ascend (PrivateUseOne) or pinned cpu.");
-    }
-}
-
-
 void rotary_embedding_k_fused(
     torch::Tensor& oldPositions,
     torch::Tensor& newPositions,
@@ -165,10 +131,10 @@ void rotary_embedding_k_fused(
 
     ComputeTilingParams(params, key, cosSinCache);
 
-    uint8_t* oldPositionsPtr = GetPtr<uint8_t, torch::Tensor>(oldPositions);
-    uint8_t* newPositionsPtr = GetPtr<uint8_t, torch::Tensor>(newPositions);
-    uint8_t* keyPtr = GetPtr<uint8_t, torch::Tensor>(key);
-    uint8_t* cosSinCachePtr = GetPtr<uint8_t, torch::Tensor>(cosSinCache);
+    uint8_t* oldPositionsPtr = get_kernel_ptr<uint8_t, torch::Tensor>(oldPositions);
+    uint8_t* newPositionsPtr = get_kernel_ptr<uint8_t, torch::Tensor>(newPositions);
+    uint8_t* keyPtr = get_kernel_ptr<uint8_t, torch::Tensor>(key);
+    uint8_t* cosSinCachePtr = get_kernel_ptr<uint8_t, torch::Tensor>(cosSinCache);
     uint8_t* keyOutPtr = keyPtr;
 
     auto aclStream = c10_npu::getCurrentNPUStream().stream();
