@@ -1,14 +1,17 @@
 <div align="center">
   <p align="center">
-    <img src="https://raw.githubusercontent.com/LMCache/LMCache/dev/asset/logo.png" width="720" alt="lmcache logo">
+    <img src="https://raw.githubusercontent.com/LMCache/LMCache-Ascend/main/docs/logos/lmcache-ascend-logo.png" width="720" alt="lmcache-ascend logo">
   </p>
   <h3 align="center">
   LMCache-Ascend Plugin
   </h3>
 
   <p align="center">
-  | <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://blog.lmcache.ai/"><b> LMCache Blog</b></a> 
-| <a href="https://docs.lmcache.ai/"><b>Documentation</b></a> | <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-36x1m765z-8FgDA_73vcXtlZ_4XvpE6Q"><b> Slack</b></a>
+  | <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a>
+  | <a href="https://blog.lmcache.ai/"><b> LMCache Blog</b></a> 
+  | <a href="https://docs.lmcache.ai/"><b>Documentation</b></a> 
+  | <a href="https://join.slack.com/t/lmcacheworkspace/shared_invite/zt-36x1m765z-8FgDA_73vcXtlZ_4XvpE6Q"><b> Slack</b></a>
+  | <a href="https://deepwiki.com/LMCache/LMCache-Ascend"><b>LMCache-Ascend Wiki</b></a>
   </p>
 </div>
 
@@ -111,12 +114,16 @@ python3 -m pip install -v -e /workspace/vllm-ascend/ --extra-index https://downl
 
 3. Clone and Install LMCache Repo
 
+- from pip
+```bash
+NO_CUDA_EXT=1 pip install lmcache==0.3.7
+```
+
+- from source
 ```bash
 LMCACHE_REPO=https://github.com/LMCache/LMCache.git
-LMCACHE_TAG=v0.3.3
+LMCACHE_TAG=v0.3.7
 git clone --depth 1 $LMCACHE_REPO --branch $LMCACHE_TAG /workspace/LMCache
-# our build is based on arm64
-sed -i "s/^infinistore$/infinistore; platform_machine == 'x86_64'/" /workspace/LMCache/requirements/common.txt
 export NO_CUDA_EXT=1 && python3 -m pip install -v -e /workspace/LMCache
 ```
 
