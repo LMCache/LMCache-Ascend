@@ -6,7 +6,9 @@ build
 .pytest_cache
 .env
 _build_info.py
+.vscode
 
 # Ascend Specific
 fusion_result.json
 kernel_meta
+
