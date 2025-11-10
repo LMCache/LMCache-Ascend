@@ -59,7 +59,7 @@ def _get_npu_soc():
     """
     _soc_version = os.getenv("SOC_VERSION")
     if _soc_version:
-        return _soc_version
+        return "Ascend" + _soc_version[6:] if _soc_version.lower().startswith("ascend") else _soc_version
 
     try:
         npu_smi_cmd = ["npu-smi", "info", "-t", "board", "-i", "0", "-c", "0"]
