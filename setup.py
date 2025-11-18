@@ -183,6 +183,8 @@ class CustomAscendCmakeBuildExt(build_ext):
         install_path = os.path.join(BUILD_OPS_DIR, "install")
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
+        
+        torch_cxx11_abi = 1 if torch.compiled_with_cxx11_abi() else 0
 
         cmake_cmd = [
             f"source {env_path} && "
@@ -191,6 +193,7 @@ class CustomAscendCmakeBuildExt(build_ext):
             f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
             f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
+            f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
             f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"
             f"  -DCMAKE_BUILD_TYPE=Release"
