@@ -184,7 +184,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
         
-        torch_cxx11_abi = 1 if torch.compiled_with_cxx11_abi() else 0
+        torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
 
         cmake_cmd = [
             f"source {env_path} && "
