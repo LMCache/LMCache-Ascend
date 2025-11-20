@@ -57,52 +57,6 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
     at::ScalarType scalar_type = key_value.scalar_type();
     at::ScalarType slot_type = slot_mapping.scalar_type();
     const char* socName = aclrtGetSocName();
-    
-    at_npu::native::OpCommand cmd;
-    cmd.Name("multi_layer_kv_transfer_kernel");
-    cmd.SetCustomHandler([scalar_type, slot_type, socName, stream, page_buffer_ptrs, key_value_ptr,
-                          slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
-                          num_tokens, direction]()->int{
-        auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
-        auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
-        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-        uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
-        kvcache_ops::multi_layer_kv_transfer_kernel(dtype_num, slot_num, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
-                                        slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
-                                        num_tokens, direction);
-        return 0;
-    });
-    cmd.Run();
-    return ;
-};
-
-void multi_layer_kv_transfer_v2(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
-                             const torch::Tensor& key_value_ptrs, // [num_layers]
-                             const torch::Tensor& slot_mapping, // [num_tokens]
-                             const torch::Device& paged_memory_device,
-                             const int page_buffer_size, const bool direction,
-                             const bool use_mla) {
-    uint8_t* key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
-    // it is actually a uint8_t**. we will reinterpret it inside the kernel
-    uint8_t* page_buffer_ptrs = get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
-    uint8_t* slot_mapping_ptr = get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping);
-
-    int num_layers = key_value.size(1);
-    int num_tokens = slot_mapping.size(0);
-    int hidden_dims = key_value.size(-1);
-    int kv_size = 2;
-    if (use_mla) {
-        kv_size = 1;
-    }
-    
-    const c10::OptionalDeviceGuard device_guard(paged_memory_device);
-    // we require the kv ptr list to be on the device too
-    const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
-
-    const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    at::ScalarType scalar_type = key_value.scalar_type();
-    at::ScalarType slot_type = slot_mapping.scalar_type();
-    const char* socName = aclrtGetSocName();
     auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
     uint64_t ubSize;
     ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
@@ -110,26 +64,41 @@ void multi_layer_kv_transfer_v2(torch::Tensor& key_value, // [kv, num_layer, num
     uint32_t aiv_num = (uint32_t)std::min(num_layers, 4);
 
     int32_t numBuffsOnDev = 2;
-    // TODO: Our current version allocates num_tokens_chunk * hiddendims on ub
-    //       we can further look into splitting num_tokens into innerloops to avoid maxing out ub
-    int64_t baseBuffSize = numBuffsOnDev * num_tokens * hidden_dims * key_value.element_size();
+    // step 1. use per tokens buff size to derive how many tokens can be allocated per loop
+    int64_t baseBuffSize = numBuffsOnDev * hidden_dims * key_value.element_size();
 
     if (ubSize < baseBuffSize) {
-        std::string errStr = "Per TokenChunkBuffer Size: " + std::to_string(baseBuffSize) + " exceeds UB Size: " + std::to_string(ubSize);
-        PyErr_SetString(PyExc_RuntimeError, errStr + " Please lower the number of tokens or headDims.");
+        std::string errStr = "Per TokenBuffer Size: " + std::to_string(baseBuffSize) + " exceeds UB Size: " + std::to_string(ubSize);
+        PyErr_SetString(PyExc_RuntimeError, errStr + " Please contact us.");
         throw py::error_already_set();
     }
+
+    // step 2. work out how many tokens per loop
+    int32_t maxTokensPerLoop = (ubSize / baseBuffSize) - 1; // Subtract 1 to provide a safety margin and avoid over-allocating the UB buffer, ensuring we do not exceed hardware limits due to possible rounding or small additional allocations.
+    maxTokensPerLoop = static_cast<int32_t>(std::min(maxTokensPerLoop, static_cast<int32_t>(num_tokens)));
+
+
+    // step 3. double check whether the perloop buffer can accomodate everything
+    int64_t totalPerLoopBuffer = static_cast<int64_t>(maxTokensPerLoop) * baseBuffSize;
+    if (ubSize < totalPerLoopBuffer) {
+        std::string errStr = "Per Loop Buffer Size: " + std::to_string(totalPerLoopBuffer) + " exceeds UB Size: " + std::to_string(ubSize);
+        PyErr_SetString(PyExc_RuntimeError, errStr + " Please contact us.");
+        throw py::error_already_set();
+    }
+
+    // using double buffs mean we actually want to allocate half of this per round.
+    int64_t singlePerLoopBuffer = totalPerLoopBuffer / numBuffsOnDev;
 
     at_npu::native::OpCommand cmd;
     cmd.Name("multi_layer_kv_transfer_kernel_v2");
     cmd.SetCustomHandler([scalar_type, slot_type, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
                           slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
-                          num_tokens, direction]()->int{
+                          num_tokens, singlePerLoopBuffer, maxTokensPerLoop, direction]()->int{
         auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
         auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
         kvcache_ops::multi_layer_kv_transfer_kernel_v2(dtype_num, slot_num, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
                                         slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
-                                        num_tokens, direction);
+                                        num_tokens, singlePerLoopBuffer, maxTokensPerLoop, direction);
         return 0;
     });
     cmd.Run();

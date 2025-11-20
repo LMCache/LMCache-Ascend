@@ -159,17 +159,16 @@ def test_extract_and_load_back(num_tokens):
     mem_allocator.close()
 
 
-@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
-@pytest.mark.parametrize("num_heads", [1])
-@pytest.mark.parametrize("chunk_size", [256])
-@pytest.mark.parametrize("num_layers", [32])
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("head_size", [128])
-@pytest.mark.parametrize("use_v2", [True, False])
-def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block_size, head_size, use_v2):
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 2048])
+@pytest.mark.parametrize("num_heads", [8])
+@pytest.mark.parametrize("chunk_size", [256, 512])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("head_size", [256])
+def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block_size, head_size):
     device = "npu"
 
-    num_blocks = 1000
+    num_blocks = 256
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
@@ -181,8 +180,6 @@ def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block
 
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
-
-    multi_layer_kernel_func = lmc_ops.multi_layer_kv_transfer_v2 if use_v2 else lmc_ops.multi_layer_kv_transfer
 
     # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
     #                                kv_cache_pointers, # TODO: initialize this
@@ -234,7 +231,7 @@ def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block
         mem_obj_shape = [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
-        multi_layer_kernel_func(
+        lmc_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers,
             slot_mapping_temp,
@@ -271,7 +268,7 @@ def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block
 
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
         memory_obj_new = memory_obj_new_list[chunk_id]
-        multi_layer_kernel_func(
+        lmc_ops.multi_layer_kv_transfer(
             memory_obj_new.tensor,
             kv_cache_pointers_new,
             slot_mapping_temp,
