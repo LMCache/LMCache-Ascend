@@ -74,7 +74,7 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
     }
 
     // step 2. work out how many tokens per loop
-    int32_t maxTokensPerLoop = (ubSize / baseBuffSize) - 1; // give an extra token margin
+    int32_t maxTokensPerLoop = (ubSize / baseBuffSize) - 1; // Subtract 1 to provide a safety margin and avoid over-allocating the UB buffer, ensuring we do not exceed hardware limits due to possible rounding or small additional allocations.
     maxTokensPerLoop = static_cast<int32_t>(std::min(maxTokensPerLoop, num_tokens));
 
 
