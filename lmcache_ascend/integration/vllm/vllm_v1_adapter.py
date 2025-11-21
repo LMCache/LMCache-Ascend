@@ -128,6 +128,8 @@ def init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                num_kv_head=num_kv_head,
+                head_size=head_size,
             )
         else:
             vllm_gpu_connector = VLLMPagedMemLayerwiseNPUConnector(
@@ -137,6 +139,8 @@ def init_lmcache_engine(
                 chunk_size=chunk_size,
                 dtype=kv_dtype,
                 device=device,
+                num_kv_head=num_kv_head,
+                head_size=head_size,
             )
     else:
         vllm_gpu_connector = VLLMPagedMemNPUConnectorV2(
@@ -147,6 +151,8 @@ def init_lmcache_engine(
             dtype=kv_dtype,
             device=device,
             use_mla=use_mla,
+            num_kv_head=num_kv_head,
+            head_size=head_size,
         )
     tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
