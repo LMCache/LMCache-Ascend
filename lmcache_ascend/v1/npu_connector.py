@@ -35,20 +35,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         - chunk_size: The MAX size of the chunk to be copied to GPU.
         - dtype: The data type of the intermediate buffer.
         """
-        self.hidden_dim_size = hidden_dim_size
-        self.num_layers = num_layers
-        self.kv_cache_pointers = torch.empty(
-            num_layers, dtype=torch.int64, device="cpu"
-        )
-        # Not sure we need a dict here. Maybe a single GPU connector always
-        # works with a single device?
-        self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
-        self.page_buffer_size = 0
-
-        self.kvcaches: Optional[List[torch.Tensor]] = None
-
-        self.gpu_buffer: Optional[torch.Tensor] = None
-        self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
         if is_310p():
             assert "num_kv_head" in kwargs, (
                 "num_kv_head should be provided in 310p",
@@ -58,23 +45,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             )
             self.num_kv_head = kwargs["num_kv_head"]
             self.head_size = kwargs["head_size"]
-        if use_gpu:
-            assert "chunk_size" in kwargs, (
-                "chunk_size should be provided to create a GPU buffer."
-            )
-            assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
-            assert "device" in kwargs, (
-                "device should be provided to create a GPU buffer."
-            )
-            shape = self.get_shape(kwargs["chunk_size"])
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
-            self.gpu_buffer = torch.empty(
-                shape, dtype=kwargs["dtype"], device=kwargs["device"]
-            )
-
-        self.store_stream = torch.cuda.Stream()
-        self.load_stream = torch.cuda.Stream()
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.device = kv_caches[0].device
