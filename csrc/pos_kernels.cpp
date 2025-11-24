@@ -16,7 +16,9 @@ constexpr uint32_t CORE_NUM_LARGE_TOKENS = 16;
 constexpr size_t DIM_0 = 0;
 constexpr size_t DIM_1 = 1;
 
-constexpr int64_t UB_SIZE = static_cast<int64_t>(192) * 1024;
+constexpr int64_t UB_SIZE_910 = static_cast<int64_t>(192) * 1024;
+constexpr int64_t UB_SIZE_310 = static_cast<int64_t>(252) * 1024;
+
 constexpr uint32_t FP32_DTYPE_SIZE = 4;
 
 struct TilingParams {
@@ -38,6 +40,7 @@ struct TilingParams {
     uint64_t numTokensFrontCoreLastLoop = 0;
     uint64_t numTokensTailCoreLastLoop = 0;
     uint64_t tilingKey = 0;
+    int64_t ubSize = UB_SIZE_910;
 };
 } // namespace
 
@@ -54,11 +57,21 @@ void GetDtypeInfo(const at::Tensor& key, uint64_t& tilingKey) {
 }
 
 
-uint64_t CalculateTargetCoreNum(uint64_t availableAivCore, uint64_t numTokens) {
-    if (numTokens <= CORE_ALLOC_TOKENS_THRESHOLD) {
+uint64_t CalculateTargetCoreNum(const char* socName, uint64_t availableAivCore, uint64_t numTokens) {
+    bool is310Platform = (strstr(socName, "310") != nullptr);
+    if (is310Platform || numTokens <= CORE_ALLOC_TOKENS_THRESHOLD) {
         return std::min(availableAivCore, static_cast<uint64_t>(CORE_NUM_SMALL_TOKENS));
     } else {
         return std::min(availableAivCore, static_cast<uint64_t>(CORE_NUM_LARGE_TOKENS));
+    }
+}
+
+
+uint64_t GetPlatformUbSize(const char* socName) {
+    if (strstr(socName, "310") != nullptr) {
+        return UB_SIZE_310;
+    } else {
+        return UB_SIZE_910;
     }
 }
 
@@ -75,13 +88,14 @@ void ComputeTilingParams(TilingParams& params, const at::Tensor& key, const at::
     auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
 
     const uint64_t availableAivCore = static_cast<uint64_t>(ascendcPlatform->GetCoreNumAiv());
-    const uint64_t targetCoreNum = CalculateTargetCoreNum(availableAivCore, params.numTokens);
+    const uint64_t targetCoreNum = CalculateTargetCoreNum(socName, availableAivCore, params.numTokens);
 
     params.coreNumUse = targetCoreNum;
 
     uint64_t ubSizePlatform = 0;
     ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSizePlatform);
-    uint64_t maxUbSize = std::min(ubSizePlatform, static_cast<uint64_t>(UB_SIZE)); 
+    params.ubSize = GetPlatformUbSize(socName);
+    uint64_t maxUbSize = std::min(ubSizePlatform, static_cast<uint64_t>(params.ubSize));
 
     GetDtypeInfo(key, params.tilingKey);
 
@@ -94,8 +108,8 @@ void ComputeTilingParams(TilingParams& params, const at::Tensor& key, const at::
     uint64_t numHeadsMax = params.numHeads;
 
     uint64_t perTokenUbSize = params.isNeoxStyle == 1 ?
-        (numHeadsMax * (params.rotaryDim * 10 + params.headSize) * FP32_DTYPE_SIZE) :
-        (numHeadsMax * (params.rotaryDim * 12 + params.headSize) * FP32_DTYPE_SIZE);
+        (numHeadsMax * (params.rotaryDim * 9 + params.headSize) * FP32_DTYPE_SIZE) :
+        (numHeadsMax * (params.rotaryDim * 11 + params.headSize) * FP32_DTYPE_SIZE);
     uint64_t maxNPerLoopForUb = (perTokenUbSize == 0) ? 0 : (maxUbSize / perTokenUbSize);
     maxNPerLoopForUb = std::max(maxNPerLoopForUb, static_cast<uint64_t>(1));
 
