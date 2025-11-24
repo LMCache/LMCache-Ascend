@@ -247,7 +247,7 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
 @pytest.mark.parametrize("max_position", [40960])
 @pytest.mark.parametrize("rope_theta", [500000.0])
 @pytest.mark.parametrize("is_neox_style", [False, True])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("test_sizes", [[512, 1024, 4096]])
 def test_rope_correctness(rope_modules, head_size, test_sizes):
 
@@ -264,7 +264,7 @@ def test_rope_correctness(rope_modules, head_size, test_sizes):
 @pytest.mark.parametrize("max_position", [40960])
 @pytest.mark.parametrize("rope_theta", [500000.0])
 @pytest.mark.parametrize("is_neox_style", [True])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("test_sizes", [[512, 1024, 4096]])
 def test_rope_performance(rope_modules, head_size, dtype, test_sizes):
 
