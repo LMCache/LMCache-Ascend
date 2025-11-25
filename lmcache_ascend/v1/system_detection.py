@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 from lmcache.v1.system_detection import NUMAMapping
 from lmcache.logging import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -21,7 +22,8 @@ def _read_from_sys() -> Optional[NUMAMapping]:
 
     try:
         device_index = torch.npu.current_device()
-        pci_bus_id = get_gpu_pci_bus_id(device_index).lower()
+        phy_device_id = current_platform.device_id_to_physical_device_id(device_index)
+        pci_bus_id = get_gpu_pci_bus_id(phy_device_id).lower()
 
         numa_node_file = f"/sys/bus/pci/devices/{pci_bus_id}/numa_node"
         with open(numa_node_file) as f:
