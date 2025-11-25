@@ -105,6 +105,53 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
     return ;
 };
 
+void multi_layer_kv_transfer_310p(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
+                             const torch::Tensor& key_value_ptrs, // [num_layers]
+                             const torch::Tensor& slot_mapping, // [num_tokens]
+                             const torch::Device& paged_memory_device,
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla, const int num_kv_head,
+                             const int head_size, const int blockSize) {
+    uint8_t* key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
+    // it is actually a uint8_t**. we will reinterpret it inside the kernel
+    uint8_t* page_buffer_ptrs = get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
+    uint8_t* slot_mapping_ptr = get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping);
+
+    int num_layers = key_value.size(1);
+    int num_tokens = slot_mapping.size(0);
+    int hidden_dims = key_value.size(-1);
+    int kv_size = 2;
+    if (use_mla) {
+        kv_size = 1;
+    }
+
+    const c10::OptionalDeviceGuard device_guard(paged_memory_device);
+    // we require the kv ptr list to be on the device too
+    const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
+
+    const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at::ScalarType scalar_type = key_value.scalar_type();
+    at::ScalarType slot_type = slot_mapping.scalar_type();
+    const char* socName = aclrtGetSocName();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("multi_layer_kv_transfer_kernel_310p");
+    cmd.SetCustomHandler([scalar_type, slot_type, socName, stream, page_buffer_ptrs, key_value_ptr,
+                          slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
+                          num_tokens, direction, num_kv_head, head_size, blockSize]()->int{
+        auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
+        auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
+        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+        uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
+        kvcache_ops::multi_layer_kv_transfer_kernel_310p(dtype_num, slot_num, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
+                                        slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
+                                        num_tokens, direction, num_kv_head, head_size, blockSize);
+        return 0;
+    });
+    cmd.Run();
+    return ;
+};
+
 
 void multi_layer_kv_transfer_unilateral(torch::Tensor& key_value,
                                         const torch::Tensor& key_ptrs,
