@@ -187,7 +187,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
 
         cmake_cmd = [
-            f"source {env_path} && "
+            f". {env_path} && "
             f"cmake -S {ROOT_DIR} -B {BUILD_OPS_DIR}"
             f"  -DSOC_VERSION={_soc_version}"
             f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
