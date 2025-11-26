@@ -236,6 +236,8 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
         partial_rotary_factor=1.0,
     )
 
+    base_rope.cos_sin_cache = base_rope.cos_sin_cache.to("npu")
+    
     reverse_rope = BasicReverseRope(base_rope, head_size, is_neox_style)
     fused_rope = FusedRope(base_rope, is_neox_style)
     dummy_rope = DummyFusedRope(base_rope, reverse_rope, is_neox_style)

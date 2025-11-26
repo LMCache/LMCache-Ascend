@@ -177,6 +177,8 @@ def get_fused_rope(
         partial_rotary_factor,
     )
 
+    rope.cos_sin_cache = rope.cos_sin_cache.to("npu")
+    
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
     fused_rope = FusedRope(rope, is_neox_style)
     
