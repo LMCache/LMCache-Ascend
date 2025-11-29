@@ -89,6 +89,25 @@ def generate_kv_cache_paged_list_tensors(
 
     return ret
 
+def generate_kv_cache_paged_list_tuple_tensors(
+    num_blocks, device, num_layers, num_heads, head_size, block_size=16, 
+    dtype=torch.bfloat16,
+):
+    """
+    Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
+    where KV are in the same tensor
+    """
+    ret = []
+    key_shape = [num_blocks, block_size, num_heads, head_size]
+    value_shape = [num_blocks, block_size, num_heads, head_size]
+        
+    for i in range(num_layers):
+        key = torch.rand(key_shape, dtype=dtype, device=device)
+        value = torch.rand(value_shape, dtype=dtype, device=device)
+        ret.append((key, value))
+
+    return ret
+
 
 def generate_sglang_kv_cache_paged_list_tensors(
     num_layers,
