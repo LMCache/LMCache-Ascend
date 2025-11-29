@@ -14,6 +14,7 @@ from lmcache.v1.gpu_connector import (
 )
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache_ascend.v1.memory_management import is_310p
+from lmcache_ascend.v1.memory_management import KVCacheFormat
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -36,6 +37,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         - dtype: The data type of the intermediate buffer.
         """
         super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
+
+        self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
+
         if is_310p():
             assert "num_kv_head" in kwargs, (
                 "num_kv_head should be provided in 310p",
@@ -47,32 +51,76 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.head_size = kwargs["head_size"]
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
+        
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.device = kv_caches[0].device
-        assert self.device.type == "npu", "The device should be Ascend NPU."
-        idx = self.device.index
+
+        self.kv_format = KVCacheFormat.detect(kv_caches)
+        
+        if self.kv_format == KVCacheFormat.UNDEFINED:
+            raise ValueError(
+                "Undefined KV cache format detected. "
+                "Unable to determine the format of input kv_caches."
+            )
+            
+        if self.kv_format.is_separate_format():
+            self.kvcaches_device = kv_caches[0][0].device
+        else:
+            self.kvcaches_device = kv_caches[0].device
+
+        assert self.kvcaches_device.type == "npu", "The device should be CUDA."
+        idx = self.kvcaches_device.index  
+
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
-        self.kv_cache_pointers.numpy()[:] = [t.data_ptr() for t in kv_caches]
+
+        if self.kv_format == KVCacheFormat.SEPARATE_KV:
+            self.kv_size = 2
+            pointers_list = []
+            for k, v in kv_caches:
+                pointers_list.append(k.data_ptr())
+                pointers_list.append(v.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers * self.kv_size, dtype=torch.int64, device="cpu"
+            )
+        else:
+            self.kv_size = 1
+            pointers_list = [t.data_ptr() for t in kv_caches]
+            
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers, dtype=torch.int64, device="cpu"
+            )
+        
+        self.kv_cache_pointers.numpy()[:] = pointers_list
+
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
-            self.num_layers, dtype=torch.int64, device=self.device
+            self.kv_cache_pointers.shape, dtype=torch.int64, device=self.kvcaches_device
         )
+
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
+
+        first_tensor = kv_caches[0][0] if self.kv_format.is_separate_format() else kv_caches[0]
+
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
             # kv_caches[0].shape: [1, num_pages, page_size, head_size] (vllm-Ascend)
             self.page_buffer_size = kv_caches[0].shape[-3] * kv_caches[0].shape[-2]
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size] vllm 0.9.2 ...
             # 310P: [2, num_blocks, num_kv_heads * head_size // 16, block_size, 16]
             # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
-            assert kv_caches[0].dim() == 5
-            if is_310p():
-                self.block_size = kv_caches[0].shape[3]
-                self.page_buffer_size = kv_caches[0].shape[1] * self.block_size
+            if self.kv_format == KVCacheFormat.SEPARATE_KV:
+                # kv_caches[0]: [tuple(k,v)，tuple(k,v)]
+                assert first_tensor.dim() >= 2
+                self.page_buffer_size = first_tensor.shape[0] * first_tensor.shape[1]
             else:
-                self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
+                assert first_tensor.dim() == 5
+                if is_310p():
+                    self.block_size = first_tensor.shape[3]
+                    self.page_buffer_size = first_tensor.shape[1] * self.block_size
+                else:
+                    self.page_buffer_size = first_tensor.shape[1] * first_tensor.shape[2]
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -192,6 +240,132 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         )
 
         memory_obj.tensor.copy_(tmp_gpu_buffer)
+        if self.use_mla:
+            memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
+
+    def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
+        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
+        The kvcaches should correspond to the "WHOLE token sequence".
+
+        Note:
+          1. This function expects the 'slot_mapping' is a "full slot mapping"
+             where it's length is the same as the whole token sequence.
+          2. In the case that there is prefix caching, slot_mapping will starts
+             with -1s until the end of the matched prefix. The start and end
+             should NEVER overlap with the prefix caching (which means the
+             underlying CUDA kernel will never see -1 in slot_mapping)
+
+
+        :raises ValueError: If 'kvcaches' is not provided in kwargs.
+        :raises AssertionError: If the memory object does not have a tensor.
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        """
+        assert memory_obj.tensor is not None
+
+        self.initialize_kvcaches_ptr(**kwargs)
+
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
+
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    " order to be processed by VLLMPagedMemGPUConnector"
+                )
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError(
+                    "The memory object should be in KV_2LTD format in"
+                    " order to be processed by VLLMPagedMemGPUConnector"
+                )
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            kv_cache_pointers,
+            slot_mapping[start:end],
+            self.kvcaches_device,
+            self.page_buffer_size,
+            False,
+            self.use_mla,
+            self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+        )
+
+    def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
+        """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
+        The kvcaches should correspond to the "WHOLE token sequence".
+
+        Will set the memory_obj.metadata.fmt to MemoryFormat.KV_2LTD.
+
+        Note:
+          1. This function expects the 'slot_mapping' is a "full slot mapping"
+             where it's length is the same as the whole token sequence.
+          2. In the case that there is prefix caching, slot_mapping will starts
+             with -1s until the end of the matched prefix. The start and end
+             should NEVER overlap with the prefix caching (which means the
+             underlying CUDA kernel will never see -1 in slot_mapping)
+
+        :raises ValueError: If 'kvcaches' is not provided in kwargs,
+        :raises AssertionError: If the memory object does not have a tensor.
+        :raises ValueError: If 'slot_mapping' is not provided in kwargs.
+        """
+        assert memory_obj.tensor is not None
+
+        self.initialize_kvcaches_ptr(**kwargs)
+        assert self.kvcaches is not None, (
+            "kvcaches should be provided in kwargs or initialized beforehand."
+        )
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+
+        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+
+        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        if self.kv_format == KVCacheFormat.UNDEFINED:
+            raise ValueError("KV cache format is not initialized!")
+
+        with torch.cuda.stream(self.store_stream):
+            if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+                lmc_ops.multi_layer_kv_transfer(
+                    memory_obj.tensor, 
+                    kv_cache_pointers, 
+                    slot_mapping[start:end], 
+                    self.kvcaches_device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+                )
+            else:
+                assert self.gpu_buffer.device == self.kvcaches_device
+                tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                lmc_ops.multi_layer_kv_transfer(
+                    tmp_gpu_buffer,
+                    kv_cache_pointers,
+                    slot_mapping[start:end],
+                    self.kvcaches_device,
+                    self.page_buffer_size,
+                    True,
+                    self.use_mla,
+                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+                )
+                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+
+        if not memory_obj.tensor.is_cuda:
+            # Force a synchronize if the target buffer is NOT CUDA device
+            # NOTE: for better performance, we may not want to sync for every
+            # memory object
+            self.store_stream.synchronize()
+
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
