@@ -272,7 +272,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
                 raise ValueError(
                     "The memory object should be in KV_MLA_FMT format in"
-                    " order to be processed by VLLMPagedMemGPUConnector"
+                    " order to be processed by VLLMPagedMemNPUConnector"
                 )
         else:
             if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
