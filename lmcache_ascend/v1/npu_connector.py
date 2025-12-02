@@ -278,7 +278,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
                 raise ValueError(
                     "The memory object should be in KV_2LTD format in"
-                    " order to be processed by VLLMPagedMemGPUConnector"
+                    " order to be processed by VLLMPagedMemNPUConnector"
                 )
 
         if "slot_mapping" not in kwargs:
