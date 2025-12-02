@@ -35,7 +35,7 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
                              const torch::Tensor& slot_mapping, // [num_tokens]
                              const torch::Device& paged_memory_device,
                              const int page_buffer_size, const bool direction,
-                             const bool use_mla) {
+                             const bool use_mla, const int kvcache_format_raw){
     uint8_t* key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
     // it is actually a uint8_t**. we will reinterpret it inside the kernel
     uint8_t* page_buffer_ptrs = get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
@@ -48,6 +48,8 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
     if (use_mla) {
         kv_size = 1;
     }
+
+    kvcache_ops::KVCacheFormat kvcache_format = static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
     
     const c10::OptionalDeviceGuard device_guard(paged_memory_device);
     // we require the kv ptr list to be on the device too
@@ -91,12 +93,12 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
 
     at_npu::native::OpCommand cmd;
     cmd.Name("multi_layer_kv_transfer_kernel_v2");
-    cmd.SetCustomHandler([scalar_type, slot_type, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
+    cmd.SetCustomHandler([scalar_type, slot_type, kvcache_format, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
                           slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
                           num_tokens, singlePerLoopBuffer, maxTokensPerLoop, direction]()->int{
         auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
         auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
-        kvcache_ops::multi_layer_kv_transfer_kernel_v2(dtype_num, slot_num, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
+        kvcache_ops::multi_layer_kv_transfer_kernel_v2(dtype_num, slot_num, kvcache_format, aiv_num, stream, page_buffer_ptrs, key_value_ptr,
                                         slot_mapping_ptr, hidden_dims, kv_size, num_layers, page_buffer_size,
                                         num_tokens, singlePerLoopBuffer, maxTokensPerLoop, direction);
         return 0;
