@@ -68,7 +68,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         else:
             self.kvcaches_device = kv_caches[0].device
 
-        assert self.kvcaches_device.type == "npu", "The device should be CUDA."
+        assert self.kvcaches_device.type == "npu", "The device should be Ascend NPU."
         idx = self.kvcaches_device.index  
 
         if idx in self.kv_cache_pointers_on_gpu:
