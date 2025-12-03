@@ -409,6 +409,7 @@ class OfflineRAGManager(BaseRAGManager):
     def _prepare_tokens(self):
         """Prepare all prompts and documents into token lists."""
         config = self.workload_config
+        
         system_prompt_tokens = self._encode_prompt(config.system_prompt)
         query_prompt_tokens = self._encode_prompt(config.query_prompt, add_special_tokens=False)
         separator_tokens = self._encode_prompt(config.separator, add_special_tokens=False)
@@ -479,39 +480,54 @@ class OfflineRAGManager(BaseRAGManager):
         precomputed_count = 0
         round_up_token_cnt = self.workload_config.kv_chunk_size
 
-        all_doc_prompt_tokens: List[List[int]] = []
-        for doc_set in self._document_tokens:
-            if doc_set:
-                all_doc_prompt_tokens.extend(doc_set)
-
-        if not all_doc_prompt_tokens:
-            logger.info("No documents to precompute.")
-            return 0
-
-        # Precompute all documents in a batch (vLLM supports List[List[int]] for generate)
-        sampling_params = SamplingParams(temperature=0, max_tokens=1)
-
-        total_tokens_to_precompute = sum(len(doc) for doc in all_doc_prompt_tokens)
+        kv_storage_size_gb = self.workload_config.lmconfig.max_local_cpu_size
+        GB_TO_BYTES = 1024 * 1024 * 1024
+        kv_storage_size_bytes = int(kv_storage_size_gb * GB_TO_BYTES)
         
-        rounded_total_doc_tokens = (
-            (total_tokens_to_precompute + round_up_token_cnt - 1) // round_up_token_cnt
-        ) * round_up_token_cnt
-        
-        current_size_taken = kv_size_calculator.get_kv_size(rounded_total_doc_tokens)
-        
-        try:
-            prompts = [TokensPrompt(prompt_token_ids=doc) for doc in all_doc_prompt_tokens]
-            llm.generate(
-                prompts, sampling_params=[sampling_params] * len(prompts)
-            )
-            precomputed_count = len(all_doc_prompt_tokens)
-            
-        except Exception as e:
-            logger.error(f"Batch precompute failed: {e}")
-            
         logger.info(
-            f"Precomputed {precomputed_count} document chunks, "
-            f"estimated used {current_size_taken} bytes of KV cache"
+            f"KV cache storage size limit: {kv_storage_size_gb} GB "
+            f"({kv_storage_size_bytes} bytes)"
+        )
+
+        for i, doc_tokens_list in enumerate(self._document_tokens):
+            if current_size_taken >= kv_storage_size_bytes:
+                logger.info(f"KV cache size limit reached ({kv_storage_size_gb} GB). Stopping precomputation.")
+                break
+
+            # Calculate size for this document set
+            total_doc_tokens = sum(len(doc_tokens) for doc_tokens in doc_tokens_list)
+            # Round up to chunk size
+            total_doc_tokens = (
+                (total_doc_tokens + round_up_token_cnt - 1) // round_up_token_cnt
+            ) * round_up_token_cnt
+
+            this_case_size = kv_size_calculator.get_kv_size(total_doc_tokens)
+
+            if current_size_taken + this_case_size > kv_storage_size_bytes:
+                logger.info(
+                    f"Document set {i} requires {this_case_size} bytes, "
+                    f"which exceeds the remaining limit. Stopping precomputation."
+                )
+                break
+
+            # Precompute each document chunk
+            for doc_tokens in doc_tokens_list:
+                # Use minimal generation to trigger KV cache storage
+                sampling_params = SamplingParams(temperature=0, max_tokens=1)
+                try:
+                    llm.generate(
+                        prompt_token_ids=doc_tokens, sampling_params=sampling_params
+                    )
+                except Exception as e:
+                    logger.warning(f"Precompute failed for document chunk: {e}")
+                    continue
+
+            current_size_taken += this_case_size
+            precomputed_count += 1
+
+        logger.info(
+            f"Precomputed {precomputed_count} document sets, "
+            f"used {current_size_taken} bytes of KV cache"
         )
         return precomputed_count
 
@@ -582,7 +598,6 @@ class OfflineRAGManager(BaseRAGManager):
 
         logger.info(f"Completed {len(self._results)} requests")
         return elapsed_time
-
 
     def _run_sequential_fallback(
         self,

@@ -60,7 +60,6 @@ Additionally, ensure the following parameters are correctly set in the **LMCache
 #### Analysis Script
 The `analysis.py` script is used to **compare the benchmark results** for Prefix Cache and CacheBlend, and then **analyze and plot the data**.
 
-
 ### Arguments
 #### Configure the workload
 - `--dataset <str>` The path to the dataset. The format is described in `Dataset format` section.  
@@ -95,6 +94,23 @@ To benchmark CacheBlend, we need to precompute the KV cache of documents.
 - **Throughput**: Request processed per second.  
 - **Average TTFT (Time to First Token)**: Average time taken for the model to generate the first token of a response.
 - **Average Quality**: Average quality score of generation content.  
+
+## Benchmark Results
+
+The benchmark was executed on **20 samples** of the `musique_s.json` RAG dataset.
+
+CacheBlend Performance Summary：
+
+| Metric | Prefix Cache (Baseline) | CacheBlend | Improvement |
+| :--- | :--- | :--- | :--- |
+| **Average Quality (Score)** | $0.4115$ | $0.3621$ | $\downarrow 12.0\%$ (Minor) |
+| **End-to-End Latency(s)** | **$0.884$** | **$0.495$** | **$\downarrow 44\%$** |
+| **Throughput (Req/s)** | $1.131$ | $2.020$ | **$\uparrow 78.6\%$** |
+
+![alt text](imgs/image.png)
+
+**Conclusion:** CacheBlend achieved a massive performance improvement, nearly **doubling the throughput** and reducing the **End-to-End Latency by $\approx 44\%$**. This substantial gain comes with a **minor trade-off** in average quality score ($12.0\%$ decrease, from $0.4115$ to $0.3621$), which is often acceptable for achieving such significant latency benefits in production serving.
+
 
 ## Dataset format
 Should be a json file, which is a list of dicts.  

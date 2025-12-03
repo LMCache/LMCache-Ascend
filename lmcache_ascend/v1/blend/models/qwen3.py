@@ -2,6 +2,7 @@
 # Third Party
 from torch import nn
 import torch
+from typing import Optional
 
 # First Party
 from lmcache_ascend.v1.blend.attention.attention import LMCAttnBackend
@@ -25,8 +26,9 @@ class LMCQwen3Model(LMCModel):
     def compute_layer(
         self,
         input_ids: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
     ):
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
+        hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
         residual = None
 
         # TODO (Jiayi): reduce the number of calls
@@ -87,7 +89,7 @@ class LMCQwen3Model(LMCModel):
             head_size = self.vllm_attn_layers[idx].head_size
 
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, idx, attn_output, attn_metadata, qk_post_processing=qk_post_processing
+                q, k, v, residual, idx, attn_output, attn_metadata, mask, qk_post_processing=qk_post_processing
             )
             if q.numel() == 0:
                 no_more_queries = True

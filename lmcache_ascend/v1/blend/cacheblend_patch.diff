@@ -1,0 +1,13 @@
+diff --git a/lmcache/integration/vllm/utils.py b/lmcache/integration/vllm/utils.py
+index 4692f00..bd2d86f
+--- a/lmcache/integration/vllm/utils.py
++++ b/lmcache/integration/vllm/utils.py
+@@ -55,6 +55,8 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
+                     )
+                     LMCacheEngineConfig = Config  # type: ignore[assignment]
+                 else:
++                    from lmcache_ascend.v1.config import _validate_config
++                    V1Config.validate = _validate_config
+                     LMCacheEngineConfig = V1Config  # type: ignore[assignment]
+ 
+                 if "LMCACHE_CONFIG_FILE" not in os.environ:
