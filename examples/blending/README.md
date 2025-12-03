@@ -1,3 +1,11 @@
+# Prerequisite: CacheBlend Bug Note
+There is a known bug in **CacheBlend** within **LMCache version 0.3.7** which causes a **low cache hit rate**. This issue is scheduled to be fixed in the upcoming **0.3.9** release.
+**In the meantime, please apply the following patch before proceeding:**
+```bash
+cd /workspace/LMCache
+git apply -p /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
+```
+
 # ad-hoc modification to vllm-ascend
 
 We took b5b7e0ecc765adfec4ec4efdd14bfc7cce715e23 of the official vllm-ascend repository (0.9.2) then made modifications from https://github.com/vllm-project/vllm-ascend/pull/2039 and added ad-hoc modifications based on https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
