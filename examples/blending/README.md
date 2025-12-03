@@ -3,7 +3,7 @@ There is a known bug in **CacheBlend** within **LMCache version 0.3.7** which ca
 **In the meantime, please apply the following patch before proceeding:**
 ```bash
 cd /workspace/LMCache
-git apply -p /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
+git apply /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
 ```
 
 # ad-hoc modification to vllm-ascend
