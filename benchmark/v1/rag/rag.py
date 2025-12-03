@@ -409,7 +409,6 @@ class OfflineRAGManager(BaseRAGManager):
     def _prepare_tokens(self):
         """Prepare all prompts and documents into token lists."""
         config = self.workload_config
-        
         system_prompt_tokens = self._encode_prompt(config.system_prompt)
         query_prompt_tokens = self._encode_prompt(config.query_prompt, add_special_tokens=False)
         separator_tokens = self._encode_prompt(config.separator, add_special_tokens=False)

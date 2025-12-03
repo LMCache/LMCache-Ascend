@@ -1,12 +1,12 @@
 set -euo pipefail
 
 # Configuration for offline LMCache RAG benchmark
-MODEL_NAME="model/Meta-Llama-3.1-8B-Instruct"
-# [CacheBlend musique_s.json](https://github.com/YaoJiayi/CacheBlend/blob/main/inputs/musique_s.json)
+MODEL_NAME="LLM-Research/Meta-Llama-3.1-8B-Instruct"
 DATASET_PATH="musique_s.json"
+END=10 # process 10 examples
+
 PROMPT_BUILD_METHOD=QA
 MAX_TOKENS=32
-END=10 # process 10 examples
 TEMPERATURE=0.0
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

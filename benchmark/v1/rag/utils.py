@@ -151,11 +151,13 @@ def parse_generation(s):
     if not s or s.strip() == "":
         return ""
     
-    s = s.lstrip("\n").split("\n")[0]
+    s = s.lstrip("\n").split("\n")[0].strip()
     if s.startswith("Yes") or s.startswith("yes"):
         s = "Yes"
-    elif (s.split()[0]).startswith("No") or (s.split()[0]).startswith("no"):
-        s = "No"
+    words = s.split()
+    if words:
+        if words[0].startswith("No") or words[0].startswith("no"):
+            s = "No"
     return s
 
 

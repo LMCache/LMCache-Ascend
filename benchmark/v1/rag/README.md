@@ -29,12 +29,12 @@ pip install -r requirements.txt
 ```
 
 ### 2. Launch the Serving Engine
-The benchmark requires a serving engine running the **Qwen/Qwen3-8B** model at `http://localhost:8000/v1`.
+The benchmark requires a serving engine running the **LLM-Research/Meta-Llama-3.1-8B-Instruct** model at `http://localhost:8000/v1`.
 
 | Feature Mode | Launch Command |
 | :--- | :--- |
-| **Standard vLLM** | `vllm serve Qwen/Qwen3-8B --disable-log-requests` |
-| **LMCache + CacheBlend** | `LMCACHE_CONFIG_FILE=./config/lmcache_blending.yaml python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model Qwen/Qwen3-8B --no-enable-prefix-caching --gpu-memory-utilization 0.8 --port 8000` |
+| **Standard vLLM** | `vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct --disable-log-requests` |
+| **LMCache + CacheBlend** | `LMCACHE_CONFIG_FILE=./config/lmcache_blending.yaml python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model LLM-Research/Meta-Llama-3.1-8B-Instruct --no-enable-prefix-caching --gpu-memory-utilization 0.8 --port 8000` |
 
 ### 3. Run the Benchmark
 Use the provided scripts to launch the benchmark against the running engine:

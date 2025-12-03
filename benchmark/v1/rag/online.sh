@@ -16,12 +16,12 @@ if [[ "$MODE" != "server" && "$MODE" != "client" && "$MODE" != "both" ]]; then
 fi
 
 # Configuration for online benchmark
-MODEL_NAME="model/Meta-Llama-3.1-8B-Instruct"
-LMCache_CONFIG_FILE_PATH="./config/lmcache.yaml"
-CacheBlend_CONFIG_FILE_PATH="./config/lmcache_blend.yaml"
-# [CacheBlend musique_s.json](https://github.com/YaoJiayi/CacheBlend/blob/main/inputs/musique_s.json)
+MODEL_NAME="LLM-Research/Meta-Llama-3.1-8B-Instruct"
 DATASET_PATH="musique_s.json"
 END=10 # process 10 examples
+
+LMCache_CONFIG_FILE_PATH="./config/lmcache.yaml"
+CacheBlend_CONFIG_FILE_PATH="./config/lmcache_blend.yaml"
 
 PROMPT_BUILD_METHOD=QA
 MAX_TOKENS=32
