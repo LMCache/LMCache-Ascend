@@ -6,11 +6,26 @@ cd /workspace/LMCache
 git apply /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
 ```
 
-# ad-hoc modification to vllm-ascend
+## Some ad-hoc changes needed in vLLM-Ascend for CacheBlend Integration
+These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
+
+- In `vllm-ascend/vllm-ascend/worker/worker_v1.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def init_worker_distributed_environment`.
+- In the same file, add 
+```
+from lmcache.v1.compute.models.utils import VLLMModelTracker
+from lmcache.integration.vllm.utils import ENGINE_NAME
+        
+VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)
+ensure_kv_transfer_initialized(self.vllm_config)
+```
+at the end of the function `def load_model`.
+
+
+<!-- # ad-hoc modification to vllm-ascend (**REMOVED / DEPRECATED)
 
 We took b5b7e0ecc765adfec4ec4efdd14bfc7cce715e23 of the official vllm-ascend repository (0.9.2) then made modifications from https://github.com/vllm-project/vllm-ascend/pull/2039 and added ad-hoc modifications based on https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
 
-The git diff file is at `examples/blending/since_b5b7e0ecc765adfec4ec4efdd14bfc7cce715e23.diff`.
+The git diff file is at `examples/blending/since_b5b7e0ecc765adfec4ec4efdd14bfc7cce715e23.diff`. -->
 
 # Usage
 

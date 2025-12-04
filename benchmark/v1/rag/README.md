@@ -8,6 +8,21 @@ cd /workspace/LMCache
 git apply /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
 ```
 
+## Some ad-hoc changes needed in vLLM-Ascend for CacheBlend Integration
+These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
+
+- In `vllm-ascend/vllm-ascend/worker/worker_v1.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def init_worker_distributed_environment`.
+- In the same file, add 
+```
+from lmcache.v1.compute.models.utils import VLLMModelTracker
+from lmcache.integration.vllm.utils import ENGINE_NAME
+        
+VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)
+ensure_kv_transfer_initialized(self.vllm_config)
+```
+at the end of the function `def load_model`.
+
+
 ## Overview
 This repository provides benchmarking tools for evaluating the performance of Language Models (LLMs) on **LMCache v1** under various scenarios. It supports both **online and offline testing modes**.
 The initial focus of this benchmark is the **RAG (Retrieval-augmented generation) use case**. The `rag.py` script simulates RAG workloads, enabling you to analyze the serving engine's **throughput and latency**.
