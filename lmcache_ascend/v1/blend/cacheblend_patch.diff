@@ -1,6 +1,4 @@
 diff --git a/lmcache/v1/config.py b/lmcache/v1/config.py
-old mode 100755
-new mode 100644
 index 785e9bd..a2cd000
 --- a/lmcache/v1/config.py
 +++ b/lmcache/v1/config.py
