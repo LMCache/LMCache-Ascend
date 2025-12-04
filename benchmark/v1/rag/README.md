@@ -1,7 +1,7 @@
 # Benchmarking LLM Performance: RAG Use Case
 
 ## Prerequisite: CacheBlend Bug Note
-There is a known bug in **CacheBlend** within **LMCache version 0.3.7** which causes a **low cache hit rate**. This issue is scheduled to be fixed in the upcoming **0.3.9** release.
+There is a known bug in **CacheBlend** within **LMCache version 0.3.7** which causes a **low cache hit rate**. This issue is scheduled to be fixed in the upcoming **0.3.10** release.
 **In the meantime, please apply the following patch before proceeding:**
 ```bash
 cd /workspace/LMCache
