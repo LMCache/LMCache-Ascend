@@ -51,6 +51,10 @@ The benchmark requires a serving engine running the **LLM-Research/Meta-Llama-3.
 | **Standard vLLM** | `vllm serve LLM-Research/Meta-Llama-3.1-8B-Instruct --disable-log-requests` |
 | **LMCache + CacheBlend** | `LMCACHE_CONFIG_FILE=./config/lmcache_blending.yaml python3 -m lmcache_vllm.vllm.entrypoints.openai.api_server --model LLM-Research/Meta-Llama-3.1-8B-Instruct --no-enable-prefix-caching --gpu-memory-utilization 0.8 --port 8000` |
 
+**NOTE**
+* **Prefix Cache Incompatibility:** CacheBlend and the **prefix cache cannot be enabled simultaneously**. Enabling one feature requires the other to be disabled.
+* **Supported Architectures:** Currently limited to **Llama** and **Qwen3** model architectures.
+
 ### 3. Run the Benchmark
 Use the provided scripts to launch the benchmark against the running engine:
 * Run `./online.sh` or `./offline.sh` to benchmark **LMcache + Prefix Cache** or **LMcache + CacheBlend**.
@@ -110,21 +114,7 @@ To benchmark CacheBlend, we need to precompute the KV cache of documents.
 - **Average TTFT (Time to First Token)**: Average time taken for the model to generate the first token of a response.
 - **Average Quality**: Average quality score of generation content.  
 
-## Benchmark Results
-
-The benchmark was executed on **20 samples** of the `musique_s.json` RAG dataset.
-
-CacheBlend Performance Summary：
-
-| Metric | Prefix Cache (Baseline) | CacheBlend | Improvement |
-| :--- | :--- | :--- | :--- |
-| **Average Quality (Score)** | $0.4115$ | $0.3621$ | $\downarrow 12.0\%$ (Minor) |
-| **End-to-End Latency(s)** | **$0.884$** | **$0.495$** | **$\downarrow 44\%$** |
-| **Throughput (Req/s)** | $1.131$ | $2.020$ | **$\uparrow 78.6\%$** |
-
-![alt text](imgs/image.png)
-
-**Conclusion:** CacheBlend achieved a massive performance improvement, nearly **doubling the throughput** and reducing the **End-to-End Latency by $\approx 44\%$**. This substantial gain comes with a **minor trade-off** in average quality score ($12.0\%$ decrease, from $0.4115$ to $0.3621$), which is often acceptable for achieving such significant latency benefits in production serving.
+We test CacheBlend in musique_s.json RAG dataset and achieved a massive performance improvement, nearly **doubling the throughput**. This substantial gain comes with a **minor trade-off** in average quality score, which is often acceptable for achieving such significant latency benefits in production serving.
 
 
 ## Dataset format
