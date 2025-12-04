@@ -1,16 +1,33 @@
-diff --git a/lmcache/integration/vllm/utils.py b/lmcache/integration/vllm/utils.py
-index 4692f00..bd2d86f
---- a/lmcache/integration/vllm/utils.py
-+++ b/lmcache/integration/vllm/utils.py
-@@ -55,6 +55,8 @@ def lmcache_get_or_create_config() -> Union[Config, V1Config]:
-                     )
-                     LMCacheEngineConfig = Config  # type: ignore[assignment]
-                 else:
-+                    from lmcache_ascend.v1.config import _validate_config
-+                    V1Config.validate = _validate_config
-                     LMCacheEngineConfig = V1Config  # type: ignore[assignment]
+diff --git a/lmcache/v1/config.py b/lmcache/v1/config.py
+old mode 100755
+new mode 100644
+index 785e9bd..a2cd000
+--- a/lmcache/v1/config.py
++++ b/lmcache/v1/config.py
+@@ -435,7 +435,7 @@ def _create_config_class():
+ def _validate_config(self):
+     """Validate configuration"""
+     # auto-adjust save_unfull_chunk for async loading to prevent CPU fragmentation
+-    if self.enable_async_loading or self.use_layerwise:
++    if self.enable_async_loading:
+         logger.warning(
+             "Automatically setting save_unfull_chunk=False because "
+             "enable_async_loading=True or use_layerwise=True to prevent "
+@@ -443,6 +443,14 @@ def _validate_config(self):
+         )
+         self.save_unfull_chunk = False
  
-                 if "LMCACHE_CONFIG_FILE" not in os.environ:
++    if self.enable_blending:
++        if not self.save_unfull_chunk:
++            logger.warning(
++                "Automatically setting save_unfull_chunk=True because "
++                "enable_blending=True"
++            )
++            self.save_unfull_chunk = True
++
+     if self.enable_p2p:
+         assert self.enable_controller
+         assert self.controller_pull_url is not None
 
 diff --git a/lmcache/v1/storage_backend/storage_manager.py b/lmcache/v1/storage_backend/storage_manager.py
 index 51c4788..07147e4 100755

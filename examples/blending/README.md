@@ -51,7 +51,6 @@ blend_recompute_ratios: 0.15
 
 ## 3. Current Limitations
 
-### Feature Limitations
 * **Prefix Cache Incompatibility:** CacheBlend and the **prefix cache cannot be enabled simultaneously**. Enabling one feature requires the other to be disabled.
 * **Supported Architectures:** Currently limited to **Llama** and **Qwen3** model architectures.
 * **Manual Segmentation Required:** Users must **manually insert** the defined separator string (`blend_special_str`) to correctly delineate segments within the prompt sequence.
