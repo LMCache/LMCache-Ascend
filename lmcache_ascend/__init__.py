@@ -1,7 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-from functools import partial
+
 import sys
+
+try:
+    import mindspore
+    RT_USE_MINDSPORE = True
+except ImportError:
+    RT_USE_MINDSPORE = False
+
+if RT_USE_MINDSPORE:
+    sys.exit()
+
+from functools import partial
 import lmcache
+
 import lmcache_ascend
 import lmcache_ascend.c_ops as ascend_c_ops
 

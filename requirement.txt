@@ -1,2 +1,0 @@
-torch
-torch_npu

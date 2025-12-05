@@ -17,7 +17,7 @@ from lmcache.v1.memory_management import (
     BufferAllocator,
     PinMemoryAllocator,
 )
-import lmcache_ascend.c_ops as lmc_ops
+import lmcache.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
