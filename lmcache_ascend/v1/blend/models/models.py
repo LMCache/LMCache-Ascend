@@ -1,8 +1,7 @@
 from torch import nn
-from lmcache_ascend.v1.blend.attention.attention import LMCAttnBackend
+from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnBackend
 from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnMetadata
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
-
 
 class LMCModel(nn.Module):
     def __init__(
@@ -16,11 +15,11 @@ class LMCModel(nn.Module):
         self.num_layers = len(vllm_model.model.layers)
 
         self.vllm_attn_layers = []
-        self.lmc_attn_layers: list[LMCAttnBackend] = []
+        self.lmc_attn_layers: list[LMCFlashAttnBackend] = []
         for i in range(self.num_layers):
             vllm_attn = vllm_model.model.layers[i].self_attn.attn
             self.vllm_attn_layers.append(vllm_attn)
-            self.lmc_attn_layers.append(LMCAttnBackend(vllm_attn))
+            self.lmc_attn_layers.append(LMCFlashAttnBackend(vllm_attn))
 
         # NOTE(Jiayi): better not to pass the blender in init
         # if we want to make this LMCModel more general.

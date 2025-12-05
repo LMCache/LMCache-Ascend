@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from typing import Optional,Union
 import os
 
 # Third Party
@@ -10,6 +10,7 @@ import torch
 from lmcache.logging import init_logger
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -24,6 +25,7 @@ class LMCBlender:
         cache_engine,
         gpu_connector,
         vllm_model,
+        config: LMCacheEngineConfig,
     ):
         self.cache_engine = cache_engine
         self.gpu_connector = gpu_connector
@@ -35,9 +37,9 @@ class LMCBlender:
 
         # TODO (Jiayi): make this less hard-coded
         self.common_metadata = LMCBlendCommonMetadata(
-            check_layers=[1],
-            recomp_ratios=[float(os.environ.get('LMCACHE_BLEND_RECOMPUTE_RATIO', '0.05'))],
-            thresholds=None,
+            check_layers=config.blend_check_layers,
+            recomp_ratios=config.blend_recompute_ratios,
+            thresholds=config.blend_thresholds,
         )
 
         # This will be set during the blending process
@@ -56,10 +58,16 @@ class LMCBlender:
         layer_id: int,
         attn_output: Optional[torch.Tensor],
         attn_metadata,
+        mask: Optional[torch.Tensor] = None,
         **kwargs
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
+
+        if mask is not None:
+            num_falses = mask.numel() - mask.long().sum().item()
+        else:
+            num_falses = 0
 
         if attn_output is None:
             attn_output = torch.empty(
@@ -81,9 +89,13 @@ class LMCBlender:
             q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
+            assert k[num_falses:].shape[0] == old_k.shape[0], \
+                "Mismatch between number of tokens in k (after skipping falses) and old_k"
+            
             diff_k = torch.sum(
-                (k.to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
+                (k[num_falses:].to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
             )
+
             total_len = diff_k.shape[0]
 
             # TODO(Jiayi): remove `[0]` hardcode
@@ -96,11 +108,13 @@ class LMCBlender:
             q = q[top_indices]
             residual = residual[top_indices]
 
+            logger.debug(f"Number of indices picked: {len(top_indices)}")
             logger.debug(f"Picking indices: {top_indices}")
             self.metadata.imp_indices = top_indices
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]
 
+            attn_metadata.update_from_top_indices(top_indices)
             attn_metadata.max_query_len = topk_num
             attn_metadata.query_start_loc = torch.tensor(
                 [0, topk_num], dtype=torch.int32, device=q.device
@@ -127,7 +141,7 @@ class LMCBlender:
 
         # TODO(Jiayi): store is currently not included in this function
 
-        layerwise_model_executor = self.layerwise_model.compute_layer(tokens)
+        layerwise_model_executor = self.layerwise_model.compute_layer(tokens, mask)
         layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
 
         next(layerwise_retriever)
@@ -145,13 +159,15 @@ class LMCBlender:
 
     def blend(
         self,
-        tokens: torch.Tensor,
+        tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
         """
         Perform blending for the given tokens.
         """
+        if isinstance(tokens, list):
+            tokens = torch.tensor(tokens).npu()
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
         for i in range(self.num_layers + 2):

@@ -117,6 +117,24 @@ class LMCFlashAttnBackend(AttentionInterface):
 
         return output
 
+    def init_attn_metadata(
+        self,
+        input_ids: torch.tensor,
+        **kwargs,
+    ) -> LMCFlashAttnMetadata:
+        seq_len = input_ids.shape[0]
+        device = input_ids.device
+        return LMCFlashAttnMetadata(
+            query_start_loc=torch.tensor(
+                [0, seq_len], dtype=torch.int32, device=device
+            ),
+            seq_lens=torch.tensor([seq_len], device=device),
+            cu_seqlens_k=torch.tensor([0, seq_len], dtype=torch.int32, device=device),
+            max_query_len=seq_len,
+            max_seq_len=seq_len,
+        )
+
+
 class LMCAttnBackend(AttentionInterface):
     """
     FlashAttention backend for LMCache.

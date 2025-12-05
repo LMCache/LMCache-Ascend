@@ -1,0 +1,4 @@
+max_local_cpu_size: 100
+enable_blending: False
+local_cpu: true
+chunk_size: 256

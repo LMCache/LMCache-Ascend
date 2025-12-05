@@ -2,6 +2,7 @@
 # Third Party
 from torch import nn
 import torch
+from typing import Optional
 
 # First Party
 from lmcache_ascend.v1.blend.attention.attention import LMCAttnBackend
@@ -10,11 +11,13 @@ from lmcache_ascend.v1.blend.models.models import LMCModel
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
 
 class LMCLlamaModel(LMCModel):
+    @torch.compile
     def compute_layer(
         self,
         input_ids: torch.Tensor,
+        mask: Optional[torch.Tensor] = None
     ):
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids.cuda())
+        hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
         residual = None
 
         # TODO (Jiayi): reduce the number of calls
@@ -61,7 +64,7 @@ class LMCLlamaModel(LMCModel):
             )
 
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, idx, attn_output, attn_metadata
+                q, k, v, residual, idx, attn_output, attn_metadata, mask
             )
 
             num_heads = self.vllm_attn_layers[idx].num_heads

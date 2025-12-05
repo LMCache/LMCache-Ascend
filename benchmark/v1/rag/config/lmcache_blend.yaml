@@ -1,0 +1,9 @@
+max_local_cpu_size: 100
+enable_blending: true
+blend_special_str: " # # "
+blend_min_tokens: 256
+use_layerwise: true
+blend_check_layers: 1
+local_cpu: true
+blend_recompute_ratios: 0.15
+save_unfull_chunk: True

@@ -56,6 +56,8 @@ def setup_environment_variables(recompute_ratio):
     os.environ["LMCACHE_BLEND_SELECTION_W"] = "-1"
     os.environ["LMCACHE_BLEND_SPECIAL_STR"] = "# #"
     os.environ["LMCACHE_USE_LAYERWISE"] = "True"
+    os.environ["LMCACHE_BLEND_CHECK_LAYERS"] = "1"
+    os.environ["LMCACHE_BLEND_RECOMPUTE_RATIOS"] = "0.15"
     os.environ["VLLM_USE_V1"] = "1"
 
     # Enable local CPU backend in LMCache
