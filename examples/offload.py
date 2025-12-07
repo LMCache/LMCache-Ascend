@@ -11,7 +11,7 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
 
-def setup_environment_variables(vllm_version: str, use_disk: bool = False):
+def setup_environment_variables(use_disk: bool = False):
     # LMCache-related environment variables
 
     # LMCache is set to use 256 tokens per chunk
@@ -38,7 +38,7 @@ def setup_environment_variables(vllm_version: str, use_disk: bool = False):
 
 
 @contextlib.contextmanager
-def build_llm_with_lmcache_ascend(model: str, vllm_version: str):
+def build_llm_with_lmcache_ascend(model: str):
     ktc = KVTransferConfig(
         kv_connector="LMCacheAscendConnectorV1Dynamic",
         kv_role="kv_both",
@@ -100,9 +100,9 @@ def main():
 
     model = "meta-llama/Llama-3.1-8B-Instruct"
 
-    setup_environment_variables(args.version, args.use_disk)
+    setup_environment_variables(args.use_disk)
 
-    with build_llm_with_lmcache(model, args.version) as llm:
+    with build_llm_with_lmcache_ascend(model) as llm:
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         shared_prompt = "Hello, how are you?" * 1000
