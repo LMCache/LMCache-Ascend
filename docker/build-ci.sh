@@ -16,17 +16,6 @@ DOCKER_ARGS+=( "--build-arg" "http_proxy=${http_proxy:-}" )
 DOCKER_ARGS+=( "--build-arg" "https_proxy=${https_proxy:-}" )
 DOCKER_ARGS+=( "--build-arg" "no_proxy=${no_proxy:-}" )
 
-if [ "${USE_HOST_NETWORK:-false}" == "true" ]; then
-    echo ">>> NOTICE: Enabling host network mode"
-    DOCKER_ARGS+=( "--network=host" )
-fi
-
-if [ "${IGNORE_SSL:-false}" == "true" ]; then
-    echo ">>> WARNING: Disabling SSL verification (Yum & Git)"
-    DOCKER_ARGS+=( "--build-arg" "YUM_FLAGS=--setopt=sslverify=false" )
-    DOCKER_ARGS+=( "--build-arg" "GIT_SSL_NO_VERIFY=true" )
-fi
-
 echo ">>> Running Docker Build..."
 docker build \
   "${DOCKER_ARGS[@]}" \

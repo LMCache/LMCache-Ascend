@@ -19,16 +19,12 @@ FROM quay.io/ascend/cann:8.2.rc1-910b-openeuler24.03-py3.11
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
 ARG SOC_VERSION=Ascend910B3
-ARG YUM_FLAGS=""
-ARG GIT_SSL_NO_VERIFY=false
 
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
 
-RUN yum update -y ${YUM_FLAGS} && \
-    yum install -y ${YUM_FLAGS} python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+RUN yum update -y && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
     rm -rf /var/cache/yum
-
-ENV GIT_SSL_NO_VERIFY=${GIT_SSL_NO_VERIFY}
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
