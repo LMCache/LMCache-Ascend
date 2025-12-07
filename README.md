@@ -26,14 +26,27 @@ LMCache-Ascend is a community maintained plugin for running LMCache on the Ascen
 
 To use LMCache-Ascend on the NPU hardware, please make sure the following prerequisites are satisfied.
 
-- Hardware: Atlas 800I A2 Inference series. The rest of the series like A3 Inference/Training and 300I Duo are experimental.
-- OS: Linux-based.
-- Software:
+- **Hardware**: Atlas 800I A2 Inference series. (A3 Inference/Training and 300I Duo are experimental).
+- **OS**: Linux-based.
+- **Software**:
   - **Python**: >= 3.10, <= 3.11
   - **CANN Toolkit**: >= 8.2rc1
   - **Ascend Driver**: >= 24.1
-  - **PyTorch**: == 2.5.1, **Torch-npu**: == 2.5.1.post1.dev20250619
-  - **vLLM**: v0.9.2 & **vLLM-Ascend**: v0.9.2rc1
+  - **PyTorch**: == 2.7.1 (For vLLM 0.10.2+)
+  - **vLLM**: v0.10.2 & **vLLM-Ascend**: v0.10.2
+
+### Compatibility Matrix
+
+Please ensure your environment matches the versions below.
+
+| LMCache-Ascend | vLLM Version | PyTorch / Torch-NPU | Status |
+| :--- | :--- | :--- | :--- |
+| **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
+| **v0.3.7** | **v0.11.x** | **2.7.1** | 🚧 **Experimental** |
+| v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
+
+> **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
+
 
 ## Getting Started
 
@@ -50,7 +63,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.3-vllm-ascend-v0.9.2rc1-910b-cann-8.2rc1-py3.11-openeuler-22.03 .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-910b-cann-8.2rc1-py3.11-openeuler-24.03 .
 ```
 
 Once that is built, run it with the following cmd
@@ -74,7 +87,7 @@ docker run -it \
     -v /dev/devmm_svm:/dev/devmm_svm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    lmcache-ascend:v0.3.3-vllm-ascend-v0.9.2rc1-910b-cann-8.2rc1-py3.11-openeuler-22.03 \
+    lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-910b-cann-8.2rc1-py3.11-openeuler-24.03 \
     /bin/bash
 ```
 
@@ -87,7 +100,7 @@ Assuming your working directory is ```/workspace```.
 1. Clone and Install vLLM Repo
 ```bash
 VLLM_REPO=https://github.com/vllm-project/vllm.git
-VLLM_TAG=v0.9.2
+VLLM_TAG=v0.10.2
 git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
 # NOTE: There is an Ascend Triton but we don't currently support it properly.
 VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
@@ -100,11 +113,8 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
-VLLM_ASCEND_TAG=v0.9.2rc1
+VLLM_ASCEND_TAG=v0.10.2.rc1
 git clone --depth 1 $VLLM_ASCEND_REPO --branch $VLLM_ASCEND_TAG /workspace/vllm-ascend
-# apply patch to v0.9.2rc1
-cd /workspace/vllm-ascend && \
-    git apply -p1 /workspace/LMCache-Ascend/docker/kv-connector-v1.diff
 
 export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 
@@ -164,3 +174,7 @@ ktc = KVTransferConfig(
 1. Why do I have HostRegisterError ? 
   - If you encounter the Host Register Error within a container environment, please make sure you add the IPC_LOCK capabilities.
   - Otherwise, please check your driver version is >= 24.0
+2. Why do I have build error related to `cstdint` during manual installation using openEuler 24.03 ?
+  - The `CPLUS_INCLUDE_PATH` requires user manual setup, please see the [dockerfile](./docker/Dockerfile.a2.openEuler)
+3. Why do I have error for the `example/offload.py` in the main LMCache repo ?
+  - The import order can affect the LMCacheAscend connector, therefore please see our example [here](./examples/offload.py).
