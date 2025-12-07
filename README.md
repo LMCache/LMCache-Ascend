@@ -113,7 +113,7 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
 VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
-VLLM_ASCEND_TAG=v0.10.2.rc1
+VLLM_ASCEND_TAG=v0.10.2rc1
 git clone --depth 1 $VLLM_ASCEND_REPO --branch $VLLM_ASCEND_TAG /workspace/vllm-ascend
 
 export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
