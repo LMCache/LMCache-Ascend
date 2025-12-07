@@ -47,8 +47,8 @@ def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str
         kv_role="kv_both",
         kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
-    # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
-    # memory. Reduce the value if your GPU has less memory.
+    # Set NPU memory utilization to 0.8 for an Ascend NPU with 40GB
+    # memory. Reduce the value if your NPU has less memory.
     # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
     if vllm_version == "v0":
         llm_args = EngineArgs(
