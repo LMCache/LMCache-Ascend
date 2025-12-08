@@ -12,3 +12,6 @@ _build_info.py
 fusion_result.json
 kernel_meta
 
+output
+schedule.log
+

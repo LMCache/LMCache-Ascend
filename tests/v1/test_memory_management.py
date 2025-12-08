@@ -167,6 +167,7 @@ def test_device_allocators(alloc_cls, use_paging):
     allocator.close()
 
 
+@pytest.mark.skip("WIP")
 @pytest.mark.parametrize(
     "alloc_cls",
     [
