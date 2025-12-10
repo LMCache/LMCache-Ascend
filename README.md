@@ -239,7 +239,7 @@ We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefor
 #### Online serving
 ```bash
 python \
-    -m vllm.entrypoints.openai.api_server \
+    -m vllm_mindspore.entrypoints vllm.entrypoints.openai.api_server \
     --port 8100 \
     --model /data/models/Qwen/Qwen3-32B \
     --trust-remote-code \

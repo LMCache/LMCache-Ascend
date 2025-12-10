@@ -11,6 +11,7 @@
       }                                     \
     } while(0)
 #else
-    #define LMCACHE_ASCEND_CHECK(...) TORCH_CHECK(__VA_ARGS__)
+  #include "torch/extension.h"
+  #define LMCACHE_ASCEND_CHECK(...) TORCH_CHECK(__VA_ARGS__)
 #endif
 

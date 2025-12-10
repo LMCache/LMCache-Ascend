@@ -200,10 +200,10 @@ class CustomAscendCmakeBuildExt(build_ext):
             ms_path = os.path.dirname(os.path.abspath(mindspore.__file__))
             cmake_cmd += [f"  -DMINDSPORE_PATH={ms_path}"]
         else:
+            import torch
             import torch_npu
             torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
             torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
-            import torch
             torch_path = os.path.dirname(os.path.abspath(torch.__file__))
             cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
             cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
@@ -229,7 +229,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         build_lib_dir = self.get_ext_fullpath(ext.name)
         os.makedirs(os.path.dirname(build_lib_dir), exist_ok=True)
         
-        src_dir = os.path.join(ROOT_DIR, "lmcache_ascend/mindspore" if USE_MINDSPORE else "lmcache_ascend/torch")
+        src_dir = os.path.join(ROOT_DIR, "lmcache_ascend/mindspore" if USE_MINDSPORE else "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = [
