@@ -213,17 +213,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        # lmc_ops.multi_layer_kv_transfer(
-        #     memory_obj.tensor,
-        #     kv_cache_pointers,
-        #     slot_mapping[start:end],
-        #     self.kvcaches_device,
-        #     self.page_buffer_size,
-        #     False,
-        #     self.use_mla,
-        #     self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
-        # )
-
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
@@ -231,6 +220,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.page_buffer_size,
             False,
             self.use_mla,
+            self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
         )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -269,37 +259,18 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         with torch.cuda.stream(self.store_stream):
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                # lmc_ops.multi_layer_kv_transfer(
-                #     memory_obj.tensor, 
-                #     kv_cache_pointers, 
-                #     slot_mapping[start:end], 
-                #     self.kvcaches_device,
-                #     self.page_buffer_size,
-                #     True,
-                #     self.use_mla,
-                #     self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
-                # )
                 lmc_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor,
-                    kv_cache_pointers,
-                    slot_mapping[start:end],
+                    memory_obj.tensor, 
+                    kv_cache_pointers, 
+                    slot_mapping[start:end], 
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
                 )
             else:
                 assert self.gpu_buffer.device == self.kvcaches_device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                # lmc_ops.multi_layer_kv_transfer(
-                #     tmp_gpu_buffer,
-                #     kv_cache_pointers,
-                #     slot_mapping[start:end],
-                #     self.kvcaches_device,
-                #     self.page_buffer_size,
-                #     True,
-                #     self.use_mla,
-                #     self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
-                # )
                 lmc_ops.multi_layer_kv_transfer(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
@@ -307,6 +278,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
+                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
                 )
                 memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 

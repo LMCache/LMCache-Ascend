@@ -1,9 +1,9 @@
 #include "dcmi_management.h"
 #include "dlfcn.h"
-#include "torch/torch.h"
-#include "torch/extension.h"
+#include "exception.h"
 #include <sstream>
 #include <string>
+#include <iomanip>
 
 namespace dcmi_ascend {
 
@@ -12,10 +12,10 @@ using initFunc = int(*)(void);
 
 DCMIManager::DCMIManager() {
     this->libHandle_ = dlopen("libdcmi.so", RTLD_LAZY | RTLD_GLOBAL);
-    TORCH_CHECK(this->libHandle_ != nullptr, "dlopen libdcmi.so failed");
+    LMCACHE_ASCEND_CHECK(this->libHandle_ != nullptr, "dlopen libdcmi.so failed");
     auto init_func = reinterpret_cast<initFunc>(dlsym(this->libHandle_, "dcmi_init"));
     auto ret = init_func();
-    TORCH_CHECK(ret == 0, "dcmi_init failed, ret = ", ret);
+    LMCACHE_ASCEND_CHECK(ret == 0, "dcmi_init failed, ret = ", ret);
 };
 
 DCMIManager::~DCMIManager() {
@@ -27,7 +27,7 @@ DCMIManager::~DCMIManager() {
 std::string DCMIManager::getDevicePcieInfoV2(int cardId, int deviceId, dcmi_pcie_info_all* pcieInfo) {
     auto func = reinterpret_cast<pcieInfoV2Func>(dlsym(this->libHandle_, "dcmi_get_device_pcie_info_v2"));
     auto ret = func(cardId, deviceId, pcieInfo);
-    TORCH_CHECK(ret == 0, "dcmi_get_device_pcie_info_v2 failed, ret = ", ret);
+    LMCACHE_ASCEND_CHECK(ret == 0, "dcmi_get_device_pcie_info_v2 failed, ret = ", ret);
     std::ostringstream oss;
     oss << std::setfill('0') 
         << std::hex 

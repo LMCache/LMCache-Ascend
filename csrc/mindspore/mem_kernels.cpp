@@ -129,13 +129,18 @@ public:
   bool use_mla_{0};
 };
 
-void multi_layer_kv_transfer(
-    py::array& key_value,
-    ms::Tensor key_value_ptrs,
-    ms::Tensor slot_mappings,
-    const int page_buffer_size,
-    const bool direction,
-    const bool use_mla) {
+void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens, hidden]
+                             ms::Tensor key_value_ptrs, // [num_layers]
+                             ms::Tensor slot_mapping, // [num_tokens]
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla, const int kvcache_format_raw) {
+// void multi_layer_kv_transfer(
+//     py::array& key_value,
+//     ms::Tensor key_value_ptrs,
+//     ms::Tensor slot_mappings,
+//     const int page_buffer_size,
+//     const bool direction,
+//     const bool use_mla) {
         // reset
         if (direction) {
             memset(static_cast<void*>(key_value.mutable_data()), 0, key_value.nbytes());
@@ -148,7 +153,7 @@ void multi_layer_kv_transfer(
 
         ms::pynative::PyboostRunner::Call<0>(
         MultiLayerKvTransferOp::Eval, lmc_offset_dptr, key_value_type, hidden_dims, key_value_ptrs,
-        slot_mappings, page_buffer_size, direction, use_mla);
+        slot_mapping, page_buffer_size, direction, use_mla);
 }
 
 // TODO: implement

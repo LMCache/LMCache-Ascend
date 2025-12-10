@@ -27,18 +27,11 @@ void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_ops::As
 }
 
 
-// void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens, hidden]
-//                              ms::Tensor key_value_ptrs, // [num_layers]
-//                              ms::Tensor slot_mapping, // [num_tokens]
-//                              const int page_buffer_size, const bool direction,
-//                              const bool use_mla);
-
-void multi_layer_kv_transfer(
-    py::array& key_value,
-    ms::Tensor key_value_ptrs,
-    ms::Tensor slot_mappings,
-    const int page_buffer_size, const bool direction,
-    const bool use_mla);
+void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens, hidden]
+                             ms::Tensor key_value_ptrs, // [num_layers]
+                             ms::Tensor slot_mapping, // [num_tokens]
+                             const int page_buffer_size, const bool direction,
+                             const bool use_mla, const int kvcache_format_raw);
 
 // void multi_layer_kv_transfer_unilateral(ms::Tensor& key_value,
 //                                         const ms::Tensor& key_ptrs,
@@ -49,9 +42,9 @@ void multi_layer_kv_transfer(
 //                                         const bool direction);
 
 // void single_layer_kv_transfer(py::array& key_value,
-//                               BaseTensorPtr& vllm_key_cache,
-//                               BaseTensorPtr& vllm_value_cache,
-//                               BaseTensorPtr& slot_mapping,
+//                               ms::Tensor vllm_key_cache,
+//                               ms::Tensor vllm_value_cache,
+//                               ms::Tensor slot_mapping,
 //                               const bool direction,
 //                               const bool token_major = false);
 

@@ -14,7 +14,6 @@
 #include "dcmi_management.h"
 #include <sys/stat.h>
 #include <unistd.h>
-#include "threading.h"
 #include <memory>
 
 namespace lmc {
