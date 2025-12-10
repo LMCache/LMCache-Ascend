@@ -126,6 +126,11 @@ class custom_build_info(build_py):
         with open(package_dir, "w+") as f:
             f.write('# Auto-generated file\n')
             f.write(f"__soc_version__ = '{soc_version}'\n")
+            if USE_MINDSPORE:
+                framework_name = "mindspore"
+            else:
+                framework_name = "pytorch"
+            f.write(f"__framework_name__ = '{framework_name}'\n")
         logging.info(
             f"Generated _build_info.py with SOC version: {soc_version}")
         super().run()
@@ -292,10 +297,11 @@ class CustomAscendCmakeBuildExt(build_ext):
 def ascend_extension():
     print("Building Ascend extensions")
     if USE_MINDSPORE:
-        return [CMakeExtension(name="lmcache_ascend.mindspore.c_ops")], {
-            "build_ext": CustomAscendCmakeBuildExt
-        }
-    return [CMakeExtension(name="lmcache_ascend.c_ops")], {
+        ext_name = "lmcache_ascend.mindspore.c_ops"
+    else:
+        ext_name = "lmcache_ascend.c_ops"
+
+    return [CMakeExtension(name=ext_name)], {
         "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt
     }

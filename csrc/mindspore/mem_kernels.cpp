@@ -155,7 +155,8 @@ void multi_layer_kv_transfer_unilateral(ms::Tensor& key_value,
                                         const ms::Tensor& slot_mapping,
                                         const int page_buffer_size,
                                         const bool direction) {
-    throw std::runtime_error("multi_layer_kv_transfer_unilateral Not Supported");
+    PyErr_SetString(PyExc_NotImplementedError, "multi_layer_kv_transfer_unilateral Not Supported");
+    throw py::error_already_set();
 }
 
 void single_layer_kv_transfer(ms::Tensor& lmc_key_value_cache,
@@ -164,13 +165,15 @@ void single_layer_kv_transfer(ms::Tensor& lmc_key_value_cache,
                               const bool direction,
                               const bool token_major,
                               const bool vllm_two_major) {
-    throw std::runtime_error("single_layer_kv_transfer Not Supported");
+    PyErr_SetString(PyExc_NotImplementedError, "single_layer_kv_transfer Not Supported");
+    throw py::error_already_set();
 }
 
 void load_and_reshape_flash(ms::Tensor& key_value, ms::Tensor& key_cache,
                             ms::Tensor& value_cache,
                             ms::Tensor& slot_mapping, const int layer_idx) {
-    throw std::runtime_error("load_and_reshape_flash Not Supported");
+    PyErr_SetString(PyExc_NotImplementedError, "load_and_reshape_flash Not Supported");
+    throw py::error_already_set();
 }
 
 void reshape_and_cache_back_flash(ms::Tensor& key_value,
@@ -178,5 +181,6 @@ void reshape_and_cache_back_flash(ms::Tensor& key_value,
                                   ms::Tensor& value_cache,
                                   ms::Tensor& slot_mapping,
                                   const int layer_idx) {
-    throw std::runtime_error("reshape_and_cache_back_flash Not Supported");
+    PyErr_SetString(PyExc_NotImplementedError, "reshape_and_cache_back_flash Not Supported");
+    throw py::error_already_set();
 }

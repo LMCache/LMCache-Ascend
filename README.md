@@ -245,7 +245,7 @@ python \
     --trust-remote-code \
     --disable-log-requests \
     --block-size 128 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.mindspore.integration.vllm.lmcache_ascend_connector_v1"}'
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
 ```
 
 #### Offline
@@ -253,7 +253,7 @@ python \
 ktc = KVTransferConfig(
         kv_connector="LMCacheAscendConnectorV1Dynamic",
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.mindspore.integration.vllm.lmcache_ascend_connector_v1"
+        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
 ```
 

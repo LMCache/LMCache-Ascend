@@ -1,14 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
+from lmcache_ascend import _build_info
 
-try:
-    import mindspore as ms
-    RT_USE_MINDSPORE = True
-except ImportError:
-    RT_USE_MINDSPORE = False
-
-if not RT_USE_MINDSPORE:
+if _build_info.__framework_name__ == "pytorch":
+    import sys
     from functools import partial
     import lmcache
 
