@@ -19,10 +19,9 @@ import lmcache.v1.storage_backend
 from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import StorageBackendInterface___init__
 lmcache.v1.storage_backend.StorageBackendInterface.__init__ = StorageBackendInterface___init__
 
-from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2, VLLMPagedMemLayerwiseNPUConnector
+from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2
 import lmcache.v1.gpu_connector
 lmcache.v1.gpu_connector.VLLMPagedMemGPUConnectorV2 = VLLMPagedMemNPUConnectorV2
-lmcache.v1.gpu_connector.VLLMPagedMemLayerwiseGPUConnector = VLLMPagedMemLayerwiseNPUConnector
 
 import lmcache.v1.system_detection
 from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys

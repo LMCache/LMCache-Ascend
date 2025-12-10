@@ -21,6 +21,3 @@ namespace vllm_ascend {
         }
     }
 } // namespace vllm_ascend
-
-
-

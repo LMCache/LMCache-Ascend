@@ -134,88 +134,49 @@ void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens
                              ms::Tensor slot_mapping, // [num_tokens]
                              const int page_buffer_size, const bool direction,
                              const bool use_mla, const int kvcache_format_raw) {
-// void multi_layer_kv_transfer(
-//     py::array& key_value,
-//     ms::Tensor key_value_ptrs,
-//     ms::Tensor slot_mappings,
-//     const int page_buffer_size,
-//     const bool direction,
-//     const bool use_mla) {
-        // reset
-        if (direction) {
-            memset(static_cast<void*>(key_value.mutable_data()), 0, key_value.nbytes());
-        }
-        uintptr_t lmc_offset_dptr = reinterpret_cast<uintptr_t>(lmc::get_device_ptr(key_value.mutable_data()));
-        kvcache_ops::AscendType key_value_type = get_dtype_from_np(key_value);
+    // reset
+    if (direction) {
+        memset(static_cast<void*>(key_value.mutable_data()), 0, key_value.nbytes());
+    }
+    uintptr_t lmc_offset_dptr = reinterpret_cast<uintptr_t>(lmc::get_device_ptr(key_value.mutable_data()));
+    kvcache_ops::AscendType key_value_type = get_dtype_from_np(key_value);
 
-        int ndim = key_value.ndim();
-        int hidden_dims = static_cast<int>(key_value.shape(ndim - 1));
+    int ndim = key_value.ndim();
+    int hidden_dims = static_cast<int>(key_value.shape(ndim - 1));
 
-        ms::pynative::PyboostRunner::Call<0>(
-        MultiLayerKvTransferOp::Eval, lmc_offset_dptr, key_value_type, hidden_dims, key_value_ptrs,
-        slot_mapping, page_buffer_size, direction, use_mla);
+    ms::pynative::PyboostRunner::Call<0>(
+    MultiLayerKvTransferOp::Eval, lmc_offset_dptr, key_value_type, hidden_dims, key_value_ptrs,
+    slot_mapping, page_buffer_size, direction, use_mla);
 }
 
-// TODO: implement
-// void single_layer_kv_transfer(py::array& lmc_key_value_cache, // [num_tokens, 2, num_heads*head_size] or [2, num_tokens, num_heads*head_size],
-//                                                               // determined by token_major
-//                               BaseTensorPtr& vllm_key_cache, // [num_blocks, block_size, num_heads, head_size]
-//                               BaseTensorPtr& vllm_value_cache, // [num_blocks, block_size, num_heads, head_size]
-//                               BaseTensorPtr& slot_mapping, // [num_tokens] && vals in range(0, num_blocks * block_size)
-//                               const bool direction, // true = PagedBuffer to LMCache 
-//                               const bool token_major // conditions lmc_key_value_cache format
-// ) {
-//     int stream_id = PyBoostUtils::cur_stream_id();
-//     mindspore::device::DeviceContext* device_context = mindspore::runtime::OpRunner::GetDeviceContext("Ascend");
+void multi_layer_kv_transfer_unilateral(ms::Tensor& key_value,
+                                        const ms::Tensor& key_ptrs,
+                                        const ms::Tensor& value_ptrs,
+                                        const ms::Tensor& slot_mapping,
+                                        const int page_buffer_size,
+                                        const bool direction) {
+    throw std::runtime_error("multi_layer_kv_transfer_unilateral Not Supported");
+}
 
-//     auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(aclrtGetSocName());
-//     uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
+void single_layer_kv_transfer(ms::Tensor& lmc_key_value_cache,
+                              ms::Tensor& vllm_key_value_cache,
+                              ms::Tensor& slot_mapping,
+                              const bool direction,
+                              const bool token_major,
+                              const bool vllm_two_major) {
+    throw std::runtime_error("single_layer_kv_transfer Not Supported");
+}
 
-//     int num_tokens = slot_mapping->shape()[0];
+void load_and_reshape_flash(ms::Tensor& key_value, ms::Tensor& key_cache,
+                            ms::Tensor& value_cache,
+                            ms::Tensor& slot_mapping, const int layer_idx) {
+    throw std::runtime_error("load_and_reshape_flash Not Supported");
+}
 
-//     int ndim = lmc_key_value_cache.ndim();
-//     int hidden_dims = static_cast<int>(lmc_key_value_cache.shape(ndim - 1));
-//     auto cache_type = get_dtype_from_np(lmc_key_value_cache);
-//     kvcache_ops::AscendType slot_type = get_dtype_from_ms(slot_mapping->data_type());
-
-//     uintptr_t lmc_kv_dest_ptr = reinterpret_cast<uintptr_t>(lmc::get_device_ptr(lmc_key_value_cache.mutable_data()));
-
-//     PyBoostUtils::PrepareOpInputs(
-//         device_context,
-//         stream_id,
-//         vllm_key_cache,
-//         vllm_value_cache,
-//         slot_mapping);
-
-//     PyBoostUtils::DispatchRun(std::make_shared<mindspore::runtime::PyBoostDeviceTask>([=]() {
-//         PyBoostUtils::MallocOpInputs(
-//             device_context,
-//             vllm_key_cache,
-//             vllm_value_cache,
-//             slot_mapping);
-        
-//         uint8_t* paged_key_dev_ptr = GetMSDataPtr(vllm_key_cache);
-//         uint8_t* paged_value_dev_ptr = GetMSDataPtr(vllm_value_cache);
-//         uint8_t* slot_mapping_ptr = GetMSDataPtr(slot_mapping);
-
-//         auto acl_stream = device_context->device_res_manager_->GetStream(stream_id);
-
-//         mindspore::runtime::OpExecutor::DispatchLaunchTask([=]() {
-//             kvcache_ops::single_layer_kv_transfer_kernel(
-//                 cache_type,
-//                 slot_type,
-//                 aiv_num,
-//                 acl_stream,
-//                 reinterpret_cast<uint8_t*>(lmc_kv_dest_ptr),
-//                 paged_key_dev_ptr,
-//                 paged_value_dev_ptr,
-//                 slot_mapping_ptr,
-//                 hidden_dims,
-//                 num_tokens,
-//                 direction, // page2L in interface
-//                 token_major,
-//                 false // is_MLA
-//             );
-//         });
-//     }));
-// }
+void reshape_and_cache_back_flash(ms::Tensor& key_value,
+                                  ms::Tensor& key_cache,
+                                  ms::Tensor& value_cache,
+                                  ms::Tensor& slot_mapping,
+                                  const int layer_idx) {
+    throw std::runtime_error("reshape_and_cache_back_flash Not Supported");
+}
