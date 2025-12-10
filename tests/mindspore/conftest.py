@@ -11,6 +11,7 @@ import time
 
 # Third Party
 import pytest
+import mindspore
 
 # First Party
 import lmcache_ascend.mindspore
