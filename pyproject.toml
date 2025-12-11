@@ -13,6 +13,7 @@ name = "lmcache-ascend"
 authors = [
     { name = "LMCache Team", email = "lmcacheteam@gmail.com" },
     { name = "GingFung Matthew Yeung", email = "gingfung.matthew.yeung@huawei.com" },
+    { name = "Junyuan Jing", email = "jjysama@gmail.com" },
 ]
 license = { text = "Apache-2.0" }
 readme = "README.md"
@@ -43,7 +44,7 @@ local_scheme = "no-local-version"
 
 [tool.setuptools.packages.find]
 where = [""]
-include = ["lmcache_ascend", "lmcache_ascend*"]
+include = ["lmcache_ascend", "lmcache_ascend*", "lmcache_ascend/mindspore", "lmcache_ascend/mindspore*"]
 
 [tool.ruff]
 # same as Black's default line length
@@ -88,7 +89,7 @@ from-first = true
 # import-heading-localfolder=Local
 
 [tool.mypy]
-modules = ["lmcache_ascend", "tests"]
+modules = ["lmcache_ascend", "lmcache_ascend.mindspore", "tests"]
 
 # TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [

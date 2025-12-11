@@ -24,11 +24,11 @@ ROOT_DIR = Path(__file__).parent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 def _get_ascend_home_path():
     # NOTE: standard Ascend CANN toolkit path
     return os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
-
 
 def _get_ascend_env_path():
     # NOTE: standard Ascend Environment variable setup path
@@ -41,7 +41,6 @@ def _get_ascend_env_path():
             "please make sure environment variable 'ASCEND_HOME_PATH' is set correctly."
         )
     return env_script_path
-
 
 def _get_npu_soc():
     """
@@ -114,6 +113,7 @@ class custom_build_info(build_py):
 
     def run(self):
         soc_version = _get_npu_soc()
+
         if not soc_version:
             raise ValueError(
                 "SOC version is not set. Please set SOC_VERSION environment variable."
@@ -123,6 +123,11 @@ class custom_build_info(build_py):
         with open(package_dir, "w+") as f:
             f.write('# Auto-generated file\n')
             f.write(f"__soc_version__ = '{soc_version}'\n")
+            if USE_MINDSPORE:
+                framework_name = "mindspore"
+            else:
+                framework_name = "pytorch"
+            f.write(f"__framework_name__ = '{framework_name}'\n")
         logging.info(
             f"Generated _build_info.py with SOC version: {soc_version}")
         super().run()
@@ -137,7 +142,6 @@ class custom_install(install):
     def run(self):
         self.run_command("build_ext")
         install.run(self)
-
 
 class CustomAscendCmakeBuildExt(build_ext):
     def build_extension(self, ext):
@@ -170,21 +174,12 @@ class CustomAscendCmakeBuildExt(build_ext):
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
-        import torch_npu
-
-        torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
-        import torch
-
-        torch_path = os.path.dirname(os.path.abspath(torch.__file__))
-
         # python include
         python_include_path = sysconfig.get_path("include", scheme="posix_prefix")
 
         install_path = os.path.join(BUILD_OPS_DIR, "install")
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
-        
-        torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
 
         cmake_cmd = [
             f". {env_path} && "
@@ -193,17 +188,28 @@ class CustomAscendCmakeBuildExt(build_ext):
             f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
             f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
-            f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
             f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"
             f"  -DCMAKE_BUILD_TYPE=Release"
             f"  -DCMAKE_INSTALL_PREFIX={install_path}"
             f"  -DPYTHON_INCLUDE_PATH={python_include_path}"
-            f"  -DTORCH_NPU_PATH={torch_npu_path}"
-            f"  -DTORCH_PATH={torch_path}"
             f"  -DASCEND_CANN_PACKAGE_PATH={ascend_home_path}"
             "  -DCMAKE_VERBOSE_MAKEFILE=ON"
         ]
+
+        if USE_MINDSPORE:
+            import mindspore
+            ms_path = os.path.dirname(os.path.abspath(mindspore.__file__))
+            cmake_cmd += [f"  -DMINDSPORE_PATH={ms_path}"]
+        else:
+            import torch
+            import torch_npu
+            torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
+            torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
+            torch_path = os.path.dirname(os.path.abspath(torch.__file__))
+            cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
+            cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
+            cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
 
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
@@ -222,12 +228,10 @@ class CustomAscendCmakeBuildExt(build_ext):
             )
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Failed to build {so_name}: {e}")
-
         build_lib_dir = self.get_ext_fullpath(ext.name)
         os.makedirs(os.path.dirname(build_lib_dir), exist_ok=True)
-
-        package_name = ext.name.split(".")[0]  # e.g., 'lmcache'
-        src_dir = os.path.join(ROOT_DIR, package_name)
+        
+        src_dir = os.path.join(ROOT_DIR, "lmcache_ascend/mindspore" if USE_MINDSPORE else "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = [
@@ -289,7 +293,12 @@ class CustomAscendCmakeBuildExt(build_ext):
 
 def ascend_extension():
     print("Building Ascend extensions")
-    return [CMakeExtension(name="lmcache_ascend.c_ops")], {
+    if USE_MINDSPORE:
+        ext_name = "lmcache_ascend.mindspore.c_ops"
+    else:
+        ext_name = "lmcache_ascend.c_ops"
+
+    return [CMakeExtension(name=ext_name)], {
         "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt
     }
@@ -297,12 +306,11 @@ def ascend_extension():
 
 if __name__ == "__main__":
     ext_modules, cmdclass = ascend_extension()
-
     setup(
         packages=find_packages(
             exclude=("csrc",)
         ),  # Ensure csrc is excluded if it only contains sources
         ext_modules=ext_modules,
         cmdclass=cmdclass,
-        include_package_data=True,
+        include_package_data=True
     )

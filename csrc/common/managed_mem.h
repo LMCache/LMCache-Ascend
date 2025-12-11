@@ -1,8 +1,6 @@
 #pragma once
 #include <shared_mutex>
 #include <map>
-#include <torch/torch.h>
-#include <torch/extension.h>
 
 namespace lmc {
 
@@ -57,19 +55,16 @@ public:
     size_t                  getRecordSize(void* hostPtr);
     void                    unregisterAll();
 };
+
+std::string get_driver_version();
+bool is_version_at_least_25(const std::string& version_str);
+// Uregisters the malloced hostPtr
+void hal_host_unregister_ptr(void* ptr);
+
 } // namespace lmc
 
 void* register_ptr(void* ptr, size_t size);
 int unregister_ptr(void* ptr);
 
-// Register a tensor on the current device
-// Inputs: 
-// -tensor: The tensor to register on the device
-// Returns the device ptr for that tensor
-void* register_tensor(torch::Tensor& tensor);
-// Reverse of register
-// Inputs: 
-// -tensor: The tensor to register on the device
-void  unregister_tensor(torch::Tensor& tensor);
 // Takes in input a host pointer, returns the corresponding device pointer
 void* get_device_ptr(void* ptr);
