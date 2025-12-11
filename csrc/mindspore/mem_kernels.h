@@ -3,10 +3,6 @@
 #include "kernels/types.h"
 #include "ms_extension/api.h"
 
-using BaseTensor = mindspore::tensor::BaseTensor;
-using BaseTensorPtr = mindspore::tensor::BaseTensorPtr;
-using PyBoostUtils = mindspore::kernel::pyboost::PyBoostUtils;
-
 namespace kvcache_ops {
 void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, const kvcache_ops::KVCacheFormat kvcache_format,
                                     uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 

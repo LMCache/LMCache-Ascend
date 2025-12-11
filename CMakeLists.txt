@@ -67,6 +67,7 @@ if(DEFINED ENV{USE_MINDSPORE})
     platform
     ascend_hal
     tiling_api
+    numa
   )
 
 else()

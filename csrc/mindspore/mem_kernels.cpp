@@ -9,6 +9,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h> 
 #include <string>
+#include "managed_mem.h"
 
 kvcache_ops::AscendType get_dtype_from_np(const py::array& arr) {
     py::object array_dtype_obj = arr.dtype();
@@ -138,7 +139,7 @@ void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens
     if (direction) {
         memset(static_cast<void*>(key_value.mutable_data()), 0, key_value.nbytes());
     }
-    uintptr_t lmc_offset_dptr = reinterpret_cast<uintptr_t>(lmc::get_device_ptr(key_value.mutable_data()));
+    uintptr_t lmc_offset_dptr = reinterpret_cast<uintptr_t>(get_device_ptr(key_value.mutable_data()));
     kvcache_ops::AscendType key_value_type = get_dtype_from_np(key_value);
 
     int ndim = key_value.ndim();

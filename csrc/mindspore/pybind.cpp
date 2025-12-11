@@ -6,6 +6,7 @@
 #include "managed_mem.h"
 #include "mem_alloc.h"
 #include "dcmi_management.h"
+#include "managed_numpy.h"
 
 namespace py = pybind11;
 

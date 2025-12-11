@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <sstream>
 
 #if defined(USE_MINDSPORE) && (USE_MINDSPORE)
   #define LMCACHE_ASCEND_CHECK(cond, ...)   \
@@ -9,7 +10,7 @@
         ss << __VA_ARGS__;                  \
         throw std::runtime_error(ss.str()); \
       }                                     \
-    } while(0)
+    } while(0);
 #else
   #include "torch/extension.h"
   #define LMCACHE_ASCEND_CHECK(...) TORCH_CHECK(__VA_ARGS__)

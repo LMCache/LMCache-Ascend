@@ -6,7 +6,6 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
 #include <string>
-#include "pinned_mem.h"
 #include "ms_extension.h"
 #include "aclnn/opdev/platform.h"
 #include "tiling/platform/platform_ascendc.h"
