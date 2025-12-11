@@ -3,11 +3,6 @@
 from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 # Third Party
-# TODO: Currently we patch all the cuda calls due to effort to port all torch.cuda
-# will disabled torch.jit
-from torch_npu.contrib import transfer_to_npu
-
-
 from vllm.config import (
     VllmConfig
 )
