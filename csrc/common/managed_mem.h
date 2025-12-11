@@ -52,6 +52,8 @@ public:
   // -hostPtr: host pointer of the allocated memory area to register on device
   // -bufferSize: size of the allocated memory area to register on device
   RegisteredMemoryRecord *halRegisterHostPtr(void *hostPtr, size_t bufferSize);
+  RegisteredMemoryRecord *registerMappedMem(void *hostPtr, void *devPtr,
+                                            size_t bufferSize);
   int aclUnregisterHostPtr(void *hostPtr);
   int halUnregisterHostPtr(void *hostPtr);
   void *getDevicePtr(void *hostPtr);
@@ -68,6 +70,7 @@ void hal_host_unregister_ptr(void *ptr);
 
 void *register_ptr(void *ptr, size_t size);
 int unregister_ptr(void *ptr);
+void *register_mapping(void *hostPtr, void *devPtr, size_t size);
 
 // Takes in input a host pointer, returns the corresponding device pointer
 void *get_device_ptr(void *ptr);

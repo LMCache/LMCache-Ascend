@@ -47,6 +47,7 @@ void HostRegisteredMemoryManager::unregisterAll() {
 // Returns the created RegisteredMemoryRecord
 RegisteredMemoryRecord *HostRegisteredMemoryManager::registerHostPtr(
     void *hostPtr, size_t bufferSize) { // torch::Tensor& tensor){
+
   LMCACHE_ASCEND_CHECK(
       !(hostPtr == nullptr || bufferSize == 0),
       "Error: hostPtr cannot be null and bufferSize must be greater than 0.");
@@ -60,10 +61,35 @@ RegisteredMemoryRecord *HostRegisteredMemoryManager::registerHostPtr(
   void *devPtr;
   aclError err = aclrtHostRegister(hostPtr, static_cast<uint64_t>(bufferSize),
                                    ACL_HOST_REGISTER_MAPPED, (void **)&devPtr);
+
   if (err != ACL_SUCCESS) {
     std::cerr << "Unable to aclrtHostRegister, errcode: " << err << std::endl;
     return nullptr;
   }
+
+  this->allocatedMap.emplace(
+      hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr),
+                                      reinterpret_cast<uintptr_t>(devPtr),
+                                      bufferSize, -1});
+
+  return &this->allocatedMap[hostPtr];
+};
+
+// Register an existing host-device pointer mapping to the memory manager
+// Returns the created RegisteredMemoryRecord
+RegisteredMemoryRecord *
+HostRegisteredMemoryManager::registerMappedMem(void *hostPtr, void *devPtr,
+                                               size_t bufferSize) {
+  LMCACHE_ASCEND_CHECK(
+      !(hostPtr == nullptr || devPtr == nullptr || bufferSize == 0),
+      "Error: hostPtr and devPtr cannot be null and bufferSize must be greater "
+      "than 0.");
+  const std::unique_lock<std::shared_mutex> guard(this->mux);
+
+  // Check if the host pointer is already registered
+  LMCACHE_ASCEND_CHECK(
+      !(this->allocatedMap.count(hostPtr)),
+      "Error: hostPtr already registered to host memory manager.");
 
   this->allocatedMap.emplace(
       hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr),
@@ -331,6 +357,20 @@ void *register_ptr(void *ptr, size_t size) {
   } else {
     record = hmm.halRegisterHostPtr(ptr, size);
   }
+
+  if (record == nullptr) {
+    return nullptr;
+  }
+
+  return reinterpret_cast<void *>(record->devptr);
+}
+
+void *register_mapping(void *hostPtr, void *devPtr, size_t size) {
+  LMCACHE_ASCEND_CHECK(hostPtr != nullptr, "hostPtr is a nullptr.");
+  LMCACHE_ASCEND_CHECK(devPtr != nullptr, "devPtr is a nullptr.");
+  auto &hmm = lmc::HostRegisteredMemoryManager::GetInstance();
+  lmc::RegisteredMemoryRecord *record =
+      hmm.registerMappedMem(hostPtr, devPtr, size);
 
   if (record == nullptr) {
     return nullptr;

@@ -254,7 +254,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         src_dir = os.path.join(ROOT_DIR, "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
-        expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
+        expected_patterns = ["c_ops*.so", "libcache_kernels.so", "hccl_npu_comms*.so"]
 
         # Search for files matching our patterns
         so_files = []
