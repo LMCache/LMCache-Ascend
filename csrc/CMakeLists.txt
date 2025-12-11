@@ -5,6 +5,8 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11")
 find_package(pybind11 REQUIRED)
 
+add_subdirectory(hccl)
+
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 file(GLOB SRC_FILES
