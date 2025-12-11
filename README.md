@@ -47,7 +47,7 @@ Please ensure your environment matches the versions below.
 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
 
 #### for MindSpore
-| LMCache-Ascend | vLLM Version | PyTorch / Torch-NPU | Status |
+| LMCache-Ascend | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- |
 | **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
 
