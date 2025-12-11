@@ -8,14 +8,11 @@ import ctypes
 
 USE_MS = False
 
-try:
+from lmcache_ascend import _build_info
+if _build_info.__framework_name__ == "mindspore":
+    USE_MS = True
     import mindspore as ms
     from mindspore.common import np_dtype
-
-    USE_MS = True
-except:
-    pass
-
 
 MS_DTYPE_SIZE = {}
 

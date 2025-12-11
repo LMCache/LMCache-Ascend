@@ -39,8 +39,6 @@ set(PYMODULE_FILES
 pybind11_add_module(c_ops ${PYMODULE_FILES})
 
 target_compile_definitions(c_ops PRIVATE
-# -D_GLIBCXX_USE_CXX11_ABI=0
 ENABLE_FAST_HASH_TABLE=1
 -DUSE_MINDSPORE=1
-# CUSTOM_ASCEND_OP
 )

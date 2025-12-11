@@ -69,10 +69,6 @@ def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block
     slot_mapping = torch.tensor(slot_mapping, device="cpu", dtype=int)
     slot_mapping = ms.Tensor(slot_mapping.numpy(), dtype=ms.int32).move_to(device)
 
-    print(len(kv_cache), len(kv_cache[0]), kv_cache[0][0].shape, type(kv_cache[0][0]))
-    print(len(kv_cache_new), len(kv_cache_new[0]), kv_cache_new[0][0].shape, type(kv_cache_new[0][0]))
-    print(slot_mapping.shape, type(slot_mapping))
-
     allocator = MixedMemoryAllocator(1024 * 1024 * 1024)
 
     # New extract with multi layer kernel
@@ -88,8 +84,6 @@ def test_multi_layer_kernel(num_tokens, num_heads, chunk_size, num_layers, block
     
     # on ascend kv_cache_pointers need to be on device
     kv_cache_pointers = ms.Tensor(kv_cache_pointers.numpy(), dtype=ms.int64).move_to(device)
-
-    print(kv_cache_pointers, type(kv_cache_pointers))
 
     kv_cache_pointers_new = torch.empty(
         num_layers * 2,  
