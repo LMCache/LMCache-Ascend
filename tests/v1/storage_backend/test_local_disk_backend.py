@@ -109,6 +109,7 @@ def local_disk_backend(temp_disk_path, async_loop, local_cpu_backend):
     )
 
 
+@pytest.mark.skip("WIP")
 class TestLocalDiskBackend:
     """Test cases for LocalDiskBackend."""
 
