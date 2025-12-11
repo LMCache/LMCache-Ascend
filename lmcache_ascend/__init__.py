@@ -29,6 +29,20 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
 
         sys.modules["lmcache.c_ops"] = ascend_c_ops
 
+        from lmcache_ascend.v1.transfer_channel import (
+            CreateTransferChannel as AscendCreateTransferChannel,
+            get_correct_device as ascend_get_correct_device
+        )
+
+        # Make sure to import before importing init_lmcache_engine, otherwise CreateTransferChannel gets patched
+        # after the original version is already imported.
+        sys.modules["lmcache.v1.transfer_channel"].CreateTransferChannel = AscendCreateTransferChannel
+        sys.modules["lmcache.v1.transfer_channel.transfer_utils"].get_correct_device = ascend_get_correct_device
+
+        from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+            init_lmcache_engine as ascend_init_lmcache_engine,
+        )
+
         # The following patches are related for single-layer offload in sync mode
         # i.e. enable_async_loading = False
         # in pre LMCache v0.3.9, the sync mode was broken for layerwise

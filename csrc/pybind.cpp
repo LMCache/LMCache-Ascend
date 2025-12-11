@@ -13,6 +13,12 @@
 namespace py = pybind11;
 
 PYBIND11_MODULE(c_ops, m) {
+  m.def("host_register", &register_tensor);
+  m.def("get_device_ptr", [](uintptr_t ptr_addr) {
+    return reinterpret_cast<uintptr_t>(
+        get_device_ptr(reinterpret_cast<void*>(ptr_addr))
+    );
+  });
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("fused_multi_layer_kv_transfer", &fused_multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_310p", &multi_layer_kv_transfer_310p);
