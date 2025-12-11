@@ -21,6 +21,7 @@ ARG COMPILE_CUSTOM_KERNELS=1
 ARG SOC_VERSION=Ascend310P3
 
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+ENV LMCACHE_TRACK_USAGE=false
 
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \

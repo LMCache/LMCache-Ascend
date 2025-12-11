@@ -42,3 +42,5 @@ public:
   std::string getDevicePcieInfoV2(int cardId, int deviceId, dcmi_pcie_info_all* pcieInfo);
 };
 }
+
+std::string get_npu_pci_bus_id(int device);
