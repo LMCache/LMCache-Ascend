@@ -24,10 +24,7 @@ ROOT_DIR = Path(__file__).parent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-if os.environ.get("USE_MINDSPORE", False):
-    USE_MINDSPORE = True
-else:
-    USE_MINDSPORE = False
+USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 def _get_ascend_home_path():
     # NOTE: standard Ascend CANN toolkit path
