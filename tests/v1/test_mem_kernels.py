@@ -407,7 +407,6 @@ def test_multi_layer_kernel_kvcache_separate_fmt(num_tokens, num_heads, chunk_si
     mem_allocator.close()
 
 
-@pytest.mark.skip("WIP")
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
 def test_multi_layer_kernel_use_mla(num_tokens):
     device = "npu"

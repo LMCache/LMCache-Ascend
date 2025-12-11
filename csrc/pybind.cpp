@@ -7,9 +7,8 @@
 #include "pos_kernels.h"
 #include <torch/torch.h>
 #include <iostream>
-#include "dcmi_management.h"
+#include "utils.h"
 #include "mem_alloc.h"
-#include "mem_register.h"
 
 namespace py = pybind11;
 

@@ -39,17 +39,11 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 
 Please ensure your environment matches the versions below.
 
-#### for PyTorch
 | LMCache-Ascend | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- |
 | **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
 | **v0.3.7** | **v0.11.x** | **2.7.1** | 🚧 **Experimental** |
 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
-
-#### for MindSpore
-| LMCache-Ascend | vLLM Version | PyTorch / Torch-NPU | Status |
-| :--- | :--- | :--- | :--- |
-| **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
 
@@ -158,94 +152,6 @@ We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefor
 ```bash
 python \
     -m vllm.entrypoints.openai.api_server \
-    --port 8100 \
-    --model /data/models/Qwen/Qwen3-32B \
-    --trust-remote-code \
-    --disable-log-requests \
-    --block-size 128 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
-```
-
-#### Offline
-```python
-ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
-        kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
-    )
-```
-
-## Getting Started With MindSpore
-
-### Clone LMCache-Ascend Repo
-
-Our repo contains a kvcache ops submodule for ease of maintainence, therefore we recommend cloning the repo with submodules.
-
-```bash
-cd /workspace
-git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
-```
-
-### Manual Installation
-
-1. Start the base container
-```bash
-docker run -itd \
---shm-size 200g --privileged \
---net=host \
---device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
---device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
---device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /var/log/npu/:/var/log/npu \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /sys/fs/cgroup:/sys/fs/cgroup:ro \
--v /lib/modules:/lib/modules:ro \
--v /usr/src/kernels:/usr/src/kernels:ro \
--v /mnt/storage1/data:/data \
--v /home/:/home \
---name lmcache-ascend-ms \
---entrypoint /bin/bash \
-hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-800I-A2-mindspore2.7-openeuler24.03-lts-sp2
-
-docker exec -it -u root lmcache-ascend-ms bash
-```
-
-2. Update CANN version to CANN 8.3.RC1
-
-```bash
-bash Ascend-cann-toolkit_8.3.RC1_linux-aarch64.run --upgrade
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-bash Ascend-cann-kernels-910b_8.3.RC1_linux-aarch64.run --install
-bash Ascend-cann-nnrt_8.3.RC1_linux-aarch64.run --upgrade
-source /usr/local/Ascend/nnrt/set_env.sh
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-```
-
-3. Install LMCache
-
-```bash
-NO_CUDA_EXT=1 pip install lmcache==0.3.7 --no-deps
-```
-
-4. Install LMCache-Ascend
-
-```bash
-cd /workspace/LMCache-Ascend
-USE_MINDSPORE=True pip install --no-build-isolation -v -e .
-pip install -r requirement_ms.txt
-```
-
-### Usage
-
-We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
-
-#### Online serving
-```bash
-python \
-    -m vllm_mindspore.entrypoints vllm.entrypoints.openai.api_server \
     --port 8100 \
     --model /data/models/Qwen/Qwen3-32B \
     --trust-remote-code \

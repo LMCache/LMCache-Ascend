@@ -86,7 +86,6 @@ def local_cpu_backend_disabled(memory_allocator):
     return LocalCPUBackend(config=config, memory_allocator=memory_allocator)
 
 
-@pytest.mark.skip("WIP")
 class TestLocalCPUBackend:
     """Test cases for LocalCPUBackend."""
 
