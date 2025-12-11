@@ -17,9 +17,6 @@
 #include "framework_hal.h"
 
 namespace lmc {
-constexpr int32_t PROT_FLAGS = static_cast<int32_t>(PROT_READ) | static_cast<int32_t>(PROT_WRITE);
-constexpr int32_t MAP_FLAGS = static_cast<int32_t>(MAP_PRIVATE) | static_cast<int32_t>(MAP_ANONYMOUS) | static_cast<int32_t>(MAP_POPULATE);
-
 // Signatures for internal helper functions
 
 // Get the version of the NPU driver as a string
@@ -28,8 +25,6 @@ std::string get_driver_version();
 bool is_version_at_least_25(const std::string& version_str);
 // Gets the current device offsetting on ASCEND_RT_VISIBLE_DEVICES when needed
 int get_device();
-// Uregisters the malloced hostPtr
-void hal_host_unregister_ptr(void* ptr);
 
 // Class implementations
 
