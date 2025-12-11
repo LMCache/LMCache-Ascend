@@ -24,7 +24,6 @@ from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
-    VLLMPagedMemLayerwiseGPUConnector,
 )
 import lmcache_ascend.mindspore.c_ops as lmc_ops
 from lmcache.logging import init_logger
