@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 from lmcache_ascend import _build_info
 
 if _build_info.__framework_name__ == "pytorch":
@@ -10,7 +9,22 @@ if _build_info.__framework_name__ == "pytorch":
     import lmcache_ascend
     import lmcache_ascend.c_ops as ascend_c_ops
 
+    # TODO: Currently we patch all the cuda calls due to effort to port all torch.cuda
+    # will disabled torch.jit. This needs to be called before other imports, since some
+    # of them have conditional imports based on torch.cuda.is_available()
+    from torch_npu.contrib import transfer_to_npu
+
     sys.modules["lmcache.c_ops"] = ascend_c_ops
+
+    from lmcache_ascend.v1.transfer_channel import (
+        CreateTransferChannel as AscendCreateTransferChannel,
+        get_correct_device as ascend_get_correct_device
+    )
+
+    # Make sure to import before importing init_lmcache_engine, otherwise CreateTransferChannel gets patched
+    # after the original version is already imported.
+    sys.modules["lmcache.v1.transfer_channel"].CreateTransferChannel = AscendCreateTransferChannel
+    sys.modules["lmcache.v1.transfer_channel.transfer_utils"].get_correct_device = ascend_get_correct_device
 
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         init_lmcache_engine as ascend_init_lmcache_engine,
