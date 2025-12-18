@@ -38,7 +38,8 @@ logger = init_logger(__name__)
 # We need to patch this function due to connector modification
 def init_lmcache_engine(
     lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig"
+    vllm_config: "VllmConfig",
+    role: str,
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -100,20 +101,24 @@ def init_lmcache_engine(
         kv_dtype,
         kv_shape,
         use_mla,
+        role,
     )
+
     use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Union[
-        VLLMBufferLayerwiseNPUConnector,
-        VLLMPagedMemNPUConnectorV2,
-        VLLMPagedMemLayerwiseNPUConnector,
-    ]
+    vllm_gpu_connector: Optional[GPUConnectorInterface]
 
     if use_mla and lmcache_config.use_layerwise:
         raise ValueError("layerwise MLA connector is not supported yet")
 
     # When use_mla is True, num_kv_head is 1
     hidden_dim_size = num_kv_head * head_size
-    if lmcache_config.use_layerwise:
+    if role == "scheduler":
+        vllm_gpu_connector = None
+        # Create a dummy tpg object with broadcast and broadcast_object methods
+        tpg = SimpleNamespace()
+        tpg.broadcast = lambda tensor, src: tensor
+        tpg.broadcast_object = lambda obj, src: obj
+    elif lmcache_config.use_layerwise:
         if lmcache_config.enable_blending:
             # Use layerwise connector for blending
             vllm_gpu_connector = VLLMBufferLayerwiseNPUConnector(
@@ -137,6 +142,7 @@ def init_lmcache_engine(
                 num_kv_head=num_kv_head,
                 head_size=head_size,
             )
+        tpg = get_tp_group()
     else:
         vllm_gpu_connector = VLLMPagedMemNPUConnectorV2(
             hidden_dim_size,
@@ -149,7 +155,7 @@ def init_lmcache_engine(
             num_kv_head=num_kv_head,
             head_size=head_size,
         )
-    tpg = get_tp_group()
+        tpg = get_tp_group()
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         lmcache_config,
@@ -158,5 +164,11 @@ def init_lmcache_engine(
         tpg.broadcast,
         tpg.broadcast_object,
     )
-
+    if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
+        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
+            "remote_enable_mla_worker_id_as0", metadata.use_mla
+        ), (
+            "enable_scheduler_bypass_lookup is only supported with "
+            "save_only_first_rank or remote_enable_mla_worker_id_as0"
+        )
     return engine
