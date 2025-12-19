@@ -14,10 +14,7 @@ from lmcache.v1.memory_management import (
     TensorMemoryAllocator,
 )
 
-from lmcache_ascend.v1.memory_management import (
-    AscendPinMemoryAllocator as PinMemoryAllocator,
-    AscendMixedMemoryAllocator as MixedMemoryAllocator,
-)
+from lmcache.v1.memory_management import PinMemoryAllocator, MixedMemoryAllocator
 
 
 def check_allocator(allocator, max_size):
