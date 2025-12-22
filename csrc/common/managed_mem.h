@@ -1,6 +1,7 @@
 #pragma once
 #include <shared_mutex>
 #include <map>
+#include <string>
 
 namespace lmc {
 

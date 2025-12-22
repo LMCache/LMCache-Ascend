@@ -10,7 +10,7 @@ import torch_npu
 
 # First Party
 from lmcache.v1.memory_management import PinMemoryAllocator
-from lmcache_ascend.v1.memory_management import KVCacheFormat
+from lmcache_ascend.v1.npu_connector import KVCacheFormat
 
 # First Party
 import lmcache_ascend.c_ops as lmc_ops

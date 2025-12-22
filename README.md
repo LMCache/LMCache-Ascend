@@ -33,7 +33,7 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
   - **CANN Toolkit**: >= 8.2rc1
   - **Ascend Driver**: >= 24.1
   - **PyTorch**: == 2.7.1 (For vLLM 0.10.2+)
-  - **vLLM**: v0.10.2 & **vLLM-Ascend**: v0.10.2
+  - **vLLM**: v0.10.2 & **vLLM-Ascend**: v0.10.2rc1
 
 ### Compatibility Matrix
 
@@ -47,7 +47,7 @@ Please ensure your environment matches the versions below.
 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
 
 #### for MindSpore
-| LMCache-Ascend | vLLM Version | PyTorch / Torch-NPU | Status |
+| LMCache-Ascend | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- |
 | **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
 
@@ -69,7 +69,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-910b-cann-8.2rc1-py3.11-openeuler-24.03 .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-openeuler .
 ```
 
 Once that is built, run it with the following cmd
@@ -93,7 +93,7 @@ docker run -it \
     -v /dev/devmm_svm:/dev/devmm_svm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-910b-cann-8.2rc1-py3.11-openeuler-24.03 \
+    lmcache-ascend:v0.3.7-vllm-ascend-v0.10.2rc1-openeuler \
     /bin/bash
 ```
 
@@ -101,32 +101,7 @@ For further info about deployment notes, please refer to the [guide about deploy
 
 ### Manual Installation
 
-Assuming your working directory is ```/workspace```.
-
-1. Clone and Install vLLM Repo
-```bash
-VLLM_REPO=https://github.com/vllm-project/vllm.git
-VLLM_TAG=v0.10.2
-git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
-# NOTE: There is an Ascend Triton but we don't currently support it properly.
-VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
-    python3 -m pip uninstall -y triton
-```
-
-2. Clone and Install vLLM Ascend Repo
-```bash
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/atb/set_env.sh
-
-VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
-VLLM_ASCEND_TAG=v0.10.2rc1
-git clone --depth 1 $VLLM_ASCEND_REPO --branch $VLLM_ASCEND_TAG /workspace/vllm-ascend
-
-export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-
-export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
-python3 -m pip install -v -e /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
-```
+Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have already been installed.
 
 3. Clone and Install LMCache Repo
 

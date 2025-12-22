@@ -15,9 +15,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.v1.memory_management import (
-    AscendPinMemoryAllocator as PinMemoryAllocator,
-)
+from lmcache.v1.memory_management import PinMemoryAllocator
 from lmcache.v1.storage_backend.connector import CreateConnector
 
 

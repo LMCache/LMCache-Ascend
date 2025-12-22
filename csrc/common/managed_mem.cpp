@@ -19,10 +19,6 @@
 namespace lmc {
 // Signatures for internal helper functions
 
-// Get the version of the NPU driver as a string
-std::string get_driver_version();
-// Checks whether the major version of the NPU is greater or equal 25 to support aclrtHostRegister
-bool is_version_at_least_25(const std::string& version_str);
 // Gets the current device offsetting on ASCEND_RT_VISIBLE_DEVICES when needed
 int get_device();
 

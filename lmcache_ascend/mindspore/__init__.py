@@ -3,7 +3,7 @@ import lmcache
 
 import sys
 
-from lmcache_ascend.mindspore import c_ops
+from lmcache_ascend import c_ops
 sys.modules['lmcache.c_ops'] = c_ops
 
 from lmcache_ascend.mindspore.v1.memory_management import _allocate_cpu_memory

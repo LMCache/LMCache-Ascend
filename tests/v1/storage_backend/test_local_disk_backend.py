@@ -17,9 +17,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache_ascend.v1.memory_management import (
-    AscendMixedMemoryAllocator as MixedMemoryAllocator,
-)
+from lmcache.v1.memory_management import MixedMemoryAllocator
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 

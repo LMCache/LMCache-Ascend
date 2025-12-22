@@ -47,7 +47,7 @@ from lmcache.v1.memory_management import (
     FreeBlock
 )
 from lmcache.v1.system_detection import NUMAMapping
-import lmcache_ascend.mindspore.c_ops as lmc_ops
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

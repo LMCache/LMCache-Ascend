@@ -230,8 +230,8 @@ class CustomAscendCmakeBuildExt(build_ext):
             raise RuntimeError(f"Failed to build {so_name}: {e}")
         build_lib_dir = self.get_ext_fullpath(ext.name)
         os.makedirs(os.path.dirname(build_lib_dir), exist_ok=True)
-        
-        src_dir = os.path.join(ROOT_DIR, "lmcache_ascend/mindspore" if USE_MINDSPORE else "lmcache_ascend")
+
+        src_dir = os.path.join(ROOT_DIR, "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = [
@@ -293,12 +293,7 @@ class CustomAscendCmakeBuildExt(build_ext):
 
 def ascend_extension():
     print("Building Ascend extensions")
-    if USE_MINDSPORE:
-        ext_name = "lmcache_ascend.mindspore.c_ops"
-    else:
-        ext_name = "lmcache_ascend.c_ops"
-
-    return [CMakeExtension(name=ext_name)], {
+    return [CMakeExtension(name="lmcache_ascend.c_ops")], {
         "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt
     }
