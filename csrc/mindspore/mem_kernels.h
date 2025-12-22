@@ -29,6 +29,12 @@ void multi_layer_kv_transfer(py::array& key_value, // [kv, num_layer, num_tokens
                              const int page_buffer_size, const bool direction,
                              const bool use_mla, const int kvcache_format_raw);
 
+void multi_layer_kv_transfer310p(ms::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
+                             ms::Tensor key_value_ptrs, // [num_layers]
+                             ms::Tensor slot_mapping, // [num_tokens]
+                             const int page_buffer_size, const int hidden_dims, const bool direction,
+                             const bool use_mla, const int kvcache_format_raw);
+
 void multi_layer_kv_transfer_unilateral(ms::Tensor& key_value,
                                         const ms::Tensor& key_ptrs,
                                         const ms::Tensor& value_ptrs,
