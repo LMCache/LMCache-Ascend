@@ -15,7 +15,7 @@
 # Standard
 from typing import List, Optional, Union, Tuple
 from enum import Enum, auto
-
+import numpy as np
 # Third Party
 import torch
 
@@ -31,6 +31,16 @@ from lmcache.logging import init_logger
 logger = init_logger(__name__)
 
 import mindspore
+
+_IS_310P = None
+
+def is_310p():
+    global _IS_310P
+    if _IS_310P is None:
+        from lmcache_ascend import _build_info
+        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
+    return _IS_310P
+
 
 class KVCacheFormat(Enum):
     """
@@ -160,10 +170,12 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
                 # kv_caches[0]: [tuple(k,v)，tuple(k,v)]
                 assert first_tensor.dim() >= 2
+                # mindspore 310P: [num_blocks, block_size, num_kv_heads * head_size] -> (19157, 64, 2 * 128)
                 self.page_buffer_size = first_tensor.shape[0] * first_tensor.shape[1]
             else:
                 assert first_tensor.dim() == 5
-                self.page_buffer_size = first_tensor.shape[1] * first_tensor.shape[2]
+                # TODO: verify VLLM mindspore 310P kvcache is changed? -> block_size page_buffer_size
+                self.page_buffer_size = kv_caches[0].shape[1] * kv_caches[0].shape[2]
 
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -212,15 +224,33 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        lmc_ops.multi_layer_kv_transfer(
-            memory_obj.tensor,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.page_buffer_size,
-            False,
-            self.use_mla,
-            self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
-        )
+        if is_310p():
+            # memory_obj -> tmp_gpu_buffer -> kvcaches
+            self.gpu_buffer.zero_()
+            tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
+            tmp_gpu_buffer.copy_(torch.from_numpy(memory_obj.tensor))
+            hidden_dims = tmp_gpu_buffer.size(-1)
+
+            lmc_ops.multi_layer_kv_transfer310p(
+                tmp_gpu_buffer,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.page_buffer_size,
+                hidden_dims,
+                False,
+                self.use_mla,
+                self.kv_format.value
+            )
+        else:
+            lmc_ops.multi_layer_kv_transfer(
+                memory_obj.tensor,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.page_buffer_size,
+                False,
+                self.use_mla,
+                self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+            )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
@@ -257,29 +287,47 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("KV cache format is not initialized!")
 
         with torch.cuda.stream(self.store_stream):
-            if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
-                lmc_ops.multi_layer_kv_transfer(
-                    memory_obj.tensor, 
-                    kv_cache_pointers, 
-                    slot_mapping[start:end], 
-                    self.page_buffer_size,
-                    True,
-                    self.use_mla,
-                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
-                )
-            else:
-                assert self.gpu_buffer.device == self.kvcaches_device
-                tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
+            if is_310p():
+                self.gpu_buffer.zero_()
+                tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
+                hidden_dims = tmp_gpu_buffer.size(-1)
+
+                lmc_ops.multi_layer_kv_transfer310p(
                     tmp_gpu_buffer,
                     kv_cache_pointers,
                     slot_mapping[start:end],
                     self.page_buffer_size,
+                    hidden_dims,
                     True,
                     self.use_mla,
-                    self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+                    self.kv_format.value
                 )
-                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
+                cpu_np = tmp_gpu_buffer.cpu().numpy()
+                np.copyto(memory_obj.tensor, cpu_np)
+            else:
+                if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
+                    lmc_ops.multi_layer_kv_transfer(
+                        memory_obj.tensor, 
+                        kv_cache_pointers, 
+                        slot_mapping[start:end], 
+                        self.page_buffer_size,
+                        True,
+                        self.use_mla,
+                        self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+                    )
+                else:
+                    assert self.gpu_buffer.device == self.kvcaches_device
+                    tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
+                    lmc_ops.multi_layer_kv_transfer(
+                        tmp_gpu_buffer,
+                        kv_cache_pointers,
+                        slot_mapping[start:end],
+                        self.page_buffer_size,
+                        True,
+                        self.use_mla,
+                        self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+                    )
+                    memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         # if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device

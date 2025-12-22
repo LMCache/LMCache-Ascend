@@ -13,6 +13,7 @@ namespace py = pybind11;
 PYBIND11_MODULE(c_ops, m) {
   m.def("create_pinned_tensor", &create_mmapped_numpy);
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
+  m.def("multi_layer_kv_transfer310p", &multi_layer_kv_transfer310p);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_unilateral",
         &multi_layer_kv_transfer_unilateral);
