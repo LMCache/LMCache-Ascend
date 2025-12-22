@@ -35,3 +35,7 @@ if _build_info.__framework_name__ == "pytorch":
     import lmcache.v1.system_detection
     from lmcache_ascend.v1.system_detection import _read_from_sys
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
+elif _build_info.__framework_name__ == "mindspore":
+    import lmcache_ascend.mindspore
+else:
+    raise ValueError("Unsupported framework!")

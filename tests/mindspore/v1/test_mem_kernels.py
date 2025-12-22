@@ -23,7 +23,7 @@ from lmcache.v1.memory_management import (
     MixedMemoryAllocator,
     MemoryFormat,
 )
-import lmcache_ascend.mindspore.c_ops as lmc_ops
+import lmcache_ascend.c_ops as lmc_ops
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
