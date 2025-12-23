@@ -7,6 +7,10 @@ if _build_info.__framework_name__ == "pytorch":
     from functools import partial
     import lmcache
 
+    # TODO: Currently we patch all the cuda calls due to effort to port all torch.cuda
+    # will disabled torch.jit
+    from torch_npu.contrib import transfer_to_npu
+
     import lmcache_ascend
     import lmcache_ascend.c_ops as ascend_c_ops
 
