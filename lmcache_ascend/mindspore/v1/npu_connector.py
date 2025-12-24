@@ -53,7 +53,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
         self.is_310p = is_310p()
-        self.transfer_func = lmc_ops.multi_layer_kv_transfer_310p if is_310p() else lmc_ops.multi_layer_kv_transfer
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
 
@@ -172,8 +171,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.gpu_buffer.zero_()
             target_gpu_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
             target_gpu_buffer.copy_(torch.from_numpy(memory_obj.tensor))
+            self.transfer_func = lmc_ops.multi_layer_kv_transfer_ms
         else:
             target_gpu_buffer = memory_obj.tensor
+            self.transfer_func = lmc_ops.multi_layer_kv_transfer
 
         self.transfer_func(
             target_gpu_buffer,
@@ -222,10 +223,13 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         with torch.cuda.stream(self.store_stream):
             use_tmp_buf = self.is_310p or (self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2])
             if use_tmp_buf:
-                if self.is_310p: self.gpu_buffer.zero_()
+                if self.is_310p:
+                    self.gpu_buffer.zero_()
                 target_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
+                self.transfer_func = lmc_ops.multi_layer_kv_transfer_ms
             else:
                 target_buffer = memory_obj.tensor
+                self.transfer_func = lmc_ops.multi_layer_kv_transfer
 
             self.transfer_func(
                 target_buffer,
@@ -238,10 +242,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             )
             
             if use_tmp_buf:
-                if self.is_310p:
-                    np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
-                else:
-                    memory_obj.tensor.copy_(target_buffer, non_blocking=True)
+                np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
 
         # if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
