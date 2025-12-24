@@ -242,10 +242,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             )
             
             if use_tmp_buf:
-                # if self.is_310p:
                 np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
-                # else:
-                    # memory_obj.tensor.copy_(target_buffer, non_blocking=True)
 
         # if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
