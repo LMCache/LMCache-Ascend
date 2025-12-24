@@ -209,7 +209,7 @@ public:
     int kvcache_format_raw_{0};
 };
 
-void multi_layer_kv_transfer_310p(ms::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
+void multi_layer_kv_transfer_ms(ms::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
                              ms::Tensor key_value_ptrs, // [num_layers]
                              ms::Tensor slot_mapping, // [num_tokens]
                              const int page_buffer_size, const bool direction,
