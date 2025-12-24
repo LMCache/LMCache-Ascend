@@ -123,7 +123,7 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
         shape: Union[torch.Size, Tuple[int, ...]],
         dtype: Optional[torch.dtype],
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        allocator_type: Optional[str] = None,
     ) -> Optional[TensorMemoryObj]:
         if not isinstance(shape, torch.Size):
             shape = torch.Size(shape)
@@ -168,6 +168,7 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
         self.total_allocated_size += aligned_size
         self.num_active_allocations += 1
         self.stats_monitor.update_local_cache_usage(self.total_allocated_size)
+        self.stats_monitor.update_active_memory_objs_count(self.num_active_allocations)
 
         # Allocate the block
         return NumpyAndTensorMemoryObj(
@@ -175,7 +176,7 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
             metadata=MemoryObjMetadata(
                 shape, dtype, block.start, aligned_size, 1, False, fmt
             ),
-            parent_allocator=parent_allocator
+            parent_allocator=self,
         )
 
     @_lmcache_nvtx_annotate
