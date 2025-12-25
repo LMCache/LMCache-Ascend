@@ -15,7 +15,6 @@ def _read_from_sys() -> Optional[NUMAMapping]:
 
     try:
         device_index = ms.get_current_device().device_id
-        print(f"device_index: {device_index}")
         phy_device_id = current_platform.device_id_to_physical_device_id(device_index)
         pci_bus_id = lmc_ops.get_gpu_pci_bus_id(phy_device_id).lower()
 
