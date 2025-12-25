@@ -55,7 +55,25 @@ def _allocate_cpu_memory(
     size: int,
     numa_mapping: Optional[NUMAMapping] = None,
 ) -> torch.Tensor:
-    return lmc_ops.create_pinned_tensor(size)
+    if numa_mapping:
+        if torch.cuda.is_available():
+            current_device_id = ms.get_current_device().device_id
+        else:
+            current_device_id = 0
+        gpu_to_numa_mapping = numa_mapping.gpu_to_numa_mapping
+        assert current_device_id in gpu_to_numa_mapping, (
+            f"Current device {current_device_id} is not in the GPU NUMA mapping."
+        )
+        numa_id = gpu_to_numa_mapping[current_device_id]
+        ptr = lmc_ops.alloc_pinned_numa_ptr(size, numa_id)
+    else:
+        ptr = lmc_ops.alloc_pinned_ptr(size, 0)
+
+    array_type = ctypes.c_uint8 * size
+    buf = array_type.from_address(ptr)
+    buffer = np.frombuffer(buf, dtype=np.uint8)
+
+    return buffer
 
 class NumpyAndTensorMemoryObj(TensorMemoryObj):
     def get_size(self) -> int:
