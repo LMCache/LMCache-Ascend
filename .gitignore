@@ -7,6 +7,7 @@ build
 .env
 _build_info.py
 .vscode
+*.pt
 
 # Ascend Specific
 fusion_result.json
