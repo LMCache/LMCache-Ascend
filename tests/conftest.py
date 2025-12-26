@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
 import os
 import sys
 import subprocess
 import importlib.util
 import pytest
 
+# First Party
+import lmcache_ascend
 """
 LMCache Test Bootstrap & Fixture Inheritance
 ============================================
@@ -43,8 +46,7 @@ to ensure `sys.modules` is populated before Pytest attempts to resolve plugins.
 # ==============================================================================
 LMCACHEPATH = os.environ.get("LMCACHEPATH", "/workspace/LMCache")
 LMCACHEGITREPO = "https://github.com/LMCache/LMCache.git"
-# TODO (gingfung): obtain tag from setup.py
-VERSION_TAG = "v0.3.7"
+VERSION_TAG = lmcache_ascend.LMCACHE_UPSTREAM_TAG
 TEST_ALIAS = "lmcache_tests"
 
 # ==============================================================================
@@ -117,23 +119,27 @@ def setup_npu_backend():
 
 
 def patch_lmcache_test_utils():
-    imported = False
-    local_tests_dir = os.path.dirname(os.path.abspath(__file__))
-    if local_tests_dir not in sys.path:
-        sys.path.append(local_tests_dir)
-        imported = True
-
     try:
         import lmcache_tests.v1.utils as original_utils
-        import v1.utils as npu_utils
+        
+        # 1. Construct path to your local file
+        local_utils_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 
+            "v1", "utils.py"
+        )
+
+        # 2. Load it safely as a standalone module
+        #    We give it a unique name "local_npu_utils" to avoid conflicts
+        spec = importlib.util.spec_from_file_location("local_npu_utils", local_utils_path)
+        npu_utils = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(npu_utils)
+
+        # 3. Patch
         original_utils.create_gpu_connector = npu_utils.create_npu_connector
-    except ImportError as e:
-        print(f"❌ Import error when patching lmcache_tests: {e}")
-        pytest.exit(f"❌ Failed to patch lmcache_tests for NPU usage.", returncode=1)
-    finally:
-        if imported:
-            # avoid polluting the namespace in later tests
-            sys.path.remove(local_tests_dir)
+        print("✅ Successfully patched create_gpu_connector with NPU implementation.")
+
+    except (ImportError, FileNotFoundError, AttributeError) as e:
+        pytest.exit(f"❌ Failed to patch lmcache_tests: {e}", returncode=1)
 
 
 def _run_module_setup():
