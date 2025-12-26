@@ -136,10 +136,35 @@ def patch_lmcache_test_utils():
             sys.path.remove(local_tests_dir)
 
 
-setup_lmcache_dependency()
-setup_npu_backend()
-patch_lmcache_test_utils()
+def _run_module_setup():
+    """
+    Run all LMCache test bootstrap steps with logging and robust error handling.
 
+    This function is invoked at import time so that the environment is prepared
+    before pytest begins test collection. Any unexpected error will cause
+    pytest to exit with a clear, contextual message.
+    """
+    phases = [
+        ("LMCache dependency setup", setup_lmcache_dependency),
+        ("NPU backend setup", setup_npu_backend),
+        ("LMCache test utils patching", patch_lmcache_test_utils),
+    ]
+
+    for description, func in phases:
+        print(f"\n[LMCache Test Bootstrap] Starting: {description} ...")
+        try:
+            func()
+        except Exception as exc:
+            pytest.exit(
+                f"❌ Error during {description}: {exc}\n"
+                "This error occurred while importing tests/conftest.py,\n"
+                "before pytest started test collection. Please verify your\n"
+                "LMCache checkout, environment, and dependency configuration.",
+                returncode=1,
+            )
+
+
+_run_module_setup()
 # ==============================================================================
 # 3. PLUGIN REGISTRATION
 # ==============================================================================
