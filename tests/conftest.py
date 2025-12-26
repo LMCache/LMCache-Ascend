@@ -61,11 +61,39 @@ def run_git_cmd(cmd_list, cwd=None):
         print(f"❌ Git command failed: {' '.join(cmd_list)}")
         raise e
 
+
+def get_current_git_tag(path):
+    """Returns the current tag name if HEAD is exactly on a tag, else None."""
+    try:
+        # describe --tags --exact-match fails if we are not exactly on a tag
+        tag = subprocess.check_output(
+            ["git", "describe", "--tags", "--exact-match"], 
+            cwd=path, 
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+        return tag
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
 # TODO (gingfung): consider moving the git clone setup into submodule with version pinning.
 def setup_lmcache_dependency():
     print(f"\n🔍 Checking dependency: {LMCACHEGITREPO} @ {VERSION_TAG}...")
 
-    if not os.path.exists(LMCACHEPATH):
+    # 1. Check if Repo Exists
+    if os.path.exists(LMCACHEPATH):
+        current_tag = get_current_git_tag(LMCACHEPATH)
+        
+        if current_tag == VERSION_TAG:
+            print(f"   ✅ Already on correct version ({VERSION_TAG}). Skipping git operations.")
+        else:
+            print(f"   ⚠️  Version mismatch (Found: {current_tag}). Syncing to {VERSION_TAG}...")
+            # Only fetch/checkout if tags don't match
+            run_git_cmd(["fetch", "--tags"], cwd=LMCACHEPATH)
+            run_git_cmd(["checkout", f"tags/{VERSION_TAG}"], cwd=LMCACHEPATH)
+            
+    # 2. Clone if Repo Missing
+    else:
         print("   📦 LMCache missing. Cloning...")
         run_git_cmd([
             "clone", 
@@ -74,13 +102,8 @@ def setup_lmcache_dependency():
             LMCACHEGITREPO, 
             LMCACHEPATH
         ])
-    else:
-        print("   🔄 LMCache exists. Syncing version...")
-        run_git_cmd(["fetch", "--tags"], cwd=LMCACHEPATH)
-        run_git_cmd(["checkout", f"tags/{VERSION_TAG}"], cwd=LMCACHEPATH)
     
-    print(f"   ✅ LMCache is ready at tag: {VERSION_TAG}")
-
+    # 3. Register Module (Must always run to update sys.path for this session)
     if LMCACHEPATH not in sys.path:
         sys.path.append(LMCACHEPATH)
 
@@ -149,6 +172,11 @@ def _run_module_setup():
     This function is invoked at import time so that the environment is prepared
     before pytest begins test collection. Any unexpected error will cause
     pytest to exit with a clear, contextual message.
+
+    The timing must be the following:
+    1. setup lmcache git tags
+    2. setup npu backend
+    3. patch lmcache tests utils
     """
     phases = [
         ("LMCache dependency setup", setup_lmcache_dependency),
