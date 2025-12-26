@@ -2,7 +2,7 @@
 # Standard
 import os
 
-# NOTE: Must be manually edited per each version
+# NOTE: Must be manually edited per each version and is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.3.7"
 
 from lmcache_ascend import _build_info
