@@ -41,7 +41,7 @@ to ensure `sys.modules` is populated before Pytest attempts to resolve plugins.
 # ==============================================================================
 # 1. CONFIGURATION
 # ==============================================================================
-LMCACHEPATH = "/workspace/LMCache"
+LMCACHEPATH = os.environ.get("LMCACHEPATH", "/workspace/LMCache")
 LMCACHEGITREPO = "https://github.com/LMCache/LMCache.git"
 # TODO (gingfung): obtain tag from setup.py
 VERSION_TAG = "v0.3.7"
