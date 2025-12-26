@@ -15,7 +15,7 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
 
         # TODO (gingfung): Currently we patch all the cuda calls due to effort to port all torch.cuda
         # will disabled torch.jit
-        # NOTE: this must be done early in the patch prior the cacheengine to avoid falling into non_cuda_equivalent
+        # NOTE: this must be done early in the patch prior to the cache engine to avoid falling into non_cuda_equivalent
         from torch_npu.contrib import transfer_to_npu
 
         import lmcache_ascend.c_ops as ascend_c_ops
