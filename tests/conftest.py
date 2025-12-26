@@ -55,8 +55,7 @@ TEST_ALIAS = "lmcache_tests"
 def run_git_cmd(cmd_list, cwd=None):
     """Helper to run git commands with error handling."""
     try:
-        # Using subprocess.call for config/trust commands to avoid crashing on errors
-        # Using check_call for critical operations like clone/checkout
+        # Use subprocess.check_call for all git operations so failures stop test setup early
         subprocess.check_call(["git"] + cmd_list, cwd=cwd)
     except subprocess.CalledProcessError as e:
         print(f"❌ Git command failed: {' '.join(cmd_list)}")
