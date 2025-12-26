@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-import pytest
-import torch
-
 # First Party
-import lmcache_ascend
-
 from lmcache_tests.v1.test_memory_management import (
     test_tensor_allocator,
     test_device_allocators,
