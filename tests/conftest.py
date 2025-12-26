@@ -101,7 +101,6 @@ def setup_lmcache_dependency():
 
 def setup_npu_backend():
     try:
-        import lmcache_ascend 
         from lmcache_ascend import _build_info
 
         print(f"\n⚡ [NPU Setup] Detected framework: {_build_info.__framework_name__}")
