@@ -7,7 +7,7 @@ LMCACHE_UPSTREAM_TAG = "v0.3.7"
 
 from lmcache_ascend import _build_info
 # Check if we've already patched to avoid redundant work
-if not os.environ.get("LMCACHE_ASCEND_PATCHED"):
+if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
     if _build_info.__framework_name__ == "pytorch":
         import sys
         from functools import partial
