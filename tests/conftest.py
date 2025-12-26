@@ -131,6 +131,8 @@ def patch_lmcache_test_utils():
         # 2. Load it safely as a standalone module
         #    We give it a unique name "local_npu_utils" to avoid conflicts
         spec = importlib.util.spec_from_file_location("local_npu_utils", local_utils_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load spec for local utils module at {local_utils_path}")
         npu_utils = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(npu_utils)
 
