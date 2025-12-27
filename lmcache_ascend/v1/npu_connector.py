@@ -61,7 +61,8 @@ class KVCacheFormat(Enum):
     
     @staticmethod
     def detect(
-        kvcaches: List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]]
+        kvcaches: List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+        use_mla: bool = False
     ) -> 'KVCacheFormat':
         if not kvcaches:
             return KVCacheFormat.UNDEFINED
@@ -71,7 +72,15 @@ class KVCacheFormat(Enum):
         if isinstance(first_cache, tuple):
             return KVCacheFormat.SEPARATE_KV
         elif isinstance(first_cache, torch.Tensor):
-            if first_cache.shape[0] == 2:
+            ndim = first_cache.ndim
+            shape = first_cache.shape
+            
+            # MLA detect
+            is_mla_shape = (ndim == 3) or (ndim == 4 and shape[0] == 1)
+            if use_mla or is_mla_shape:
+                return KVCacheFormat.MERGED_KV
+            
+            if shape[0] == 2:
                 return KVCacheFormat.MERGED_KV
         
         return KVCacheFormat.UNDEFINED
@@ -112,7 +121,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
 
-        self.kv_format = KVCacheFormat.detect(kv_caches)
+        self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
         
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError(
