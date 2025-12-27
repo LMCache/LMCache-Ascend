@@ -103,7 +103,7 @@ class LMCFlashAttnBackend(AttentionInterface):
             # seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.vllm_attn_impl.scale,
-            causal=False, # https://github.com/LMCache/LMCache/issues/1152
+            causal=True, # https://github.com/LMCache/LMCache/issues/1152
             alibi_slopes=self.vllm_attn_impl.alibi_slopes,
             window_size=self.vllm_attn_impl.sliding_window,
             block_table=None,
