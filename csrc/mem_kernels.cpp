@@ -107,6 +107,145 @@ void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_to
     return ;
 };
 
+void fused_multi_layer_kv_transfer(
+    torch::Tensor& key_value,              // [kv, num_layer, num_tokens, hidden]
+    torch::Tensor& staging_cache,          // staging buffer
+    const torch::Tensor& key_value_ptrs,   // [num_layers]
+    const torch::Tensor& slot_mapping,     // [num_tokens]
+    const torch::Device& paged_memory_device,
+    const int page_buffer_size,
+    const bool direction,                   // true: from_gpu, false: to_gpu
+    const bool use_mla,
+    const int kvcache_format_raw
+) {
+
+    // get host cpu buffer pointer for aclrtMemcpyAsync
+    uint8_t* key_value_ptr = static_cast<uint8_t*>(key_value.data_ptr());
+
+    uint8_t* staging_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(staging_cache);
+    uint8_t* page_buffer_ptrs = get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
+    uint8_t* slot_mapping_ptr = get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping);
+    
+    int num_layers = key_value.size(1);
+    int num_tokens = slot_mapping.size(0);
+    int hidden_dims = key_value.size(-1);
+    int kv_size = 2;
+    if (use_mla) {
+        kv_size = 1;
+    }
+
+    kvcache_ops::KVCacheFormat kvcache_format = static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
+    
+    const c10::OptionalDeviceGuard device_guard(paged_memory_device);
+    // we require the kv ptr list to be on the device too
+    const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
+
+    const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at::ScalarType scalar_type = key_value.scalar_type();
+    at::ScalarType slot_type = slot_mapping.scalar_type();
+    const char* socName = aclrtGetSocName();
+    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+    uint64_t ubSize;
+    ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    // we only launched with at most 4 aiv
+    uint32_t aiv_num = (uint32_t)std::min(num_layers, 4);
+
+    int32_t numBuffsOnDev = 2;
+    // step 1. use per tokens buff size to derive how many tokens can be allocated per loop
+    int64_t baseBuffSize = numBuffsOnDev * hidden_dims * key_value.element_size();
+
+    if (ubSize < baseBuffSize) {
+        std::string errStr = "Per TokenBuffer Size: " + std::to_string(baseBuffSize) + " exceeds UB Size: " + std::to_string(ubSize);
+        PyErr_SetString(PyExc_RuntimeError, errStr + " Please contact us.");
+        throw py::error_already_set();
+    }
+
+    // step 2. work out how many tokens per loop
+    int32_t maxTokensPerLoop = (ubSize / baseBuffSize) - 1; // Subtract 1 to provide a safety margin and avoid over-allocating the UB buffer, ensuring we do not exceed hardware limits due to possible rounding or small additional allocations.
+    maxTokensPerLoop = std::min(maxTokensPerLoop, static_cast<int32_t>(num_tokens));
+
+    // step 3. double check whether the perloop buffer can accomodate everything
+    int64_t totalPerLoopBuffer = static_cast<int64_t>(maxTokensPerLoop) * baseBuffSize;
+    if (ubSize < totalPerLoopBuffer) {
+        std::string errStr = "Per Loop Buffer Size: " + std::to_string(totalPerLoopBuffer) + " exceeds UB Size: " + std::to_string(ubSize);
+        PyErr_SetString(PyExc_RuntimeError, errStr + " Please contact us.");
+        throw py::error_already_set();
+    }
+
+    // using double buffs mean we actually want to allocate half of this per round.
+    int64_t singlePerLoopBuffer = totalPerLoopBuffer / numBuffsOnDev;
+
+    // key_value shape: [kv_size, num_layers, num_tokens, hidden_dims]
+    size_t cpu_buffer_size = kv_size * num_layers * num_tokens * hidden_dims * 
+                             key_value.element_size();
+
+    TORCH_CHECK(staging_cache.numel() * staging_cache.element_size() >= cpu_buffer_size,
+                "staging_cache size insufficient: need ", cpu_buffer_size,
+                " bytes, got ", staging_cache.numel() * staging_cache.element_size());
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("multi_layer_kv_transfer_kernel_v2_fused");
+    cmd.SetCustomHandler([
+        scalar_type, slot_type, kvcache_format, aiv_num, stream,
+        page_buffer_ptrs, staging_cache_ptr, key_value_ptr,
+        slot_mapping_ptr, hidden_dims, kv_size, num_layers,
+        page_buffer_size, num_tokens, singlePerLoopBuffer,
+        maxTokensPerLoop, direction, cpu_buffer_size
+    ]() -> int {
+
+        auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
+        auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
+        
+        aclError ret;
+        
+        // direction: false = to_gpu (H2D), true = from_gpu (D2H)
+        bool isH2D = !direction;
+
+        // to_gpu (H2D) currently not used
+        if (isH2D) {
+            ret = aclrtMemcpyAsync(
+                staging_cache_ptr,  
+                cpu_buffer_size,         
+                key_value_ptr,          
+                cpu_buffer_size,         
+                ACL_MEMCPY_HOST_TO_DEVICE,
+                stream
+            );
+            TORCH_CHECK(ret == ACL_ERROR_NONE,
+                        "H2D memcpy failed: cpu_buffer -> staging_cache, ret=", ret);
+        }
+
+        //Kernel (Gather or Scatter)
+        kvcache_ops::multi_layer_kv_transfer_kernel_v2(
+            dtype_num, slot_num, kvcache_format, aiv_num, stream,
+            page_buffer_ptrs,          // paged KV cache
+            staging_cache_ptr,         // staging buffer
+            slot_mapping_ptr,
+            hidden_dims, kv_size, num_layers, page_buffer_size,
+            num_tokens, singlePerLoopBuffer, maxTokensPerLoop,
+            direction                 
+        );
+
+        // from_gpu
+        if (!isH2D) {
+            ret = aclrtMemcpyAsync(
+                key_value_ptr,           // dst: CPU buffer (pinned)
+                cpu_buffer_size,         // dst_max
+                staging_cache_ptr,       // src: GPU staging buffer
+                cpu_buffer_size,         // count
+                ACL_MEMCPY_DEVICE_TO_HOST,
+                stream
+            );
+            TORCH_CHECK(ret == ACL_ERROR_NONE,
+                        "D2H memcpy failed: staging_cache -> cpu_buffer, ret=", ret);
+        }
+        
+        return 0;
+    });
+    
+    cmd.Run();
+}
+
 void multi_layer_kv_transfer_310p(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
                              const torch::Tensor& key_value_ptrs, // [num_layers]
                              const torch::Tensor& slot_mapping, // [num_tokens]
@@ -271,6 +410,243 @@ void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,  // [num_token
     cmd.Run();
     return ;
 };
+
+void batched_fused_single_layer_kv_transfer(
+    std::vector<torch::Tensor>& lmc_tensors,      // N CPU pinned memory tensors
+                                                  // token_major=true:  [num_tokens, 2, num_heads*head_size]
+                                                  // token_major=false: [2, num_tokens, num_heads*head_size]
+    torch::Tensor& staging_cache,                 // NPU staging buffer
+                                                  // token_major=true:  [num_tokens, 2, num_heads*head_size]
+                                                  // token_major=false: [2, num_tokens, num_heads*head_size]
+    torch::Tensor& vllm_key_value_cache,          // vllm_two_major=true:  [2, num_blocks, block_size, num_heads, head_size]
+                                                  // vllm_two_major=false: [num_blocks, 2, block_size, num_heads, head_size]
+    torch::Tensor& slot_mapping_full,             // [num_tokens]
+    std::vector<int64_t>& chunk_offsets,          // token offset in staging for each chunk
+    std::vector<int64_t>& chunk_sizes,            // token count for each chunk
+    const bool direction,                         // false: CPU -> staging -> paged (to_gpu) true:  paged -> staging -> CPU (from_gpu)
+    const bool token_major,                       // true: [tokens, 2, hidden], false: [2, tokens, hidden]
+    const bool vllm_two_major                     // true: [2, blocks, ...], false: [blocks, 2, ...]
+) {
+
+    size_t num_chunks = lmc_tensors.size();
+    if (chunk_offsets.size() != num_chunks || chunk_sizes.size() != num_chunks) {
+        PyErr_SetString(PyExc_RuntimeError, "chunk_offsets and chunk_sizes must have the same size as lmc_tensors");
+        throw py::error_already_set();
+    }
+
+    if (num_chunks == 0) {
+        return;
+    }
+
+    for (size_t i = 0; i < num_chunks; ++i) {
+        if (lmc_tensors[i].is_cuda() || lmc_tensors[i].device().type() == c10::DeviceType::PrivateUse1) {
+            std::string errStr = "lmc_tensors[" + std::to_string(i) + "] must be on CPU (pinned memory)";
+            PyErr_SetString(PyExc_RuntimeError, errStr.c_str());
+            throw py::error_already_set();
+        }
+    }
+
+    uint8_t* staging_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(staging_cache);
+    uint8_t* vllm_key_value_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(vllm_key_value_cache);
+    uint8_t* slot_mapping_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(slot_mapping_full);
+
+    int32_t num_tokens = slot_mapping_full.size(0);
+    int32_t num_heads = vllm_key_value_cache.size(-2);
+    int32_t head_dims = vllm_key_value_cache.size(-1);
+    int32_t block_size = vllm_key_value_cache.size(-3);
+    int16_t kv_size = 2;
+
+    bool is_mla = false;
+    if (token_major) {
+        is_mla = staging_cache.size(1) == 1;
+    } else {
+        is_mla = staging_cache.size(0) == 1;
+    }
+    
+    if (is_mla) {
+        PyErr_SetString(PyExc_RuntimeError, "MLA is not supported yet. Please contact LMCache Ascend.");
+        throw py::error_already_set();
+    }
+
+    const c10::OptionalDeviceGuard device_guard(device_of(vllm_key_value_cache));
+    const c10::OptionalDeviceGuard slot_device_guard(device_of(slot_mapping_full));
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at::ScalarType scalar_type = vllm_key_value_cache.scalar_type();
+    at::ScalarType slot_type = slot_mapping_full.scalar_type();
+
+    const char* socName = aclrtGetSocName();
+    auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+    uint32_t aiv_num = (uint32_t) std::min(4, num_tokens);
+    uint32_t numBuffsOnDev = 2;
+    uint64_t baseBuffSize = numBuffsOnDev * kv_size * num_heads * head_dims * vllm_key_value_cache.element_size();
+    uint64_t ubSize;
+    ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+
+    if (ubSize < baseBuffSize) {
+        std::string errStr = "Per Token Cache Buffer Size: " + std::to_string(baseBuffSize) + 
+                             " exceeds UB Size: " + std::to_string(ubSize);
+        PyErr_SetString(PyExc_RuntimeError, (errStr + " Please contact LMCache Ascend.").c_str());
+        throw py::error_already_set();
+    }
+
+    int32_t max_tokens_per_loop = ubSize / baseBuffSize;
+    max_tokens_per_loop = static_cast<int32_t>(std::min(max_tokens_per_loop, num_tokens));
+
+    int64_t staging_token_stride;
+    int64_t staging_value_offset;
+    if (token_major) {
+        staging_token_stride = staging_cache.stride(0);
+        staging_value_offset = staging_cache.stride(1);
+    } else {
+        staging_token_stride = staging_cache.stride(1);
+        staging_value_offset = staging_cache.stride(0);
+    }
+
+    int64_t vllm_block_stride;
+    int64_t vllm_value_offset;
+    if (vllm_two_major) {
+        vllm_block_stride = vllm_key_value_cache.stride(1);
+        vllm_value_offset = vllm_key_value_cache.stride(0);
+    } else {
+        vllm_block_stride = vllm_key_value_cache.stride(0);
+        vllm_value_offset = vllm_key_value_cache.stride(1);
+    }
+
+    int64_t vllm_buffer_size = static_cast<int64_t>(vllm_key_value_cache.nbytes());
+    int64_t staging_buffer_size = static_cast<int64_t>(staging_cache.nbytes());
+
+    int64_t element_size = staging_cache.element_size();
+    int64_t hidden_dim = num_heads * head_dims;
+
+    int64_t bytes_per_token = staging_token_stride * element_size;
+    
+    // use for token_major = false
+    int64_t staging_v_plane_offset = staging_value_offset * element_size;
+
+    std::vector<uint8_t*> lmc_ptrs(num_chunks);
+    std::vector<int64_t> lmc_copy_sizes(num_chunks);
+    
+    // use for token_major = false
+    std::vector<int64_t> lmc_v_offsets(num_chunks);
+    
+    for (size_t i = 0; i < num_chunks; ++i) {
+        lmc_ptrs[i] = static_cast<uint8_t*>(lmc_tensors[i].data_ptr());
+        lmc_copy_sizes[i] = chunk_sizes[i] * bytes_per_token;
+        
+        if (!token_major) {
+            lmc_v_offsets[i] = lmc_tensors[i].stride(0) * element_size;
+        }
+    }
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("batched_fused_single_layer_kv_transfer_kernel_v2");
+
+    cmd.SetCustomHandler([
+        scalar_type, slot_type, aiv_num, stream,
+        staging_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
+        vllm_block_stride, vllm_value_offset, vllm_buffer_size,
+        staging_token_stride, staging_value_offset, staging_buffer_size,
+        max_tokens_per_loop, num_heads, head_dims, num_tokens, block_size,
+        direction, token_major,
+        num_chunks, lmc_ptrs, lmc_copy_sizes, chunk_offsets, bytes_per_token, 
+        staging_v_plane_offset, lmc_v_offsets
+    ]() -> int {
+        auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
+        auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
+        aclError ret;
+
+        // to_gpu (CPU -> staging -> paged)
+        if (!direction) {
+            // Step 1: Multiple H2D memcpy
+            for (size_t i = 0; i < num_chunks; ++i) {
+                uint8_t* staging_base = staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
+                int64_t chunk_kv_bytes = lmc_copy_sizes[i];
+                
+                if (token_major) {
+                    ret = aclrtMemcpyAsync(
+                        staging_base, chunk_kv_bytes,
+                        lmc_ptrs[i], chunk_kv_bytes,
+                        ACL_MEMCPY_HOST_TO_DEVICE, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy failed for chunk ", i, ", ret=", ret);
+                } else {
+                    // K
+                    ret = aclrtMemcpyAsync(
+                        staging_base, chunk_kv_bytes,
+                        lmc_ptrs[i], chunk_kv_bytes,
+                        ACL_MEMCPY_HOST_TO_DEVICE, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (K) failed for chunk ", i, ", ret=", ret);
+                    // V
+                    ret = aclrtMemcpyAsync(
+                        staging_base + staging_v_plane_offset, chunk_kv_bytes,
+                        lmc_ptrs[i] + lmc_v_offsets[i], chunk_kv_bytes,
+                        ACL_MEMCPY_HOST_TO_DEVICE, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (V) failed for chunk ", i, ", ret=", ret);
+                }
+            }
+
+            // Step 2: scatter（staging -> paged KV cache）
+            kvcache_ops::single_layer_kv_transfer_kernel_v2(
+                dtype_num, slot_num, aiv_num, stream,
+                staging_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
+                vllm_block_stride, vllm_value_offset, vllm_buffer_size,
+                staging_token_stride, staging_value_offset, staging_buffer_size,
+                max_tokens_per_loop, num_heads, head_dims, num_tokens, block_size,
+                false, token_major
+            );
+        }
+        // from_gpu (paged -> staging -> CPU)
+        else {
+            // Step 1: gather
+            kvcache_ops::single_layer_kv_transfer_kernel_v2(
+                dtype_num, slot_num, aiv_num, stream,
+                staging_cache_ptr, vllm_key_value_cache_ptr, slot_mapping_ptr,
+                vllm_block_stride, vllm_value_offset, vllm_buffer_size,
+                staging_token_stride, staging_value_offset, staging_buffer_size,
+                max_tokens_per_loop, num_heads, head_dims, num_tokens, block_size,
+                true, token_major
+            );
+
+            // Step 2: Multiple D2H memcpy
+            for (size_t i = 0; i < num_chunks; ++i) {
+                uint8_t* staging_base = staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
+                int64_t chunk_kv_bytes = lmc_copy_sizes[i];
+                
+                if (token_major) {
+                    ret = aclrtMemcpyAsync(
+                        lmc_ptrs[i], chunk_kv_bytes,
+                        staging_base, chunk_kv_bytes,
+                        ACL_MEMCPY_DEVICE_TO_HOST, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy failed for chunk ", i, ", ret=", ret);
+                } else {
+                    // K
+                    ret = aclrtMemcpyAsync(
+                        lmc_ptrs[i], chunk_kv_bytes,
+                        staging_base, chunk_kv_bytes,
+                        ACL_MEMCPY_DEVICE_TO_HOST, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (K) failed for chunk ", i, ", ret=", ret);
+                    // V
+                    ret = aclrtMemcpyAsync(
+                        lmc_ptrs[i] + lmc_v_offsets[i], chunk_kv_bytes,
+                        staging_base + staging_v_plane_offset, chunk_kv_bytes,
+                        ACL_MEMCPY_DEVICE_TO_HOST, stream
+                    );
+                    TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (V) failed for chunk ", i, ", ret=", ret);
+                }
+            }
+        }
+
+        return 0;
+    });
+
+    cmd.Run();
+    return;
+}
 
 void load_and_reshape_flash(
     torch::Tensor& key_value, // [2, num_layer, num_tokens, num_heads*head_size]
