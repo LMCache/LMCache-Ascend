@@ -36,7 +36,7 @@ def get_itemsize(dtype: torch.dtype):
             tmp = ms.Tensor([1.0], dtype=dtype)
             MS_DTYPE_SIZE[dtype] = tmp.itemsize
             m = MS_DTYPE_SIZE[dtype]
-        elif dtype == np_dtype.bfloat16:
+        elif dtype==np.float16 or dtype == np_dtype.bfloat16:
             # np does not have bfloat16
             return 2
     return m
@@ -66,7 +66,7 @@ def get_numel(tensor: Union[torch.Tensor, np.ndarray, torch.Size]):
 def get_element_size(tensor: Union[torch.Tensor, np.ndarray]):
     """Get the size of each element in a torch.Tensor or np.ndarray."""
     if isinstance(tensor, torch.Tensor):
-        return tensor.elemenet_size()
+        return tensor.element_size()
     elif isinstance(tensor, np.ndarray):
         return tensor.itemsize
     else:

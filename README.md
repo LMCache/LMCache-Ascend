@@ -247,3 +247,5 @@ ktc = KVTransferConfig(
   - The `CPLUS_INCLUDE_PATH` requires user manual setup, please see the [dockerfile](./docker/Dockerfile.a2.openEuler)
 3. Why do I have error for the `example/offload.py` in the main LMCache repo ?
   - The import order can affect the LMCacheAscend connector, therefore please see our example [here](./examples/offload.py).
+4. Raise a missing header file error while `#include <numaif.h>`.
+  - Execute `yum install numactl-devel`.
