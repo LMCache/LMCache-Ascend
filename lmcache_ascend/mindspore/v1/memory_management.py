@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2025 LMCache Authors.
 # Copyright 2025 Ilya Yanok, Serapheim Dimitropoulos.
 #
@@ -14,42 +15,41 @@
 # limitations under the License.
 
 # Standard
-from dataclasses import dataclass
-from enum import Enum
 from typing import List, Optional, Tuple, Union
-import abc
 import ctypes
-import threading
-import numpy as np
-import mindspore as ms
 
 # Third Party
+from lmcache.logging import init_logger
+from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.memory_management import (
+    FreeBlock,
+    MemoryFormat,
+    MemoryObjMetadata,
+    TensorMemoryAllocator,
+    TensorMemoryObj,
+)
+from lmcache.v1.system_detection import NUMAMapping
+import mindspore as ms
+import numpy as np
 import sortedcontainers
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import _lmcache_nvtx_annotate
-from ._tensor import (
-    get_data_ptr,
-    get_numel,
-    get_element_size,
-    get_itemsize,
-    get_dtype_compat,
-    view_and_shape
-)
-from lmcache.v1.memory_management import (
-    MemoryObjMetadata,
-    TensorMemoryAllocator,
-    MemoryFormat,
-    TensorMemoryObj,
-    FreeBlock
-)
-from lmcache.v1.system_detection import NUMAMapping
 import lmcache_ascend.c_ops as lmc_ops
 
+# Local
+from ._tensor import (
+    get_data_ptr,
+    get_dtype_compat,
+    get_element_size,
+    get_itemsize,
+    get_numel,
+    view_and_shape,
+)
+
 logger = init_logger(__name__)
+
 
 def _allocate_cpu_memory(
     size: int,
@@ -74,6 +74,7 @@ def _allocate_cpu_memory(
     buffer = np.frombuffer(buf, dtype=np.uint8)
 
     return buffer
+
 
 class NumpyAndTensorMemoryObj(TensorMemoryObj):
     def get_size(self) -> int:
@@ -102,9 +103,14 @@ class NumpyAndTensorMemoryObj(TensorMemoryObj):
         )
         return memoryview(byte_array)
 
+
 class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
-    def __init__(self, tensor: Union[torch.Tensor, np.ndarray], align_bytes: int = TensorMemoryAllocator.ALIGN_BYTES):
-        # NOTE (Gingfung:) changed to reshape to enable 
+    def __init__(
+        self,
+        tensor: Union[torch.Tensor, np.ndarray],
+        align_bytes: int = TensorMemoryAllocator.ALIGN_BYTES,
+    ):
+        # NOTE (Gingfung:) changed to reshape to enable
         assert self._is_uint8_type(tensor)
         self.buffer = tensor.reshape(-1)
 
@@ -164,9 +170,8 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
                 break
         else:
             logger.debug(
-                f"Failed to allocate memory for "
-                f"tensor({shape}, {dtype}) because "
-                "no memory is available"
+                f"Failed to allocate memory for tensor({shape}, {dtype})"
+                " because no memory is available"
             )
             return None
 
@@ -204,7 +209,7 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
         dtype: Optional[torch.dtype],
         batch_size: int,
         fmt: MemoryFormat = MemoryFormat.KV_2LTD,
-        parent_allocator: Optional["MemoryAllocatorInterface"] = None,
+        parent_allocator: Optional["MemoryAllocatorInterface"] = None,  # type: ignore[name-defined] # noqa: F821
     ) -> Optional[List[TensorMemoryObj]]:
         """
         Batched allocate tensor memory objs with equal sizes.
@@ -270,7 +275,7 @@ class NumpyAndTensorMemoryAllocator(TensorMemoryAllocator):
                     metadata=MemoryObjMetadata(
                         shape, dtype, temp_start, unit_aligned_size, 1, False, fmt
                     ),
-                    parent_allocator=parent_allocator
+                    parent_allocator=parent_allocator,
                 )
             )
             temp_start += unit_aligned_size

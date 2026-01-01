@@ -1,40 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass, asdict
+from abc import ABC, abstractmethod
+from dataclasses import asdict, dataclass
+from typing import List, Optional, Union, no_type_check
 import argparse
 import contextlib
 import logging
 import random
-import sys
 import time
-from typing import List, Optional, Union
-from abc import ABC, abstractmethod
 
 # Third Party
-from transformers import AutoTokenizer, AutoConfig
-from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import TokensPrompt
-import pandas as pd
-import openai
-
-# First Party
 from lmcache.config import LMCacheEngineConfig as Config
-from lmcache.v1.config import (
-    LMCacheEngineConfig as V1Config,
-)
 from lmcache.integration.vllm.utils import lmcache_get_or_create_config
-
+from lmcache.v1.config import LMCacheEngineConfig as V1Config
+from transformers import AutoConfig, AutoTokenizer
 from utils import (
     PromptBuildMethodType,
-    build_rag_prompt_tokens,
-    build_qa_prompt,
     build_fewshot_prompt,
+    build_qa_prompt,
+    build_rag_prompt_tokens,
     compute_f1,
     compute_rl,
     init_logger,
     load_dataset,
 )
+from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
+from vllm.engine.arg_utils import EngineArgs
+from vllm.inputs import TokensPrompt
+import openai
+import pandas as pd
 
 logger = init_logger(__name__, logging.INFO)
 
@@ -47,7 +42,7 @@ SYSTEM_PROMPT_SET = {
     ),
     PromptBuildMethodType.FEW_SHOT: (
         "Summarize the dialogue into a few short sentences. "
-        "The following are some examples.\n\n"
+        " The following are some examples.\n\n"
     ),
 }
 QUERY_PROMPT_SET = {
@@ -94,6 +89,7 @@ def build_llm_with_lmcache(model: str, max_model_len: int = 32000, blend: bool =
 @dataclass
 class WorkloadConfig:
     """Configuration for a single RAG workload."""
+
     # Model name
     model: str
     # Tokenizer name
@@ -154,7 +150,12 @@ def parse_arguments():
         help="Prompt build method",
     )
     # Optional/Default arguments
-    parser.add_argument("--tokenizer", type=str, default="", help="Tokenizer name (defaults to model if empty)")
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        default="",
+        help="Tokenizer name (defaults to model if empty)",
+    )
     parser.add_argument(
         "--start-index", type=int, default=0, help="Start index of the workload"
     )
@@ -202,12 +203,13 @@ def parse_arguments():
     parser.add_argument(
         "--temperature", type=float, default=0.0, help="Temperature for generation"
     )
-    
-    # LMCache specific argument (if needed, although usually handled by lmcache_get_or_create_config)
+
+    # LMCache specific argument
+    # (if needed, although usually handled by lmcache_get_or_create_config)
     parser.add_argument(
         "--kv-chunk-size", type=int, default=256, help="KV chunk size for LMCache"
     )
-    
+
     args = parser.parse_args()
     return args
 
@@ -216,7 +218,7 @@ def parse_size(size: str) -> int:
     """Parse size string like '30GB' to bytes"""
     if not size:
         return -1
-    
+
     size = size.upper()
     unit_multipliers = {
         "KB": 1024,
@@ -225,19 +227,20 @@ def parse_size(size: str) -> int:
         "TB": 1024**4,
         "B": 1,
     }
-    
+
     for unit, multiplier in unit_multipliers.items():
         if size.endswith(unit):
             try:
-                return int(size[:-len(unit)]) * multiplier
-            except ValueError:
-                raise ValueError(f"Invalid size value in {size}")
+                return int(size[: -len(unit)]) * multiplier
+            except ValueError as ve:
+                raise ValueError(f"Invalid size value in {size}") from ve
 
     raise ValueError(f"Invalid size unit {size}")
 
 
 class KVSizeCalculator:
     """Calculates KV cache size based on model configuration."""
+
     def __init__(
         self,
         num_key_value_heads: int,
@@ -248,7 +251,8 @@ class KVSizeCalculator:
         # ratio = heads * dim * layers * precision * (k + v)
         self.ratio = num_key_value_heads * head_dim * num_layers * precision * 2
         logger.info(
-            f"num_key_value_heads:{num_key_value_heads} head_dim:{head_dim} num_layers:{num_layers} precision:{precision}"
+            f"num_key_value_heads:{num_key_value_heads} head_dim:{head_dim} "
+            f"num_layers:{num_layers} precision:{precision}"
         )
 
     def get_kv_size(self, token_cnt: int) -> int:
@@ -310,7 +314,7 @@ class BaseRAGManager(ABC):
         for i in range(cnt):
             generated_text = self._results[i].body
             expected_answers = self._answers[i]
-            
+
             if self._build_method == PromptBuildMethodType.QA:
                 quality_score = max(
                     compute_f1(generated_text, answer, self._tokenizer)
@@ -318,8 +322,7 @@ class BaseRAGManager(ABC):
                 )
             elif self._build_method == PromptBuildMethodType.FEW_SHOT:
                 quality_score = max(
-                    compute_rl(generated_text, answer)
-                    for answer in expected_answers
+                    compute_rl(generated_text, answer) for answer in expected_answers
                 )
             else:
                 raise ValueError(f"Invalid prompt build method {self._build_method}")
@@ -336,25 +339,29 @@ class BaseRAGManager(ABC):
         }
 
         default_cols = [
-            "quality", "generation_time",
-            "prefill_token_cnt", "generation_token_cnt"
+            "quality",
+            "generation_time",
+            "prefill_token_cnt",
+            "generation_token_cnt",
         ]
 
         if is_online:
             ttfts = [r.ttft for r in self._results]
             end_to_end_latencies = [r.end_to_end_latency for r in self._results]
-            tpots = [r.tpot for r in self._results] 
-            
+            tpots = [r.tpot for r in self._results]
+
             avg_ttft = sum(ttfts) / cnt
             avg_tpot = sum(tpots) / cnt
             avg_e2e_latency = sum(end_to_end_latencies) / cnt
-            
-            summary_data.update({
-                "ttft": ttfts,
-                "tpot": tpots,
-                "end_to_end_latency": end_to_end_latencies,
-            })
-            
+
+            summary_data.update(
+                {
+                    "ttft": ttfts,
+                    "tpot": tpots,
+                    "end_to_end_latency": end_to_end_latencies,
+                }
+            )
+
             final_cols_order = [
                 "quality",
                 "ttft",
@@ -378,7 +385,7 @@ class BaseRAGManager(ABC):
         else:
             summary_data["throughput"] = [thput] * cnt
             df = pd.DataFrame(summary_data)
-            
+
             offline_cols_order = default_cols + ["throughput"]
             df = df[offline_cols_order]
 
@@ -393,6 +400,7 @@ class BaseRAGManager(ABC):
 
 class OfflineRAGManager(BaseRAGManager):
     """Manages RAG benchmark for offline serving using vLLM."""
+
     def __init__(self, workload_config: WorkloadConfig):
         super().__init__(workload_config)
 
@@ -401,7 +409,7 @@ class OfflineRAGManager(BaseRAGManager):
 
         # Preprocess all prompts into token format
         self._prepare_tokens()
-        
+
     def _encode_prompt(self, prompt: str, add_special_tokens: bool = True) -> List[int]:
         """Helper to encode prompt, using tokenizer from base class."""
         return self._tokenizer.encode(prompt, add_special_tokens=add_special_tokens)
@@ -410,8 +418,12 @@ class OfflineRAGManager(BaseRAGManager):
         """Prepare all prompts and documents into token lists."""
         config = self.workload_config
         system_prompt_tokens = self._encode_prompt(config.system_prompt)
-        query_prompt_tokens = self._encode_prompt(config.query_prompt, add_special_tokens=False)
-        separator_tokens = self._encode_prompt(config.separator, add_special_tokens=False)
+        query_prompt_tokens = self._encode_prompt(
+            config.query_prompt, add_special_tokens=False
+        )
+        separator_tokens = self._encode_prompt(
+            config.separator, add_special_tokens=False
+        )
 
         for ex in self._eval_dataset:
             if config.prompt_build_method == PromptBuildMethodType.QA:
@@ -444,21 +456,26 @@ class OfflineRAGManager(BaseRAGManager):
             if config.lmconfig.enable_blending:
                 for doc_tokens in doc_tokens_list:
                     fix_doc_tokens_list.append(
-                        system_prompt_tokens + separator_tokens + doc_tokens + separator_tokens + query_prompt_tokens
+                        system_prompt_tokens
+                        + separator_tokens
+                        + doc_tokens
+                        + separator_tokens
+                        + query_prompt_tokens
                     )
-            
-            self._document_tokens.append(fix_doc_tokens_list)
-            
-            if not fix_doc_tokens_list and config.lmconfig.enable_blending:
-                logger.info("Blending enabled but no valid documents found for this example.")
 
+            self._document_tokens.append(fix_doc_tokens_list)
+
+            if not fix_doc_tokens_list and config.lmconfig.enable_blending:
+                logger.info(
+                    "Blending enabled but no valid documents found for this example."
+                )
 
     def _precompute_documents(self, llm: LLM) -> int:
         """Precompute KV cache for document chunks using the same LLM instance"""
         if not self.workload_config.lmconfig.enable_blending:
             logger.info("LMCache blending disabled. Skipping document precomputation.")
             return 0
-            
+
         logger.info("Starting document precomputation...")
 
         model_config = self._model_config
@@ -467,7 +484,7 @@ class OfflineRAGManager(BaseRAGManager):
             if model_config.head_dim is not None
             else model_config.hidden_size // model_config.num_attention_heads
         )
-        
+
         kv_size_calculator = KVSizeCalculator(
             model_config.num_key_value_heads,
             head_dim,
@@ -482,15 +499,18 @@ class OfflineRAGManager(BaseRAGManager):
         kv_storage_size_gb = self.workload_config.lmconfig.max_local_cpu_size
         GB_TO_BYTES = 1024 * 1024 * 1024
         kv_storage_size_bytes = int(kv_storage_size_gb * GB_TO_BYTES)
-        
+
         logger.info(
-            f"KV cache storage size limit: {kv_storage_size_gb} GB "
-            f"({kv_storage_size_bytes} bytes)"
+            f"KV cache storage size limit: {kv_storage_size_gb} GB"
+            " ({kv_storage_size_bytes} bytes)"
         )
 
         for i, doc_tokens_list in enumerate(self._document_tokens):
             if current_size_taken >= kv_storage_size_bytes:
-                logger.info(f"KV cache size limit reached ({kv_storage_size_gb} GB). Stopping precomputation.")
+                logger.info(
+                    f"KV cache size limit reached ({kv_storage_size_gb} GB)."
+                    " Stopping precomputation."
+                )
                 break
 
             # Calculate size for this document set
@@ -526,29 +546,29 @@ class OfflineRAGManager(BaseRAGManager):
 
         logger.info(
             f"Precomputed {precomputed_count} document sets, "
-            f"used {current_size_taken} bytes of KV cache"
+            "used {current_size_taken} bytes of KV cache"
         )
         return precomputed_count
 
-
+    @no_type_check
     def run_benchmark(
-        self,
-        llm: LLM,
-        sampling_params: SamplingParams,
+        self, llm: LLM, sampling_params: SamplingParams, **kwargs
     ) -> float:
         """Run the benchmark - optimized using vLLM's batch processing approach"""
         self._results = []
 
         precomputed_count = self._precompute_documents(llm)
         logger.info(f"Precomputed {precomputed_count} document chunks for KV cache")
-        
+
         logger.info("Starting benchmark (throughput-focused with batch processing)...")
 
-        prompts = [TokensPrompt(prompt_token_ids=tokens) for tokens in self._request_tokens]
+        prompts = [
+            TokensPrompt(prompt_token_ids=tokens) for tokens in self._request_tokens
+        ]
         sampling_params_list = [sampling_params] * len(self._request_tokens)
 
         elapsed_time = 0.0
-        
+
         try:
             start_time = time.perf_counter()
             outputs = llm.generate(prompts, sampling_params_list)
@@ -584,7 +604,7 @@ class OfflineRAGManager(BaseRAGManager):
             total_prompt_tokens = sum(r.prompt_tokens for r in self._results)
             total_output_tokens = sum(r.generation_tokens for r in self._results)
             total_tokens = total_prompt_tokens + total_output_tokens
-            
+
             print("\n=== Throughput Results ===")
             print(f"Elapsed time: {elapsed_time:.2f} seconds")
             print(f"Total requests: {len(self._results)}")
@@ -608,7 +628,7 @@ class OfflineRAGManager(BaseRAGManager):
         self._results = []
 
         start_time = time.perf_counter()
-        
+
         individual_request_times = []
 
         for i, prompt_tokens in enumerate(prompt_tokens_list):
@@ -622,7 +642,7 @@ class OfflineRAGManager(BaseRAGManager):
                 generated_text = output[0].outputs[0].text
                 prompt_token_count = len(output[0].prompt_token_ids)
                 generation_token_count = len(output[0].outputs[0].token_ids)
-                
+
                 request_duration = request_end_time - request_start_time
 
                 response = Response(
@@ -641,7 +661,7 @@ class OfflineRAGManager(BaseRAGManager):
             except Exception as e:
                 request_end_time = time.perf_counter()
                 logger.error(f"Error processing request {i} sequentially: {e}")
-                
+
                 # Add dummy response for failed requests
                 request_duration = request_end_time - request_start_time
                 response = Response(
@@ -683,7 +703,6 @@ class OnlineRAGManager(BaseRAGManager):
         # Process dataset for online serving (using strings, not tokens)
         self._prepare_prompts()
 
-
     def _prepare_prompts(self):
         """Prepare prompts as strings for online API calls"""
         config = self.workload_config
@@ -704,24 +723,27 @@ class OnlineRAGManager(BaseRAGManager):
             doc_prompts_for_precompute = []
             if config.lmconfig.enable_blending and doc_prompts:
                 doc_prompts_for_precompute.append(
-                    separator.join([system_prompt] + doc_prompts + [query_prompt]))
+                    separator.join([system_prompt] + doc_prompts + [query_prompt])
+                )
 
             full_prompt = separator.join([system_prompt] + doc_prompts + [q_prompt])
             self._request_prompts.append(full_prompt)
 
             if not doc_prompts_for_precompute:
                 if config.lmconfig.enable_blending:
-                    logger.info("Blending enabled but no documents for precomputation in this example.")
+                    logger.info(
+                        "Blending enabled but no documents for precomputation"
+                        " in this example."
+                    )
                 self._document_prompts.append(None)
             else:
                 self._document_prompts.append(doc_prompts_for_precompute)
-            
 
     def _send_warmup_request(self):
         """Send a warmup request to initialize the model/cache on the server"""
         logger.info("Sending warmup requests...")
         warmup_prompt = "Hello, this is a warmup request."
-        
+
         try:
             self._client.chat.completions.create(
                 model=self.workload_config.model,
@@ -732,18 +754,19 @@ class OnlineRAGManager(BaseRAGManager):
             )
             logger.info("Warmup request completed successfully.")
             return True
-            
+
         except Exception as e:
             logger.warning(f"Warmup request failed: {e}")
             return False
 
-
     def _precompute_documents(self) -> int:
         """Precompute documents by sending them to the online server"""
         if not self.workload_config.lmconfig.enable_blending:
-            logger.info("LMCache blending disabled. Skipping online document precomputation.")
+            logger.info(
+                "LMCache blending disabled. Skipping online document precomputation."
+            )
             return 0
-            
+
         logger.info("Starting online document precomputation...")
 
         precomputed_count = 0
@@ -772,9 +795,10 @@ class OnlineRAGManager(BaseRAGManager):
                 logger.warning(f"Precompute failed for document chunk {i}: {e}")
                 continue
 
-        logger.info(f"Precomputed {precomputed_count} document chunks for online serving")
+        logger.info(
+            f"Precomputed {precomputed_count} document chunks for online serving"
+        )
         return precomputed_count
-
 
     def run_benchmark(self, **kwargs) -> float:
         """Run online benchmark with detailed timing metrics"""
@@ -802,7 +826,11 @@ class OnlineRAGManager(BaseRAGManager):
 
             # --- Stream API Call Section ---
             try:
-                prompt_tokens = len(self._tokenizer.encode(request_prompt)) if hasattr(self, '_tokenizer') else 0
+                prompt_tokens = (
+                    len(self._tokenizer.encode(request_prompt))
+                    if hasattr(self, "_tokenizer")
+                    else 0
+                )
                 # Make API call with timing
                 stream = self._client.chat.completions.create(
                     model=self.workload_config.model,
@@ -820,7 +848,7 @@ class OnlineRAGManager(BaseRAGManager):
                         if not first_token_received:
                             ttft_time = time.perf_counter() - request_start_time
                             first_token_received = True
-                        
+
                         generated_text += content
                         completion_tokens += 1
 
@@ -828,12 +856,16 @@ class OnlineRAGManager(BaseRAGManager):
                 # --- End Stream API Call Section ---
 
                 # Extract response details
-                if completion_tokens == 0 and not generated_text and first_token_received:
+                if (
+                    completion_tokens == 0
+                    and not generated_text
+                    and first_token_received
+                ):
                     completion_tokens = 1
 
                 # Calculate timing metrics
                 total_time = request_end_time - request_start_time
-                
+
                 if completion_tokens > 1:
                     tpot = (total_time - ttft_time) / (completion_tokens - 1)
                 elif completion_tokens == 1:
@@ -883,7 +915,6 @@ class OnlineRAGManager(BaseRAGManager):
         # Print throughput metrics
         total_prompt_tokens = sum(r.prompt_tokens for r in self._results)
         total_output_tokens = sum(r.generation_tokens for r in self._results)
-        total_tokens = total_prompt_tokens + total_output_tokens
         successful_requests = len([r for r in self._results if r.generation_tokens > 0])
 
         print("\n=== Online Serving Results ===")
@@ -893,11 +924,13 @@ class OnlineRAGManager(BaseRAGManager):
         successful_requests = len([r for r in self._results if r.generation_tokens > 0])
         successful_results = [r for r in self._results if r.generation_tokens > 0]
         num_successful = len(successful_results)
-        
+
         if num_successful > 0:
             avg_ttft = sum(r.ttft for r in successful_results) / num_successful
             avg_tpot = sum(r.tpot for r in successful_results) / num_successful
-            avg_e2e_latency = sum(r.end_to_end_latency for r in successful_results) / num_successful
+            avg_e2e_latency = (
+                sum(r.end_to_end_latency for r in successful_results) / num_successful
+            )
         else:
             avg_ttft, avg_tpot, avg_e2e_latency = 0.0, 0.0, 0.0
 
@@ -907,7 +940,9 @@ class OnlineRAGManager(BaseRAGManager):
         print(f"Total output tokens: {total_output_tokens}")
         print(f"Requests per second: {len(self._results) / total_elapsed:.2f}")
         if total_output_tokens > 0:
-            print(f"Output tokens per second: {total_output_tokens / total_elapsed:.2f}")
+            print(
+                f"Output tokens per second: {total_output_tokens / total_elapsed:.2f}"
+            )
 
         print(f"Average TTFT (Successful): {avg_ttft:.4f} seconds")
         print(f"Average TPOT (Successful): {avg_tpot:.4f} seconds")

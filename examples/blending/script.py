@@ -1,19 +1,24 @@
-import os
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from dataclasses import asdict
 import argparse
-from transformers import AutoTokenizer
 import contextlib
+import os
+
+# Third Party
+from transformers import AutoTokenizer
+from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.engine.arg_utils import EngineArgs
-from vllm import LLM, SamplingParams
-from dataclasses import asdict
+
 
 @contextlib.contextmanager
-def build_llm_with_lmcache(model: str, max_model_len: int=32000, blend: bool=True):
+def build_llm_with_lmcache(model: str, max_model_len: int = 32000, blend: bool = True):
     lmcache_connector = "LMCacheAscendConnectorV1Dynamic"
     ktc = KVTransferConfig(
         kv_connector=lmcache_connector,
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
+        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
     )
 
     if blend:
@@ -43,6 +48,7 @@ def build_llm_with_lmcache(model: str, max_model_len: int=32000, blend: bool=Tru
     llm = LLM(**asdict(llm_args))
     yield llm
 
+
 def setup_environment_variables(recompute_ratio):
     # LMCache-related environment variables
 
@@ -66,15 +72,17 @@ def setup_environment_variables(recompute_ratio):
     # Set the maximum size of the local CPU size to 5GB
     os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5"
 
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Example script for blending")
-    parser.add_argument("model", help="path to the model")    
-    parser.add_argument("recompute_ratio", help="recompute ratio for blending")    
-    parser.add_argument("--no-blend", action='store_true', help="")    
+    parser.add_argument("model", help="path to the model")
+    parser.add_argument("recompute_ratio", help="recompute ratio for blending")
+    parser.add_argument("--no-blend", action="store_true", help="")
     args = parser.parse_args()
     return args
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     args = parse_args()
     model = args.model
     recompute_ratio = args.recompute_ratio
@@ -83,9 +91,11 @@ if __name__ == '__main__':
     chunk1_prompt = tokenizer.encode("By definition x=2;", add_special_tokens=False)
     chunk2_prompt = tokenizer.encode("By definition y=7;", add_special_tokens=False)
     chunk3_prompt = tokenizer.encode("Then x+y=", add_special_tokens=False)
-    blend_special_str = tokenizer.encode(os.getenv("LMCACHE_BLEND_SPECIAL_STR"), add_special_tokens=False)
+    blend_special_str = tokenizer.encode(
+        os.getenv("LMCACHE_BLEND_SPECIAL_STR"), add_special_tokens=False
+    )
     prompt = (
-          chunk1_prompt
+        chunk1_prompt
         + blend_special_str
         + chunk2_prompt
         + blend_special_str
@@ -93,8 +103,18 @@ if __name__ == '__main__':
     )
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
     with build_llm_with_lmcache(model, blend=not args.no_blend) as llm:
-        llm.generate({"prompt_token_ids": chunk1_prompt + blend_special_str}, sampling_params=sampling_params)
-        llm.generate({"prompt_token_ids": chunk2_prompt + blend_special_str}, sampling_params=sampling_params)
-        llm.generate({"prompt_token_ids": chunk3_prompt}, sampling_params=sampling_params)
-        outputs1 = llm.generate({"prompt_token_ids": prompt}, sampling_params=sampling_params)
+        llm.generate(
+            {"prompt_token_ids": chunk1_prompt + blend_special_str},
+            sampling_params=sampling_params,
+        )
+        llm.generate(
+            {"prompt_token_ids": chunk2_prompt + blend_special_str},
+            sampling_params=sampling_params,
+        )
+        llm.generate(
+            {"prompt_token_ids": chunk3_prompt}, sampling_params=sampling_params
+        )
+        outputs1 = llm.generate(
+            {"prompt_token_ids": prompt}, sampling_params=sampling_params
+        )
         print(f"Output: {outputs1[0].outputs[0].text}")

@@ -5,15 +5,13 @@ import asyncio
 import random
 import string
 import threading
-import numpy as np
 
 # Third Party
-import torch
-
-# First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+import numpy as np
+import torch
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
@@ -69,8 +67,14 @@ def generate_kv_cache(num_tokens, fmt, device):
 
 
 def generate_kv_cache_paged_list_tensors(
-    num_blocks, device, num_layers, num_heads, head_size, block_size=16,
-    dtype=torch.bfloat16, use_mla=False
+    num_blocks,
+    device,
+    num_layers,
+    num_heads,
+    head_size,
+    block_size=16,
+    dtype=torch.bfloat16,
+    use_mla=False,
 ):
     """
     Instead of Tuple[Tuple[Tensor, Tensor]], return List[Tensor]
@@ -89,8 +93,14 @@ def generate_kv_cache_paged_list_tensors(
 
     return ret
 
+
 def generate_kv_cache_paged_list_tuple_tensors(
-    num_blocks, device, num_layers, num_heads, head_size, block_size=16, 
+    num_blocks,
+    device,
+    num_layers,
+    num_heads,
+    head_size,
+    block_size=16,
     dtype=torch.bfloat16,
 ):
     """
@@ -100,13 +110,14 @@ def generate_kv_cache_paged_list_tuple_tensors(
     ret = []
     key_shape = [num_blocks, block_size, num_heads, head_size]
     value_shape = [num_blocks, block_size, num_heads, head_size]
-        
+
     for i in range(num_layers):
         key = torch.rand(key_shape, dtype=dtype, device=device)
         value = torch.rand(value_shape, dtype=dtype, device=device)
         ret.append((key, value))
 
     return ret
+
 
 def generate_sglang_kv_cache_paged_list_tensors(
     num_layers,
@@ -284,6 +295,7 @@ def check_kv_cache_device(kvs, device):
         k, v = kv
         assert k.device == torch.device(device)
         assert v.device == torch.device(device)
+
 
 def create_gpu_connector(hidden_dim, num_layers):
     return VLLMPagedMemGPUConnectorV2(hidden_dim, num_layers)

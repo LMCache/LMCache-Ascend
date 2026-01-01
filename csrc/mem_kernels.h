@@ -1,81 +1,88 @@
 #pragma once
-#include <torch/torch.h>
-#include <torch/extension.h>
-#include "managed_mem.h"
 #include "kernels/types.h"
+#include "managed_mem.h"
+#include <torch/extension.h>
+#include <torch/torch.h>
 
 namespace kvcache_ops {
-void multi_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,  const kvcache_ops::KVCacheFormat kvcache_format,
-                                    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 
-                                    uint8_t *slotmappings,const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,
-                                    const int64_t pageBuffSize, const int32_t numTokensChunk, const bool page2L);
+void multi_layer_kv_transfer_kernel(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    const kvcache_ops::KVCacheFormat kvcache_format, uint32_t blockDim,
+    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
+    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
+    const int32_t numLayers, const int64_t pageBuffSize,
+    const int32_t numTokensChunk, const bool page2L);
 
-void multi_layer_kv_transfer_kernel_310p(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, uint32_t blockDim,
-                                    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
-                                    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
-                                    const int32_t numLayers, const int64_t pageBuffSize, const int32_t numTokensChunk,
-                                    const bool page2L, const int32_t numKVHead, const int32_t headSize, const int32_t blockSize);
+void multi_layer_kv_transfer_kernel_310p(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches,
+    uint8_t *dstCacheTensor, uint8_t *slotmappings, const int64_t hiddenDims,
+    const int32_t kvs, const int32_t numLayers, const int64_t pageBuffSize,
+    const int32_t numTokensChunk, const bool page2L, const int32_t numKVHead,
+    const int32_t headSize, const int32_t blockSize);
 
-void multi_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, const kvcache_ops::KVCacheFormat kvcache_format,
-                                    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, 
-                                    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs, 
-                                    const int32_t numLayers, const int64_t pageBuffSize, const int32_t numTokensChunk, 
-                                    const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L);
+void multi_layer_kv_transfer_kernel_v2(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    const kvcache_ops::KVCacheFormat kvcache_format, uint32_t blockDim,
+    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
+    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
+    const int32_t numLayers, const int64_t pageBuffSize,
+    const int32_t numTokensChunk, const int64_t perLoopBuffer,
+    const int32_t maxTokensPerLoop, const bool page2L);
 
-void single_layer_kv_transfer_kernel_v2(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, 
-                                     uint32_t blockDim, void *stream, uint8_t *lmcKeyValueCache, 
-                                     uint8_t *vllmKeyValueCache, uint8_t *slotmappings, 
-                                     const int64_t vllmBlockStride, const int64_t vllmValueOffset, const int64_t vllmBufferSize,
-                                     const int64_t lmcTokenStride, const int64_t lmcValueOffset, const int64_t lmcBufferSize,
-                                     const int32_t maxTokensPerLoop, const int32_t numHeads, const int32_t headDims, 
-                                     const int32_t numTokens, const int32_t blockSize,
-                                     const bool page2L, const bool lmcTokensMajor);
+void single_layer_kv_transfer_kernel_v2(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    uint32_t blockDim, void *stream, uint8_t *lmcKeyValueCache,
+    uint8_t *vllmKeyValueCache, uint8_t *slotmappings,
+    const int64_t vllmBlockStride, const int64_t vllmValueOffset,
+    const int64_t vllmBufferSize, const int64_t lmcTokenStride,
+    const int64_t lmcValueOffset, const int64_t lmcBufferSize,
+    const int32_t maxTokensPerLoop, const int32_t numHeads,
+    const int32_t headDims, const int32_t numTokens, const int32_t blockSize,
+    const bool page2L, const bool lmcTokensMajor);
 
-void load_and_reshape_flash_kernel(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, 
-                                  uint32_t blockDim, void *stream, uint8_t *dstCacheTensor, uint8_t *keyCachePtr, 
-                                  uint8_t *valueCachePtr, uint8_t *slotmappings, const int64_t hiddenDims, 
-                                  const int64_t numPages, const int32_t pagedSize, const int32_t numTokens, 
-                                  const int32_t numLayers, const int32_t layerIdx, const bool page2L);
-}
+void load_and_reshape_flash_kernel(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    uint32_t blockDim, void *stream, uint8_t *dstCacheTensor,
+    uint8_t *keyCachePtr, uint8_t *valueCachePtr, uint8_t *slotmappings,
+    const int64_t hiddenDims, const int64_t numPages, const int32_t pagedSize,
+    const int32_t numTokens, const int32_t numLayers, const int32_t layerIdx,
+    const bool page2L);
+} // namespace kvcache_ops
 
+void multi_layer_kv_transfer(
+    torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]
+    const torch::Tensor &key_value_ptrs, // [num_layers]
+    const torch::Tensor &slot_mapping,   // [num_tokens]
+    const torch::Device &paged_memory_device, const int page_buffer_size,
+    const bool direction, const bool use_mla, const int kvcache_format_raw);
 
-void multi_layer_kv_transfer(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
-                             const torch::Tensor& key_value_ptrs, // [num_layers]
-                             const torch::Tensor& slot_mapping, // [num_tokens]
-                             const torch::Device& paged_memory_device,
-                             const int page_buffer_size, const bool direction,
-                             const bool use_mla,
-                             const int kvcache_format_raw);
+void multi_layer_kv_transfer_310p(
+    torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]
+    const torch::Tensor &key_value_ptrs, // [num_layers]
+    const torch::Tensor &slot_mapping,   // [num_tokens]
+    const torch::Device &paged_memory_device, const int page_buffer_size,
+    const bool direction, const bool use_mla, const int num_kv_head,
+    const int head_size, const int block_size);
 
-void multi_layer_kv_transfer_310p(torch::Tensor& key_value, // [kv, num_layer, num_tokens, hidden]
-                             const torch::Tensor& key_value_ptrs, // [num_layers]
-                             const torch::Tensor& slot_mapping, // [num_tokens]
-                             const torch::Device& paged_memory_device,
-                             const int page_buffer_size, const bool direction,
-                             const bool use_mla, const int num_kv_head,
-                             const int head_size, const int block_size);
+void multi_layer_kv_transfer_unilateral(
+    torch::Tensor &key_value, const torch::Tensor &key_ptrs,
+    const torch::Tensor &value_ptrs, const torch::Tensor &slot_mapping,
+    const torch::Device &paged_memory_device, const int page_buffer_size,
+    const bool direction);
 
-void multi_layer_kv_transfer_unilateral(torch::Tensor& key_value,
-                                        const torch::Tensor& key_ptrs,
-                                        const torch::Tensor& value_ptrs,
-                                        const torch::Tensor& slot_mapping,
-                                        const torch::Device& paged_memory_device,
-                                        const int page_buffer_size,
-                                        const bool direction);
-
-void single_layer_kv_transfer(torch::Tensor& lmc_key_value_cache,
-                              torch::Tensor& vllm_key_value_cache,
-                              torch::Tensor& slot_mapping,
-                              const bool direction,
+void single_layer_kv_transfer(torch::Tensor &lmc_key_value_cache,
+                              torch::Tensor &vllm_key_value_cache,
+                              torch::Tensor &slot_mapping, const bool direction,
                               const bool token_major = false,
                               const bool vllm_two_major = false);
 
-void load_and_reshape_flash(torch::Tensor& key_value, torch::Tensor& key_cache,
-                            torch::Tensor& value_cache,
-                            torch::Tensor& slot_mapping, const int layer_idx);
+void load_and_reshape_flash(torch::Tensor &key_value, torch::Tensor &key_cache,
+                            torch::Tensor &value_cache,
+                            torch::Tensor &slot_mapping, const int layer_idx);
 
-void reshape_and_cache_back_flash(torch::Tensor& key_value,
-                                  torch::Tensor& key_cache,
-                                  torch::Tensor& value_cache,
-                                  torch::Tensor& slot_mapping,
+void reshape_and_cache_back_flash(torch::Tensor &key_value,
+                                  torch::Tensor &key_cache,
+                                  torch::Tensor &value_cache,
+                                  torch::Tensor &slot_mapping,
                                   const int layer_idx);

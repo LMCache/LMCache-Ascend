@@ -1,9 +1,12 @@
-from dataclasses import dataclass
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 from typing import Optional
-import torch
-from lmcache.v1.system_detection import NUMAMapping
+
+# Third Party
 from lmcache.logging import init_logger
+from lmcache.v1.system_detection import NUMAMapping
 from vllm.platforms import current_platform
+import torch
 
 logger = init_logger(__name__)
 
@@ -14,6 +17,7 @@ if torch.npu.is_available():
     except ImportError:
         # Fallback if c_ops is not available
         get_gpu_pci_bus_id = None
+
 
 def _read_from_sys() -> Optional[NUMAMapping]:
     """
@@ -34,7 +38,7 @@ def _read_from_sys() -> Optional[NUMAMapping]:
         if numa_node >= 0:
             return NUMAMapping(gpu_to_numa_mapping={device_index: numa_node})
         else:
-            logger.warning(f"No valid NUMA mapping for current device, returning None")
+            logger.warning("No valid NUMA mapping for current device, returning None")
             return None
     except Exception as e:
         logger.warning(f"Failed to auto read NUMA mapping from system: {e}")

@@ -1,18 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional,Union
-import os
+from typing import Optional, Union
 
 # Third Party
+from lmcache.logging import init_logger
+from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
+from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
-from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
+
 
 class LMCBlender:
     """
@@ -59,7 +59,7 @@ class LMCBlender:
         attn_output: Optional[torch.Tensor],
         attn_metadata,
         mask: Optional[torch.Tensor] = None,
-        **kwargs
+        **kwargs,
     ):
         logger.debug(f"Blender is processing KV for layer {layer_id}")
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
@@ -83,17 +83,22 @@ class LMCBlender:
             )
         layer = self.layerwise_model.vllm_model.model.layers[layer_id]
         attn_layer = layer.self_attn
-        if 'qk_post_processing' in kwargs:
-            q, k = kwargs['qk_post_processing'](q, k, attn_layer, self.metadata.positions)
+        if "qk_post_processing" in kwargs:
+            q, k = kwargs["qk_post_processing"](
+                q, k, attn_layer, self.metadata.positions
+            )
         else:
             q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
         if layer_id in self.common_metadata.check_layers:
-            assert k[num_falses:].shape[0] == old_k.shape[0], \
-                "Mismatch between number of tokens in k (after skipping falses) and old_k"
-            
+            assert k[num_falses:].shape[0] == old_k.shape[0], (
+                "Mismatch between number of tokens in k "
+                "(after skipping falses) and old_k"
+            )
+
             diff_k = torch.sum(
-                (k[num_falses:].to(torch.float32) - old_k.to(torch.float32)) ** 2, dim=[1]
+                (k[num_falses:].to(torch.float32) - old_k.to(torch.float32)) ** 2,
+                dim=[1],
             )
 
             total_len = diff_k.shape[0]
