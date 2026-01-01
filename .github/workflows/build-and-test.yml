@@ -59,7 +59,7 @@ jobs:
 
       options: >-
         --label owner=ci-test-runner
-        --add-host=host.docker.internal:${{ vars.DOCKER_BRIDGE_IP }}
+        --add-host=host.docker.internal:192.168.1.1
         --device /dev/davinci0
         --device /dev/davinci_manager
         --device /dev/devmm_svm
