@@ -172,12 +172,3 @@ jobs:
           name: test-results-xml
           path: test-results.xml
 
-      # 📊 REPORT: The Nice UI Table
-      - name: 📊 Publish Test Report
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: NPU Test Results
-          path: test-results.xml
-          reporter: java-junit
-          fail-on-error: false
