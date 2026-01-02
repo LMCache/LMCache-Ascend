@@ -150,7 +150,7 @@ def normalize_question(question):
 def parse_generation(s):
     if not s or s.strip() == "":
         return ""
-    
+
     s = s.lstrip("\n").split("\n")[0].strip()
     if s.startswith("Yes") or s.startswith("yes"):
         s = "Yes"

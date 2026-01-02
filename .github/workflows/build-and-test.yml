@@ -1,0 +1,170 @@
+name: 'CI: Lint & Ascend 910B Test'
+
+on:
+  push:
+    branches: ['main']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: ['main', '*-dev']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint & Style Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pre-commit
+      - run: pre-commit run --all-files
+
+  # ==========================================
+  # JOB 2: TEST (Container Mode)
+  # ==========================================
+  test-native:
+    name: Test on 910B
+    needs: lint
+    runs-on: [self-hosted, Linux, ARM64, 910b4]
+    timeout-minutes: 30
+
+    container:
+      image: quay.io/ascend/vllm-ascend:v0.10.2rc1-openeuler
+      env:
+        SOC_VERSION: Ascend910B4
+        PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+        LMCACHE_TRACK_USAGE: false
+        NO_CUDA_EXT: 1
+        NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+        LMCACHE_LOG_LEVEL: INFO
+
+      options: >-
+        --label owner=ci-test-runner
+        --add-host=host.docker.internal:192.168.1.1
+        --device /dev/davinci0
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        -v /usr/local/dcmi:/usr/local/dcmi:ro
+        -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro
+        --user root
+        --cap-add=SYS_PTRACE
+
+      
+    steps:
+      - name: 🔧 Fix Proxy Configuration
+        run: |
+          echo "Overwriting Runner Proxy Settings..."
+          echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: 🔧 Fix Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 📦 Install LMCache & Build Project
+        run: |
+          
+          echo ">>> Installing LMCache Core..."
+          # From your Dockerfile: NO_CUDA_EXT=1 is set in 'env' above
+          pip install lmcache==0.3.7
+
+          echo ">>> Building LMCache-Ascend..."
+          # We need to export these variables just like your Dockerfile does
+          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/aarch64-openEuler-linux/:$CPLUS_INCLUDE_PATH
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          
+          # Install in editable mode (-e) for testing
+          python3 -m pip install -v --no-build-isolation -e . 
+      
+      - name: Install Pytest Dependencies
+        run: |
+          pip install pytest pytest-benchmark pytest-cov
+          
+      - name: 🧪 Run Unit Tests
+        id: test-step
+        shell: bash
+        run: |
+          # 1. Setup Env
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          
+          # 2. Disable Exit on Error (Manual Handling)
+          set +e 
+          
+          echo ">>> Starting Pytest..."
+          echo "    - Console: Errors Only (Clean)"
+          echo "    - File:    Debug Logs (Verbose)"
+          
+          # 3. RUN PYTEST
+          # -W ignore:... : Suppress console spam from asyncio cleanup
+          # --log-cli-level=CRITICAL : Keep Console Quiet (Only real errors)
+          # --log-file=debug_logs.txt : Save Logs to File
+          python3 -u -m pytest -v tests/v1 \
+            -W "ignore:coroutine 'AsyncPQThreadPoolExecutor._worker' was never awaited" \
+            -W "ignore:coroutine 'AsyncPQExecutor._worker' was never awaited" \
+            -W "ignore:Task was destroyed but it is pending!" \
+            -W "ignore:Exception ignored in" \
+            --tb=short \
+            --junit-xml=test-results.xml \
+            --log-cli-level=CRITICAL \
+            --log-file=debug_logs.txt \
+            --log-file-level=INFO
+          
+          # Capture Exit Code
+          EXIT_CODE=$?
+          
+          # 4. Re-enable Exit on Error
+          set -e
+          
+          echo ""
+          echo "============= TEST SUMMARY ============="
+          echo "Final Exit Code: $EXIT_CODE"
+          
+          # 5. Fail if needed
+          if [ $EXIT_CODE -ne 0 ]; then
+             echo "❌ Tests Failed."
+             exit $EXIT_CODE
+          else
+             echo "✅ Tests Passed."
+             exit 0
+          fi
+
+      # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
+      - name: 📤 Upload Debug Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-910b
+          path: debug_logs.txt
+      
+      # 📤 ARTIFACT 2: The XML Summary (For Tools)
+      - name: 📤 Upload Test Results XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
+          path: test-results.xml
+ 

@@ -4,19 +4,18 @@
 from typing import Callable, List
 
 # Third Party
+from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
+import numpy as np
 import pytest
 import torch
-import numpy as np
 
-from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
-from lmcache_ascend.v1.blend.positional_encoding import (
-    BasicReverseRope,
-    FusedRope
-)
+# First Party
+from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
 
 # ==============================================================================
 # 1. Dummy Rope Implementation (for comparison)
 # ==============================================================================
+
 
 class DummyFusedRope:
     """
@@ -45,6 +44,7 @@ class DummyFusedRope:
 # 2. ACCURACY VALIDATION FUNCTIONS
 # ==============================================================================
 
+
 def validate_correctness(
     rope: Callable,
     reverse_rope: BasicReverseRope,
@@ -68,37 +68,49 @@ def validate_correctness(
         fused_k_errors = []
         dummy_fused_k_errors = []
 
-        print(f"\n{'='*20} num_tokens = {num_tokens} {'='*20}")
+        print(f"\n{'=' * 20} num_tokens = {num_tokens} {'=' * 20}")
 
         for _ in range(repeats):
-            initial_query = torch.rand((num_tokens, hidden_dim), device="npu", dtype=rope.dtype)
-            initial_key = torch.rand((num_tokens, hidden_dim), device="npu", dtype=rope.dtype)
+            initial_query = torch.rand(
+                (num_tokens, hidden_dim), device="npu", dtype=rope.dtype
+            )
+            initial_key = torch.rand(
+                (num_tokens, hidden_dim), device="npu", dtype=rope.dtype
+            )
             old_positions = torch.arange(num_tokens, device="npu")
 
             query_test = initial_query.clone()
             key_test = initial_key.clone()
-            query_test, key_test = rope(old_positions, query_test, key_test) # Forward
-            query_test, key_test = reverse_rope(old_positions, query_test, key_test) # Reverse
+            query_test, key_test = rope(old_positions, query_test, key_test)  # Forward
+            query_test, key_test = reverse_rope(
+                old_positions, query_test, key_test
+            )  # Reverse
 
             current_q_err = (initial_query - query_test).abs().max().item()
             current_k_err = (initial_key - key_test).abs().max().item()
-            
+
             unrotated_query = initial_query.clone()
             unrotated_key = initial_key.clone()
-            
+
             new_positions = torch.arange(100, 100 + num_tokens, device="npu")
-            _, target_k_new_pos = rope(new_positions, unrotated_query, unrotated_key) 
-            
+            _, target_k_new_pos = rope(new_positions, unrotated_query, unrotated_key)
+
             k_at_old_pos = unrotated_key.clone()
             _, k_at_old_pos = rope(old_positions, unrotated_query, k_at_old_pos)
-            
+
             # FusedRope
-            k_fused_result = fused_rope(old_positions, new_positions, k_at_old_pos.clone())
+            k_fused_result = fused_rope(
+                old_positions, new_positions, k_at_old_pos.clone()
+            )
             current_fused_err = (target_k_new_pos - k_fused_result).abs().max().item()
-            
+
             # DummyFusedRope
-            k_dummy_fused_result = dummy_fused_rope(old_positions, new_positions, k_at_old_pos.clone())
-            current_dummy_err = (target_k_new_pos - k_dummy_fused_result).abs().max().item()
+            k_dummy_fused_result = dummy_fused_rope(
+                old_positions, new_positions, k_at_old_pos.clone()
+            )
+            current_dummy_err = (
+                (target_k_new_pos - k_dummy_fused_result).abs().max().item()
+            )
 
             q_errors.append(current_q_err)
             k_errors.append(current_k_err)
@@ -117,13 +129,23 @@ def validate_correctness(
         print(f"Reverse RoPE Q Error - Mean: {avg_q:.6f}, Std Dev: {std_q:.6f}")
         print(f"Reverse RoPE K Error - Mean: {avg_k:.6f}, Std Dev: {std_k:.6f}")
         print(f"Fused Rope K Error - Mean: {avg_fused:.6f}, Std Dev: {std_fused:.6f}")
-        print(f"Dummy Fused Rope K Error - Mean: {avg_dummy:.6f}, Std Dev: {std_dummy:.6f}")
+        print(
+            f"Dummy Fused Rope K Error - Mean: {avg_dummy:.6f}, "
+            f"Std Dev: {std_dummy:.6f}"
+        )
 
-        size_passed = (avg_q < threshold and avg_k < threshold
-                       and avg_fused < threshold and avg_dummy < threshold)
+        size_passed = (
+            avg_q < threshold
+            and avg_k < threshold
+            and avg_fused < threshold
+            and avg_dummy < threshold
+        )
 
         if not size_passed:
-            print(f"Scale {num_tokens} **FAILED** the accuracy test! (Threshold: {threshold})")
+            print(
+                f"Scale {num_tokens} **FAILED** the accuracy test!"
+                f" (Threshold: {threshold})"
+            )
             all_passed = False
         else:
             print(f"Scale {num_tokens} **PASSED** the accuracy test.")
@@ -135,31 +157,35 @@ def validate_correctness(
 # 3. PERFORMANCE BENCHMARK FUNCTIONS
 # ==============================================================================
 
+
 def benchmark_rope(
-    fused_rope: FusedRope, 
-    dummy_rope: DummyFusedRope, 
-    num_tokens: int, 
-    hidden_dim: int, 
-    dtype: torch.dtype, 
-    repeats: int = 100
+    fused_rope: FusedRope,
+    dummy_rope: DummyFusedRope,
+    num_tokens: int,
+    hidden_dim: int,
+    dtype: torch.dtype,
+    repeats: int = 100,
 ):
     """
     Benchmark performance of fused RoPE vs dummy fused RoPE.
     """
 
     old_positions = torch.arange(num_tokens, device="npu")
-    new_positions = torch.arange(100, 100 + num_tokens, device="npu")  
-    k = torch.randn((num_tokens, hidden_dim), device="npu", dtype=dtype)  
-    
+    new_positions = torch.arange(100, 100 + num_tokens, device="npu")
+    k = torch.randn((num_tokens, hidden_dim), device="npu", dtype=dtype)
+
     # warmup
     for _ in range(10):
         fused_rope(old_positions, new_positions, k.clone())
         dummy_rope(old_positions, new_positions, k.clone())
-    torch.npu.synchronize()  
+    torch.npu.synchronize()
 
     def measure(op):
         times = []
-        start_ev, end_ev = torch.npu.Event(enable_timing=True), torch.npu.Event(enable_timing=True)
+        start_ev, end_ev = (
+            torch.npu.Event(enable_timing=True),
+            torch.npu.Event(enable_timing=True),
+        )
         for _ in range(repeats):
             torch.npu.synchronize()
             start_ev.record()
@@ -168,7 +194,7 @@ def benchmark_rope(
             torch.npu.synchronize()
             times.append(start_ev.elapsed_time(end_ev))
         return sum(times) / repeats
-    
+
     fused_avg_ms = measure(lambda: fused_rope(old_positions, new_positions, k.clone()))
     dummy_avg_ms = measure(lambda: dummy_rope(old_positions, new_positions, k.clone()))
     speedup = dummy_avg_ms / fused_avg_ms if fused_avg_ms > 0 else 0
@@ -177,25 +203,30 @@ def benchmark_rope(
         "num_tokens": num_tokens,
         "fused_avg_ms": fused_avg_ms,
         "dummy_avg_ms": dummy_avg_ms,
-        "speedup": speedup
+        "speedup": speedup,
     }
 
 
 def validate_performance(
-    fused_rope: FusedRope, 
-    dummy_rope: DummyFusedRope, 
-    head_size: int, 
+    fused_rope: FusedRope,
+    dummy_rope: DummyFusedRope,
+    head_size: int,
     dtype: torch.dtype,
     test_sizes: List[int],
-    repeats: int = 10
+    repeats: int = 10,
 ):
-
     hidden_dim = head_size * 8  # hidden_dim = head_size * num_heads
 
-    print("\n" + "="*95)
-    print(f"**2. Performance Test** === Device: npu | DType: {dtype} | Head Dim: {head_size} ")
-    print("="*95)
-    print(f"{'Token Count':<12} | {'FusedRope (Fused Op) Avg Time (ms)':<32} | {'Dummy (Small Op) Avg Time (ms)':<32} | {'Speedup Ratio':<15}")
+    print("\n" + "=" * 95)
+    print(
+        f"**2. Performance Test** === Device: npu | DType: {dtype} |"
+        f" Head Dim: {head_size} "
+    )
+    print("=" * 95)
+    print(
+        f"{'Token Count':<12} | {'FusedRope (Fused Op) Avg Time (ms)':<32} |"
+        f" {'Dummy (Small Op) Avg Time (ms)':<32} | {'Speedup Ratio':<15}"
+    )
     print("-" * 95)
 
     for num_tokens in test_sizes:
@@ -205,7 +236,7 @@ def validate_performance(
             num_tokens=num_tokens,
             hidden_dim=hidden_dim,
             dtype=dtype,
-            repeats=repeats
+            repeats=repeats,
         )
         print(
             f"{result['num_tokens']:<12} | "
@@ -219,10 +250,12 @@ def validate_performance(
 # 4. Pytest Fixtures and Test Cases
 # ==============================================================================
 
+
 @pytest.fixture
 def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
     """
-    Fixture to initialize the base RoPE, ReverseRoPE, FusedRope, and DummyFusedRope modules.
+    Fixture to initialize the base RoPE, ReverseRoPE, FusedRope,
+    and DummyFusedRope modules.
     """
 
     base_rope = vllm_get_rope(
@@ -237,7 +270,7 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
     )
 
     base_rope.cos_sin_cache = base_rope.cos_sin_cache.to("npu")
-    
+
     reverse_rope = BasicReverseRope(base_rope, head_size, is_neox_style)
     fused_rope = FusedRope(base_rope, is_neox_style)
     dummy_rope = DummyFusedRope(base_rope, reverse_rope, is_neox_style)
@@ -252,7 +285,6 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("test_sizes", [[512, 1024, 4096]])
 def test_rope_correctness(rope_modules, head_size, test_sizes):
-
     rope, reverse_rope, fused_rope, dummy_rope = rope_modules
 
     passed = validate_correctness(
@@ -269,9 +301,6 @@ def test_rope_correctness(rope_modules, head_size, test_sizes):
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("test_sizes", [[512, 1024, 4096]])
 def test_rope_performance(rope_modules, head_size, dtype, test_sizes):
-
     rope, reverse_rope, fused_rope, dummy_rope = rope_modules
 
-    validate_performance(
-        fused_rope, dummy_rope, head_size, dtype, test_sizes
-    )
+    validate_performance(fused_rope, dummy_rope, head_size, dtype, test_sizes)

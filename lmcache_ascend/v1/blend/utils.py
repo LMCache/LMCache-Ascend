@@ -1,22 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Dict
+from typing import TYPE_CHECKING
 
 # Third Party
-from torch import nn
-
-# First Party
 from lmcache.logging import init_logger
-from lmcache_ascend.v1.blend.blender import LMCBlender
 from lmcache.v1.compute.models.utils import VLLMModelTracker
 
+# First Party
+from lmcache_ascend.v1.blend.blender import LMCBlender
+
 if TYPE_CHECKING:
-    # First Party
+    # Third Party
     from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.config import LMCacheEngineConfig
     from lmcache.v1.gpu_connector import GPUConnectorInterface
 
 logger = init_logger(__name__)
+
 
 def get_or_create_blender(
     cls,

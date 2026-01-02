@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Copyright 2024-2025 LMCache Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,27 +14,21 @@
 # limitations under the License.
 
 # Standard
-from typing import List, Optional, Union, Tuple
-from enum import Enum, auto
-import numpy as np
+from typing import List
+
 # Third Party
+from lmcache.logging import init_logger
+from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+import numpy as np
 import torch
 
 # First Party
-from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-from lmcache.v1.gpu_connector import (
-    VLLMPagedMemGPUConnectorV2,
-)
+from lmcache_ascend.v1.npu_connector import KVCacheFormat, is_310p
 import lmcache_ascend.c_ops as lmc_ops
-from lmcache.logging import init_logger
-
-from lmcache_ascend.v1.npu_connector import KVCacheFormat
-from lmcache_ascend.v1.npu_connector import is_310p
 
 logger = init_logger(__name__)
 
-import mindspore
 
 class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def __init__(
@@ -55,15 +50,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.is_310p = is_310p()
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-
         self.kv_format = KVCacheFormat.detect(kv_caches)
-        
+
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError(
                 "Undefined KV cache format detected. "
                 "Unable to determine the format of input kv_caches."
             )
-            
+
         if self.kv_format.is_separate_format():
             self.kvcaches_device = kv_caches[0][0].device
         else:
@@ -88,11 +82,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         else:
             self.kv_size = 1
             pointers_list = [t.data_ptr() for t in kv_caches]
-            
+
             self.kv_cache_pointers = torch.empty(
                 self.num_layers, dtype=torch.int64, device="cpu"
             )
-        
+
         self.kv_cache_pointers.numpy()[:] = pointers_list
 
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
@@ -101,14 +95,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        first_tensor = kv_caches[0][0] if self.kv_format.is_separate_format() else kv_caches[0]
+        first_tensor = (
+            kv_caches[0][0] if self.kv_format.is_separate_format() else kv_caches[0]
+        )
 
         if self.use_mla:
             # kv_caches[0].shape: [num_pages, page_size, head_size]
             # kv_caches[0].shape: [1, num_pages, page_size, head_size] (vllm-Ascend)
             self.page_buffer_size = kv_caches[0].shape[-3] * kv_caches[0].shape[-2]
         else:
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size] vllm 0.9.2 ...
+            # vLLM v0.9.2 ...
+            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
             # 310P: [2, num_blocks, num_kv_heads * head_size // 16, block_size, 16]
             # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
@@ -150,13 +147,13 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
                 raise ValueError(
                     "The memory object should be in KV_MLA_FMT format in"
-                    " order to be processed by VLLMPagedMemNPUConnector"
+                    " order to be processed by VLLMPagedMemNPUConnector."
                 )
         else:
             if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
                 raise ValueError(
-                    "The memory object should be in KV_2LTD format in"
-                    " order to be processed by VLLMPagedMemNPUConnector"
+                    "The memory object should be in KV_2LTD format "
+                    "in order to be processed by VLLMPagedMemNPUConnector."
                 )
 
         if "slot_mapping" not in kwargs:
@@ -183,7 +180,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.page_buffer_size,
             False,
             self.use_mla,
-            self.kv_format.value # 1:MERGED_KV / 2:SEPARATE_KV
+            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
         )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -221,7 +218,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("KV cache format is not initialized!")
 
         with torch.cuda.stream(self.store_stream):
-            use_tmp_buf = self.is_310p or (self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2])
+            use_tmp_buf = self.is_310p or (
+                self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2]
+            )
             if use_tmp_buf:
                 if self.is_310p:
                     self.gpu_buffer.zero_()
@@ -238,16 +237,16 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.page_buffer_size,
                 True,
                 self.use_mla,
-                self.kv_format.value
+                self.kv_format.value,
             )
-            
+
             if use_tmp_buf:
                 np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
 
         # if not memory_obj.tensor.is_cuda:
-            # Force a synchronize if the target buffer is NOT CUDA device
-            # NOTE: for better performance, we may not want to sync for every
-            # memory object
+        # Force a synchronize if the target buffer is NOT CUDA device
+        # NOTE: for better performance, we may not want to sync for every
+        # memory object
         self.store_stream.synchronize()
 
         if self.use_mla:

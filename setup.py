@@ -1,23 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
+import configparser
+import glob
+import logging
 import os
+import platform
+import shutil
+import subprocess
 import sys
+import sysconfig
 
 # Third Party
-from setuptools import find_packages, setup, Extension
+from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
-
-import logging
-import sysconfig
-import subprocess
-import platform
-import shutil
-import configparser 
-import glob
 
 ROOT_DIR = Path(__file__).parent
 
@@ -26,9 +25,11 @@ logger = logging.getLogger(__name__)
 
 USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
+
 def _get_ascend_home_path():
     # NOTE: standard Ascend CANN toolkit path
     return os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
+
 
 def _get_ascend_env_path():
     # NOTE: standard Ascend Environment variable setup path
@@ -42,6 +43,7 @@ def _get_ascend_env_path():
         )
     return env_script_path
 
+
 def _get_npu_soc():
     """
     Retrieves the NPU SoC version by parsing the output of the npu-smi command.
@@ -52,13 +54,17 @@ def _get_npu_soc():
 
     Returns:
         str: The determined SoC version string.
-    
+
     Raises:
         RuntimeError: If the npu-smi command fails or the output is malformed.
     """
     _soc_version = os.getenv("SOC_VERSION")
     if _soc_version:
-        return "Ascend" + _soc_version[6:] if _soc_version.lower().startswith("ascend") else _soc_version
+        return (
+            "Ascend" + _soc_version[6:]
+            if _soc_version.lower().startswith("ascend")
+            else _soc_version
+        )
 
     try:
         npu_smi_cmd = ["npu-smi", "info", "-t", "board", "-i", "0", "-c", "0"]
@@ -66,8 +72,8 @@ def _get_npu_soc():
 
         npu_info = {}
         for line in full_output.strip().splitlines():
-            if ':' in line:
-                key, value = line.split(':', 1)
+            if ":" in line:
+                key, value = line.split(":", 1)
                 npu_info[key.strip()] = value.strip()
 
         chip_name = npu_info.get("Chip Name", None)
@@ -89,14 +95,21 @@ def _get_npu_soc():
         return _soc_version
 
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        raise RuntimeError(f"Failed to execute npu-smi command and retrieve SoC version: {e}")
+        raise RuntimeError(
+            f"Failed to execute npu-smi command and retrieve SoC version: {e}"
+        ) from e
+
 
 def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
-    platform_config_path = os.path.join(ascend_path, f"{host_arch}-linux/data/platform_config")
+    platform_config_path = os.path.join(
+        ascend_path, f"{host_arch}-linux/data/platform_config"
+    )
     ini_file = os.path.join(platform_config_path, f"{soc_version}.ini")
 
     if not os.path.exists(ini_file):
-        raise ValueError(f"The file '{ini_file}' is not found, please check your SOC_VERSION")
+        raise ValueError(
+            f"The file '{ini_file}' is not found, please check your SOC_VERSION"
+        )
 
     # read the file and extract
     logger.info(f"Extracting AIC Version from: {ini_file}")
@@ -109,8 +122,8 @@ def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
     version_number = aic_version.split("-")[-1]
     return version_number
 
-class custom_build_info(build_py):
 
+class custom_build_info(build_py):
     def run(self):
         soc_version = _get_npu_soc()
 
@@ -121,16 +134,16 @@ class custom_build_info(build_py):
 
         package_dir = os.path.join(ROOT_DIR, "lmcache_ascend", "_build_info.py")
         with open(package_dir, "w+") as f:
-            f.write('# Auto-generated file\n')
+            f.write("# Auto-generated file\n")
             f.write(f"__soc_version__ = '{soc_version}'\n")
             if USE_MINDSPORE:
                 framework_name = "mindspore"
             else:
                 framework_name = "pytorch"
             f.write(f"__framework_name__ = '{framework_name}'\n")
-        logging.info(
-            f"Generated _build_info.py with SOC version: {soc_version}")
+        logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
         super().run()
+
 
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwargs) -> None:
@@ -142,6 +155,7 @@ class custom_install(install):
     def run(self):
         self.run_command("build_ext")
         install.run(self)
+
 
 class CustomAscendCmakeBuildExt(build_ext):
     def build_extension(self, ext):
@@ -172,7 +186,7 @@ class CustomAscendCmakeBuildExt(build_ext):
             )
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
-            raise RuntimeError(f"CMake configuration failed: {e}")
+            raise RuntimeError(f"CMake configuration failed: {e}") from e
 
         # python include
         python_include_path = sysconfig.get_path("include", scheme="posix_prefix")
@@ -198,12 +212,16 @@ class CustomAscendCmakeBuildExt(build_ext):
         ]
 
         if USE_MINDSPORE:
+            # Third Party
             import mindspore
+
             ms_path = os.path.dirname(os.path.abspath(mindspore.__file__))
             cmake_cmd += [f"  -DMINDSPORE_PATH={ms_path}"]
         else:
+            # Third Party
             import torch
             import torch_npu
+
             torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
             torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
             torch_path = os.path.dirname(os.path.abspath(torch.__file__))
@@ -227,17 +245,14 @@ class CustomAscendCmakeBuildExt(build_ext):
                 cmake_cmd, cwd=ROOT_DIR, text=True, shell=True, check=True
             )
         except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Failed to build {so_name}: {e}")
+            raise RuntimeError(f"Failed to build {so_name}: {e}") from e
         build_lib_dir = self.get_ext_fullpath(ext.name)
         os.makedirs(os.path.dirname(build_lib_dir), exist_ok=True)
 
         src_dir = os.path.join(ROOT_DIR, "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
-        expected_patterns = [
-            "c_ops*.so", 
-            "libcache_kernels.so"
-        ]
+        expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
 
         # Search for files matching our patterns
         so_files = []
@@ -246,9 +261,9 @@ class CustomAscendCmakeBuildExt(build_ext):
             search_paths = [
                 install_path,
                 os.path.join(install_path, "lib"),
-                os.path.join(install_path, "lib64")
+                os.path.join(install_path, "lib64"),
             ]
-            
+
             for search_path in search_paths:
                 if os.path.exists(search_path):
                     matches = glob.glob(os.path.join(search_path, pattern))
@@ -262,40 +277,44 @@ class CustomAscendCmakeBuildExt(build_ext):
         so_files = list(dict.fromkeys(so_files))
 
         if not so_files:
-            raise RuntimeError(f"No .so files found matching patterns {expected_patterns}")
+            raise RuntimeError(
+                f"No .so files found matching patterns {expected_patterns}"
+            )
 
         logger.info(f"Found {len(so_files)} .so files:")
         for so_file in so_files:
             logger.info(f"  - {so_file}")
 
-        # Copy each file with improved path validation and duplicate handling compared to previous implementation
+        # Copy each file with improved path validation and duplicate handling
+        #  compared to previous implementation
         for src_path in so_files:
             filename = os.path.basename(src_path)
             dst_path = os.path.join(os.path.dirname(build_lib_dir), filename)
-            
+
             if os.path.abspath(src_path) != os.path.abspath(dst_path):
                 if os.path.exists(dst_path):
                     os.remove(dst_path)
                 shutil.copy2(src_path, dst_path)
                 logger.info(f"Copied {filename} to {dst_path}")
-            
+
             if is_develop_mode:
                 src_dir_file = os.path.join(src_dir, filename)
                 if os.path.abspath(src_path) != os.path.abspath(src_dir_file):
                     if os.path.exists(src_dir_file):
                         os.remove(src_dir_file)
                     shutil.copy2(src_path, src_dir_file)
-                    logger.info(f"Copied {filename} to source directory: {src_dir_file}")
+                    logger.info(
+                        f"Copied {filename} to source directory: {src_dir_file}"
+                    )
 
         logger.info("All files copied successfully")
-
 
 
 def ascend_extension():
     print("Building Ascend extensions")
     return [CMakeExtension(name="lmcache_ascend.c_ops")], {
         "build_py": custom_build_info,
-        "build_ext": CustomAscendCmakeBuildExt
+        "build_ext": CustomAscendCmakeBuildExt,
     }
 
 
@@ -307,5 +326,5 @@ if __name__ == "__main__":
         ),  # Ensure csrc is excluded if it only contains sources
         ext_modules=ext_modules,
         cmdclass=cmdclass,
-        include_package_data=True
+        include_package_data=True,
     )

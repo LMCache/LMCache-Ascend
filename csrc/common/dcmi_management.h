@@ -15,32 +15,33 @@ struct dcmi_pcie_info_all {
   unsigned char reserved[32];
 };
 
-
 /*
-*  At build time, /usr/local/Ascend/driver is not present, 
-*  however, at deployment time, Ascend software stack always requires driver to be mounted
-*  hence, we opt to use the dlsym approach with the hopes that dcmi is always present.
-*  And, we keep a handle of the it so with a singleton class.
-*/
+ *  At build time, /usr/local/Ascend/driver is not present,
+ *  however, at deployment time, Ascend software stack always requires driver to
+ * be mounted hence, we opt to use the dlsym approach with the hopes that dcmi
+ * is always present. And, we keep a handle of the it so with a singleton class.
+ */
 class DCMIManager {
 private:
-  void* libHandle_;
+  void *libHandle_;
   DCMIManager();
-  
+
   // Delete Copy constructor and assignment operator
-  DCMIManager(const DCMIManager&) = delete;
-  DCMIManager& operator=(const DCMIManager&) = delete;
-  DCMIManager(DCMIManager&&) = delete;
-  DCMIManager& operator=(DCMIManager&&) = delete;
+  DCMIManager(const DCMIManager &) = delete;
+  DCMIManager &operator=(const DCMIManager &) = delete;
+  DCMIManager(DCMIManager &&) = delete;
+  DCMIManager &operator=(DCMIManager &&) = delete;
+
 public:
-  static DCMIManager& GetInstance(){
+  static DCMIManager &GetInstance() {
     static DCMIManager instance;
     return instance;
   };
   ~DCMIManager();
 
-  std::string getDevicePcieInfoV2(int cardId, int deviceId, dcmi_pcie_info_all* pcieInfo);
+  std::string getDevicePcieInfoV2(int cardId, int deviceId,
+                                  dcmi_pcie_info_all *pcieInfo);
 };
-}
+} // namespace dcmi_ascend
 
 std::string get_npu_pci_bus_id(int device);

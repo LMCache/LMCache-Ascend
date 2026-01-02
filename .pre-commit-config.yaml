@@ -1,0 +1,43 @@
+repos:
+- repo: local
+  hooks:
+  - id: check-spdx-header
+    name: Check SPDX headers
+    entry: python tools/check_spdx_header.py
+    language: python
+    types: [python]
+- repo: https://github.com/PyCQA/isort
+  rev: 6.0.1
+  hooks:
+  - id: isort
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.7
+  hooks:
+  - id: ruff
+    args: [--output-format, github, --fix]
+  - id: ruff-format
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+  - id: codespell
+    additional_dependencies: ['tomli']
+    args: ['--toml', 'pyproject.toml', '--ignore-words-list', 'cann']
+- repo: https://github.com/pre-commit/mirrors-clang-format
+  rev: v20.1.3
+  hooks:
+  - id: clang-format
+    types_or: [c++]
+    args: [--style=file, --verbose]
+- repo: https://github.com/pre-commit/mirrors-mypy
+  rev: 'v1.17.1'
+  hooks:
+  - id: mypy
+    language_version: python3
+    args: [--config-file=pyproject.toml]
+    #args: [--ignore-missing-imports]
+    additional_dependencies:
+      - tokenize-rt==6.1.0 # For better dynamic analysis performance
+      - msgspec[mypy]
+      - types-requests
+      - types-PyYAML
+      - types-aiofiles

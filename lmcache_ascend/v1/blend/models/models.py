@@ -1,7 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Third Party
 from torch import nn
+
+# First Party
 from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnBackend
-from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnMetadata
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
+
 
 class LMCModel(nn.Module):
     def __init__(

@@ -1,44 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import Union
 
 # Third Party
-from vllm.config import (
-    VllmConfig
+from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    _calculate_draft_layers,
+    need_gpu_interm_buffer,
 )
-from vllm.distributed.parallel_state import (
-    get_tp_group,
-)
+from lmcache.logging import init_logger
+from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.config import LMCacheEngineConfig
+from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.utils import get_kv_cache_torch_dtype
 import torch
 
 # First Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.vllm.utils import (
-    ENGINE_NAME,
-    mla_enabled
-)
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    need_gpu_interm_buffer,
-    _calculate_draft_layers
-)
-
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
 from lmcache_ascend.v1.npu_connector import (
     VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
     VLLMPagedMemLayerwiseNPUConnector,
+    VLLMPagedMemNPUConnectorV2,
 )
-from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
 
 
 # We need to patch this function due to connector modification
 def init_lmcache_engine(
-    lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig"
+    lmcache_config: LMCacheEngineConfig, vllm_config: "VllmConfig"
 ) -> LMCacheEngine:
     """Initialize the LMCache engine by the given model config and parallel
     config. This function will check the environment variable
@@ -53,7 +44,7 @@ def init_lmcache_engine(
     :return: The initialized LMCache engine
     :rtype: LMCacheEngine
     """
-    
+
     curr_engine = LMCacheEngineBuilder.get(ENGINE_NAME)
     if curr_engine:
         return curr_engine

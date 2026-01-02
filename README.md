@@ -58,7 +58,7 @@ Please ensure your environment matches the versions below.
 
 ### Clone LMCache-Ascend Repo
 
-Our repo contains a kvcache ops submodule for ease of maintainence, therefore we recommend cloning the repo with submodules.
+Our repo contains a kvcache ops submodule for ease of maintenance, therefore we recommend cloning the repo with submodules.
 
 ```bash
 cd /workspace
@@ -154,7 +154,7 @@ ktc = KVTransferConfig(
 
 ### Clone LMCache-Ascend Repo
 
-Our repo contains a kvcache ops submodule for ease of maintainence, therefore we recommend cloning the repo with submodules.
+Our repo contains a kvcache ops submodule for ease of maintenance, therefore we recommend cloning the repo with submodules.
 
 ```bash
 cd /workspace

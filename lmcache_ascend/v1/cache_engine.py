@@ -1,6 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Third Party
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
 
 # Fix from https://github.com/LMCache/LMCache/pull/1852
 # TODO (gingfung): remove when in v0.3.9

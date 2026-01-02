@@ -3,10 +3,8 @@
 from typing import Dict
 
 # Third Party
-from torch import nn
-
-# First Party
 from lmcache.logging import init_logger
+from torch import nn
 
 logger = init_logger(__name__)
 
@@ -22,7 +20,9 @@ def infer_model_from_vllm(vllm_model, blender):
 
         return LMCLlamaModel(vllm_model, blender)
     elif model_name == "Qwen3ForCausalLM":
+        # First Party
         from lmcache_ascend.v1.blend.models.qwen3 import LMCQwen3Model
+
         return LMCQwen3Model(vllm_model, blender)
     else:
         raise NotImplementedError(

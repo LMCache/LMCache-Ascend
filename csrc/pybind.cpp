@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-#include <pybind11/pybind11.h>
-#include "mem_kernels.h"
-#include "managed_mem.h"
 #include "cachegen_kernels.h"
-#include "pos_kernels.h"
-#include <torch/torch.h>
-#include <iostream>
 #include "dcmi_management.h"
+#include "managed_mem.h"
 #include "mem_alloc.h"
+#include "mem_kernels.h"
+#include "pos_kernels.h"
+#include <iostream>
+#include <pybind11/pybind11.h>
+#include <torch/torch.h>
 
 namespace py = pybind11;
 
