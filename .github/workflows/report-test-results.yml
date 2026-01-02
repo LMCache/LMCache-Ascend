@@ -10,6 +10,7 @@ permissions:
   checks: write
   pull-requests: write
   actions: read
+  contents: read
 
 jobs:
   publish:
@@ -17,19 +18,32 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
 
     steps:
-      # 1. Download the artifact from the UNTRUSTED run
+      # 1. Checkout Code (REQUIRED for dorny/test-reporter to link lines of code)
+      # We explicitly checkout the specific commit from the workflow run
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      # 2. Download Artifacts (Robust Pattern Mode)
+      # Downloads any artifact starting with "test-results-xml-" 
+      # and merges them into the current directory.
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          name: test-results-xml   # Must match the name in your first file
+          pattern: test-results-xml-*
+          merge-multiple: true
 
-      # 2. Publish the report using TRUSTED permissions
+      # 3. Publish the Report
+      # It scans for ALL .xml files downloaded in the previous step
       - name: 📊 Publish Test Report
         uses: dorny/test-reporter@v1
         with:
           name: NPU Test Results
-          path: test-results.xml
+          path: "**/*.xml"
           reporter: java-junit
           fail-on-error: false
