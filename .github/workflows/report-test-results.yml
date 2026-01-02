@@ -1,0 +1,35 @@
+name: Publish Test Results
+
+on:
+  workflow_run:
+    workflows: ["CI: Lint & Ascend 910B Test"]  # Must match the 'name:' in your first file
+    types:
+      - completed
+
+permissions:
+  checks: write
+  pull-requests: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+
+    steps:
+      # 1. Download the artifact from the UNTRUSTED run
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          name: test-results-xml   # Must match the name in your first file
+
+      # 2. Publish the report using TRUSTED permissions
+      - name: 📊 Publish Test Report
+        uses: dorny/test-reporter@v1
+        with:
+          name: NPU Test Results
+          path: test-results.xml
+          reporter: java-junit
+          fail-on-error: false
