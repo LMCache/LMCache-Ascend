@@ -30,8 +30,8 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 - **OS**: Linux-based.
 - **Software**:
   - **Python**: >= 3.10, <= 3.11
-  - **CANN Toolkit**: >= 8.2rc1
-  - **Ascend Driver**: >= 24.1
+  - **CANN Toolkit**: >= 8.2.RC1
+  - **Ascend Driver**: >= 24.1.0
   - **PyTorch**: == 2.7.1 (For vLLM 0.10.2+)
   - **vLLM**: v0.10.2 & **vLLM-Ascend**: v0.10.2rc1
 
@@ -242,7 +242,7 @@ ktc = KVTransferConfig(
 
 1. Why do I have HostRegisterError ? 
   - If you encounter the Host Register Error within a container environment, please make sure you add the IPC_LOCK capabilities.
-  - Otherwise, please check your driver version is >= 24.0
+  - Otherwise, please check your driver version is >= 24.1.0
 2. Why do I have build error related to `cstdint` during manual installation using openEuler 24.03 ?
   - The `CPLUS_INCLUDE_PATH` requires user manual setup, please see the [dockerfile](./docker/Dockerfile.a2.openEuler)
 3. Why do I have error for the `example/offload.py` in the main LMCache repo ?
