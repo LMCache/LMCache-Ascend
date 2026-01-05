@@ -36,4 +36,3 @@ If applicable, add screenshots to help explain your problem.
    [paste log here]
  - Add any other context about the problem here.
 
-   
