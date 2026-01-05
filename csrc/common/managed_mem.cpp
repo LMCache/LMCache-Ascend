@@ -119,6 +119,7 @@ HostRegisteredMemoryManager::halRegisterHostPtr(void *hostPtr,
   if (drvRet != 0) {
     std::cerr << "Unable to halHostRegister: " << drvRet
               << " . Please ensure your driver version >= 24.1.0" << std::endl;
+    std::endl;
     return nullptr;
   }
 
