@@ -2,9 +2,10 @@
 #include <cstdint>
 
 /*
-* These following APIs are called directly in LMCache, 
-* therefore we assume the ptrs management are done by the python program for now.
-*/
+ * These following APIs are called directly in LMCache,
+ * therefore we assume the ptrs management are done by the python program for
+ * now.
+ */
 
 uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags);
 

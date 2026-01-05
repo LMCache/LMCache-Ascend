@@ -4,7 +4,6 @@
 # Third Party
 import torch
 
-# First Party
 
 def StorageBackendInterface___init__(
     self,

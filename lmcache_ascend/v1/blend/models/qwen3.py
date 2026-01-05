@@ -1,32 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-from torch import nn
-import torch
+# Standard
 from typing import Optional
 
+# Third Party
+import torch
+
 # First Party
-from lmcache_ascend.v1.blend.attention.attention import LMCAttnBackend
 from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnMetadata
 from lmcache_ascend.v1.blend.models.models import LMCModel
-from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
+
 
 def qk_post_processing(q, k, attn_layer, positions):
-    q_by_head = q.view(*q.shape[:-1], q.shape[-1] // attn_layer.head_dim, attn_layer.head_dim)
+    q_by_head = q.view(
+        *q.shape[:-1], q.shape[-1] // attn_layer.head_dim, attn_layer.head_dim
+    )
     q_by_head = attn_layer.q_norm(q_by_head)
     q = q_by_head.view(q.shape)
-    k_by_head = k.view(*k.shape[:-1], k.shape[-1] // attn_layer.head_dim, attn_layer.head_dim)
+    k_by_head = k.view(
+        *k.shape[:-1], k.shape[-1] // attn_layer.head_dim, attn_layer.head_dim
+    )
     k_by_head = attn_layer.k_norm(k_by_head)
     k = k_by_head.view(k.shape)
     q, k = attn_layer.rotary_emb(positions, q, k)
     return q, k
 
-class LMCQwen3Model(LMCModel):
 
-    # ref: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L353 https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L268
+class LMCQwen3Model(LMCModel):
+    # ref: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L353 # noqa: E501
+    # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L268 # noqa: E501
     def compute_layer(
-        self,
-        input_ids: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
+        self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None
     ):
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
         residual = None
@@ -89,7 +92,15 @@ class LMCQwen3Model(LMCModel):
             head_size = self.vllm_attn_layers[idx].head_size
 
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
-                q, k, v, residual, idx, attn_output, attn_metadata, mask, qk_post_processing=qk_post_processing
+                q,
+                k,
+                v,
+                residual,
+                idx,
+                attn_output,
+                attn_metadata,
+                mask,
+                qk_post_processing=qk_post_processing,
             )
             if q.numel() == 0:
                 no_more_queries = True
@@ -101,7 +112,15 @@ class LMCQwen3Model(LMCModel):
             v = v.view(-1, num_kv_heads, head_size)
             attn_output = attn_output.view(-1, num_heads, head_size)
 
-            attn_output = self.lmc_attn_layers[idx].forward_contiguous(q, k, v, attn_output, attn_metadata, blend_metadata=self.blender.metadata, layer_id=idx)
+            attn_output = self.lmc_attn_layers[idx].forward_contiguous(
+                q,
+                k,
+                v,
+                attn_output,
+                attn_metadata,
+                blend_metadata=self.blender.metadata,
+                layer_id=idx,
+            )
 
             attn_output = attn_output.view(-1, num_heads * head_size)
             k = k.view(-1, num_kv_heads * head_size)

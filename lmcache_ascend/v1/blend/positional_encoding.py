@@ -3,12 +3,10 @@
 from typing import Any, Callable, Dict, Optional
 
 # Third Party
-from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
-import torch
-
-# First Party
 from lmcache.logging import init_logger
+from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
 import lmcache.c_ops as lmc_ops
+import torch
 
 logger = init_logger(__name__)
 
@@ -62,7 +60,6 @@ class FusedRope:
         self.cos_sin_cache = rope.cos_sin_cache
 
     def fused_encode(self, old_positions, new_positions, k):
-        num_tokens = k.shape[0]
         lmc_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
@@ -178,10 +175,10 @@ def get_fused_rope(
     )
 
     rope.cos_sin_cache = rope.cos_sin_cache.to("npu")
-    
+
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
     fused_rope = FusedRope(rope, is_neox_style)
-    
+
     correct = validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size)
     if not correct:
         logger.error(

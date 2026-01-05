@@ -1,21 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-# Third Party
-from torch import nn
-import torch
+# Standard
 from typing import Optional
 
+# Third Party
+import torch
+
 # First Party
-from lmcache_ascend.v1.blend.attention.attention import LMCAttnBackend
 from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnMetadata
 from lmcache_ascend.v1.blend.models.models import LMCModel
-from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
+
 
 class LMCLlamaModel(LMCModel):
     @torch.compile
     def compute_layer(
-        self,
-        input_ids: torch.Tensor,
-        mask: Optional[torch.Tensor] = None
+        self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None
     ):
         hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
         residual = None
@@ -77,7 +75,12 @@ class LMCLlamaModel(LMCModel):
             attn_output = attn_output.view(-1, num_heads, head_size)
 
             attn_output = self.lmc_attn_layers[idx].forward_contiguous(
-                q, k, v, attn_output, attn_metadata, blend_metadata=self.blender.metadata
+                q,
+                k,
+                v,
+                attn_output,
+                attn_metadata,
+                blend_metadata=self.blender.metadata,
             )
 
             attn_output = attn_output.view(-1, num_heads * head_size)
