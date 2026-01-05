@@ -26,9 +26,14 @@ If applicable, add screenshots to help explain your problem.
 **Platform & Software (please complete the following information):**
  - OS: [e.g. openEuler]
  - CANN Version: [e.g. 8.2]
+ - Ascend HDK Version: [e.g. 24.1.0]
  - Hardware: [e.g. 310P]
  - Framework: [e.g. Torch]
  - vLLM Version: [e.g. v0.11.0]
 
 **Additional context**
-Add any other context about the problem here.
+ - logs:
+   [paste log here]
+ - Add any other context about the problem here.
+
+   
