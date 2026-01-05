@@ -91,8 +91,9 @@ HostRegisteredMemoryManager::halRegisterHostPtr(void *hostPtr,
       (void *)hostPtr, static_cast<UINT64>(bufferSize),
       HOST_MEM_MAP_DEV_PCIE_TH, (UINT32)device, (void **)&devPtr);
   if (drvRet != 0) {
-    std::cerr << "Unable to halHostRegister: " << drvRet \
-      << " . Please ensure your driver version >= 24.1.0" << std::endl; std::endl;
+    std::cerr << "Unable to halHostRegister: " << drvRet
+              << " . Please ensure your driver version >= 24.1.0" << std::endl;
+    std::endl;
     return nullptr;
   }
 
