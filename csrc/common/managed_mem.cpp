@@ -59,7 +59,7 @@ RegisteredMemoryRecord* HostRegisteredMemoryManager::registerHostPtr(void* hostP
     aclError err = aclrtHostRegister(hostPtr, static_cast<uint64_t>(bufferSize), 
         ACL_HOST_REGISTER_MAPPED, (void**)&devPtr);
     if (err != ACL_SUCCESS) {
-        std::cerr << "Unable to aclrtHostRegister: " << err << std::endl;
+        std::cerr << "Unable to aclrtHostRegister, errcode: " << err << " .Please ensure your driver version >= 24.1.0" << std::endl;
         return nullptr;
     }
 
