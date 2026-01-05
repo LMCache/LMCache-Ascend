@@ -30,7 +30,7 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 - **OS**: Linux-based.
 - **Software**:
   - **Python**: >= 3.10, <= 3.11
-  - **CANN Toolkit**: >= 8.2rc1
+  - **CANN Toolkit**: >= 8.2.RC1
   - **Ascend Driver**: >= 24.1.0
   - **PyTorch**: == 2.7.1 (For vLLM 0.10.2+)
   - **vLLM**: v0.10.2 & **vLLM-Ascend**: v0.10.2rc1
