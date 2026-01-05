@@ -57,6 +57,13 @@ void multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw);
 
+void fused_multi_layer_kv_transfer(
+    torch::Tensor &key_value,
+    torch::Tensor &staging_cache, // staging buffer
+    const torch::Tensor &key_value_ptrs, const torch::Tensor &slot_mapping,
+    const torch::Device &paged_memory_device, const int page_buffer_size,
+    const bool direction, const bool use_mla, const int kvcache_format_raw);
+
 void multi_layer_kv_transfer_310p(
     torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]
     const torch::Tensor &key_value_ptrs, // [num_layers]
@@ -76,6 +83,13 @@ void single_layer_kv_transfer(torch::Tensor &lmc_key_value_cache,
                               torch::Tensor &slot_mapping, const bool direction,
                               const bool token_major = false,
                               const bool vllm_two_major = false);
+
+void batched_fused_single_layer_kv_transfer(
+    std::vector<torch::Tensor> &lmc_tensors, torch::Tensor &staging_cache,
+    torch::Tensor &vllm_key_value_cache, torch::Tensor &slot_mapping_full,
+    std::vector<int64_t> &chunk_offsets, std::vector<int64_t> &chunk_sizes,
+    const bool direction, const bool token_major = false,
+    const bool vllm_two_major = false);
 
 void load_and_reshape_flash(torch::Tensor &key_value, torch::Tensor &key_cache,
                             torch::Tensor &value_cache,
