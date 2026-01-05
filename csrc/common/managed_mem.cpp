@@ -83,7 +83,7 @@ RegisteredMemoryRecord* HostRegisteredMemoryManager::halRegisterHostPtr(void* ho
     auto drvRet = halHostRegister((void*)hostPtr, static_cast<UINT64>(bufferSize),
         HOST_MEM_MAP_DEV_PCIE_TH, (UINT32)device, (void**)&devPtr);
     if (drvRet != 0) {
-        std::cerr << "Unable to halHostRegister, errcode: " << drvRet << " .Please ensure your driver version >= 24.1.0" << std::endl;
+        std::cerr << "Unable to halHostRegister, errcode: " << drvRet << " . Please ensure your driver version >= 24.1.0" << std::endl;
         return nullptr;
     }
 
