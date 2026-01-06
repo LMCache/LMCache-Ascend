@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["CI: Lint & Ascend 910B Test"]  # Must match the 'name:' in your first file
+    workflows: ["Code Quality", "Ascend 910B Test"]
     types:
       - completed
 
@@ -15,11 +15,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion != 'skipped' }}
+    if: >
+      ${{ github.event.workflow_run.conclusion != 'skipped' && 
+      (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch') }}
 
     steps:
-      # 1. Checkout Code (REQUIRED for dorny/test-reporter to link lines of code)
-      # We explicitly checkout the specific commit from the workflow run
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
@@ -27,9 +27,6 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
 
-      # 2. Download Artifacts (Robust Pattern Mode)
-      # Downloads any artifact starting with "test-results-xml-" 
-      # and merges them into the current directory.
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -38,8 +35,6 @@ jobs:
           pattern: test-results-xml-*
           merge-multiple: true
 
-      # 3. Publish the Report
-      # It scans for ALL .xml files downloaded in the previous step
       - name: 📊 Publish Test Report
         uses: dorny/test-reporter@v1
         with:

@@ -1,20 +1,8 @@
-name: 'CI: Lint & Ascend 910B Test'
+name: 'Ascend 910B Test'
 
 on:
-  push:
-    branches: ['main']
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-  pull_request:
-    branches: ['main', '*-dev']
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
+  workflow_call:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -24,23 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint & Style Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install pre-commit
-      - run: pre-commit run --all-files
-
-  # ==========================================
-  # JOB 2: TEST (Container Mode)
-  # ==========================================
   test-native:
     name: Test on 910B
-    needs: lint
     runs-on: [self-hosted, Linux, ARM64, 910b4]
     timeout-minutes: 30
 
@@ -89,11 +62,9 @@ jobs:
         run: |
           
           echo ">>> Installing LMCache Core..."
-          # From your Dockerfile: NO_CUDA_EXT=1 is set in 'env' above
           pip install lmcache==0.3.7
 
           echo ">>> Building LMCache-Ascend..."
-          # We need to export these variables just like your Dockerfile does
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/aarch64-openEuler-linux/:$CPLUS_INCLUDE_PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
           
