@@ -6,7 +6,7 @@
   LMCache-Ascend Plugin
   </h3>
 
-  [![Code Quality](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml/badge.svg?branch=main&label=tests)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml)
+  [![Code Quality](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml/badge.svg?branch=main)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml)
 
   <br />
 
