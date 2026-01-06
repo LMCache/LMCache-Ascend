@@ -6,6 +6,10 @@
   LMCache-Ascend Plugin
   </h3>
 
+  [![Code Quality](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml/badge.svg?branch=main&label=tests)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code_quality_checks.yml)
+
+  <br />
+
   <p align="center">
   | <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a>
   | <a href="https://blog.lmcache.ai/"><b> LMCache Blog</b></a> 
