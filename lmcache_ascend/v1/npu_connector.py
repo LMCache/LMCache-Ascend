@@ -66,6 +66,7 @@ class KVCacheFormat(Enum):
     @staticmethod
     def detect(
         kvcaches: List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
+        use_mla: bool = False,
     ) -> "KVCacheFormat":
         if not kvcaches:
             return KVCacheFormat.UNDEFINED
@@ -75,7 +76,17 @@ class KVCacheFormat(Enum):
         if isinstance(first_cache, tuple):
             return KVCacheFormat.SEPARATE_KV
         elif isinstance(first_cache, torch.Tensor):
-            if first_cache.shape[0] == 2:
+            ndim = first_cache.ndim
+            shape = first_cache.shape
+
+            # MLA detect
+            # MLA Shape: [num_blocks, block_size, head_size] (3D)
+            #         or: [1, num_blocks, block_size, head_size] (4D with first dim = 1)
+            is_mla_shape = (ndim == 3) or (ndim == 4 and shape[0] == 1)
+            if use_mla or is_mla_shape:
+                return KVCacheFormat.MERGED_KV
+
+            if shape[0] == 2:
                 return KVCacheFormat.MERGED_KV
 
         return KVCacheFormat.UNDEFINED
@@ -112,7 +123,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.device = kwargs["device"]
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.kv_format = KVCacheFormat.detect(kv_caches)
+        self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
 
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError(
@@ -396,6 +407,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("KV cache format is not initialized!")
 
         with torch.cuda.stream(self.store_stream):
+            # No staging buffer or token count mismatch
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 lmc_ops.multi_layer_kv_transfer(
                     memory_obj.tensor,
@@ -410,17 +422,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             else:
                 assert self.gpu_buffer.device == self.kvcaches_device
                 tmp_gpu_buffer = self.gpu_buffer[:, :, : end - start, :]
-                lmc_ops.multi_layer_kv_transfer(
-                    tmp_gpu_buffer,
-                    kv_cache_pointers,
+                lmc_ops.fused_multi_layer_kv_transfer(
+                    memory_obj.tensor,  # dst: CPU buffer
+                    tmp_gpu_buffer,  # staging cache
+                    kv_cache_pointers,  # src: paged KV cache
                     slot_mapping[start:end],
                     self.kvcaches_device,
                     self.page_buffer_size,
-                    True,
+                    True,  # from_gpu
                     self.use_mla,
                     self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                 )
-                memory_obj.tensor.copy_(tmp_gpu_buffer, non_blocking=True)
 
         if not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
@@ -498,20 +510,28 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
 
         num_tokens = len(slot_mapping_full)
 
+        chunk_offsets = []
+        chunk_sizes = []
+        current_offset = 0
+
+        for start, end in zip(starts, ends, strict=False):
+            chunk_size = end - start
+            chunk_sizes.append(chunk_size)
+            chunk_offsets.append(current_offset)
+            current_offset += chunk_size
+
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
-                self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        offset = starts[0]
         current_stream = torch.cuda.current_stream()
 
         for layer_id in range(self.num_layers):
@@ -520,18 +540,33 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                 current_stream.wait_stream(self.load_stream)
             if layer_id > 0:
                 logger.debug(f"Finished loading layer {layer_id - 1}")
-
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
-                for start, end, memory_obj in zip(
-                    starts, ends, memory_objs_layer, strict=False
-                ):
-                    assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
-                    if self.use_gpu:
-                        tmp_gpu_buffer_obj.tensor[start - offset : end - offset].copy_(
-                            memory_obj.tensor, non_blocking=True
-                        )
-                    else:
+                if self.use_gpu:
+                    cpu_tensors = []
+                    for memory_obj in memory_objs_layer:
+                        assert memory_obj.tensor is not None
+                        assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
+                        cpu_tensors.append(memory_obj.tensor)
+
+                    # Fused transfer: N H2D memcpy + 1 scatter kernel
+                    lmc_ops.batched_fused_single_layer_kv_transfer(
+                        cpu_tensors,  # CPU memory objects
+                        tmp_gpu_buffer_obj.tensor,  # GPU staging buffer
+                        self.kvcaches[layer_id],  # paged KV cache
+                        slot_mapping_full,
+                        chunk_offsets,  # offset for each chunk
+                        chunk_sizes,  # size for each chunk
+                        False,  # to_gpu
+                        True,  # token_major
+                        self.vllm_two_major,
+                    )
+
+                else:
+                    for start, end, memory_obj in zip(
+                        starts, ends, memory_objs_layer, strict=False
+                    ):
+                        assert memory_obj.tensor is not None
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
@@ -541,15 +576,6 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             self.vllm_two_major,
                         )
 
-                if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
-                        tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id],
-                        slot_mapping_full,
-                        False,
-                        True,
-                        self.vllm_two_major,
-                    )
         yield
 
         # synchronize the last layer
@@ -557,7 +583,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
             current_stream.wait_stream(self.load_stream)
 
         # free the buffer memory
-        if self.use_gpu:
+        if self.use_gpu and tmp_gpu_buffer_obj is not None:
             tmp_gpu_buffer_obj.ref_count_down()
 
         logger.debug(f"Finished loading layer {layer_id}")
@@ -617,20 +643,28 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
 
         num_tokens = len(slot_mapping_full)
 
+        chunk_offsets = []
+        chunk_sizes = []
+        current_offset = 0
+
+        for start, end in zip(starts, ends, strict=False):
+            chunk_size = end - start
+            chunk_sizes.append(chunk_size)
+            chunk_offsets.append(current_offset)
+            current_offset += chunk_size
+
+        tmp_gpu_buffer_obj: Optional[MemoryObj] = None
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            tmp_gpu_buffer_obj: Optional[MemoryObj] = (
-                self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        offset = starts[0]
         current_stream = torch.cuda.current_stream()
 
         for layer_id in range(self.num_layers):
@@ -638,25 +672,30 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
             # kvcaches -> gpu_buffer -> memobj
             with torch.cuda.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
+
                 if self.use_gpu:
-                    lmc_ops.single_layer_kv_transfer(
+                    cpu_tensors = []
+                    for memory_obj in memory_objs_layer:
+                        assert memory_obj.tensor is not None
+                        cpu_tensors.append(memory_obj.tensor)
+
+                    # Fused transfer: 1 scatter kernel + N D2H memcpy
+                    lmc_ops.batched_fused_single_layer_kv_transfer(
+                        cpu_tensors,
                         tmp_gpu_buffer_obj.tensor,
                         self.kvcaches[layer_id],
                         slot_mapping_full,
-                        True,
-                        True,
+                        chunk_offsets,
+                        chunk_sizes,
+                        True,  # from_gpu
+                        True,  # token_major
                         self.vllm_two_major,
                     )
-                for start, end, memory_obj in zip(
-                    starts, ends, memory_objs_layer, strict=False
-                ):
-                    assert memory_obj.tensor is not None
-                    if self.use_gpu:
-                        memory_obj.tensor.copy_(
-                            tmp_gpu_buffer_obj.tensor[start - offset : end - offset],
-                            non_blocking=True,
-                        )
-                    else:
+                else:
+                    for start, end, memory_obj in zip(
+                        starts, ends, memory_objs_layer, strict=False
+                    ):
+                        assert memory_obj.tensor is not None
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
                             self.kvcaches[layer_id],
@@ -665,13 +704,14 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
-
             yield
+
             if sync:
                 self.store_stream.synchronize()
+
             logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
-        if self.use_gpu:
+        if self.use_gpu and tmp_gpu_buffer_obj is not None:
             tmp_gpu_buffer_obj.ref_count_down()
         yield

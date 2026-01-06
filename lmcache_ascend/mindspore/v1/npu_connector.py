@@ -50,7 +50,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.is_310p = is_310p()
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        self.kv_format = KVCacheFormat.detect(kv_caches)
+        self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
 
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError(
