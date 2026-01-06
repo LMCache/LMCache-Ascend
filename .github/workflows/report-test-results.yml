@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["Ascend 910B Test"]
+    workflows: ["CI"]
     types:
       - completed
 
