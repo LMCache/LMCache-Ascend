@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["Ascend 910B Test"] # Must match the 'name' in your hardware file
+    workflows: ["910B Unit Tests"]
     types:
       - completed
 
