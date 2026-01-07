@@ -1,0 +1,16 @@
+# ------------------------------------------------------------------
+# GLOBAL DEFAULT
+# ------------------------------------------------------------------
+# Any file not matching a specific rule below requires approval 
+* @matthewygf @chloroethylene
+
+# ------------------------------------------------------------------
+# CRITICAL INFRASTRUCTURE 
+# ------------------------------------------------------------------
+# Changes to CI/CD or Docker configs require explicit review.
+
+.github/                @matthewygf @chloroethylene
+.github/workflows/      @matthewygf @chloroethylene
+docker/                 @matthewygf @chloroethylene
+*.yaml                  @matthewygf @chloroethylene
+*.yml                   @matthewygf @chloroethylene
