@@ -1,3 +1,4 @@
 [submodule "third_party/kvcache-ops"]
 	path = third_party/kvcache-ops
-	url = https://gitee.com/openeuler/kvcache-ops.git
+	url = https://atomgit.com/openeuler/kvcache-ops.git
+
