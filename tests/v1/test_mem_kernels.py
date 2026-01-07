@@ -33,7 +33,13 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
     num_blocks = 256
     dtype = torch.bfloat16
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
     )
     page_buffer_size = num_blocks * block_size
 
@@ -53,7 +59,7 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
         mem_obj_shape = torch.Size(
             [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
         )
-        
+
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
             lmc_ops.load_and_reshape_flash(
@@ -116,7 +122,13 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
 
     # Generate new paged kv_cache
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
     )
 
     kv_cache_pointers_new = torch.empty(
@@ -278,7 +290,13 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     hidden_dim_size = num_heads * head_size
 
     kv_cache = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
     )
     page_buffer_size = num_blocks * block_size
 
@@ -309,9 +327,7 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = torch.Size(
-            [kvs, num_layers, len(slot_temp), hidden_dim_size]
-        )
+        mem_obj_shape = torch.Size([kvs, num_layers, len(slot_temp), hidden_dim_size])
 
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -338,9 +354,7 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = torch.Size(
-            [kvs, num_layers, len(slot_temp), hidden_dim_size]
-        )
+        mem_obj_shape = torch.Size([kvs, num_layers, len(slot_temp), hidden_dim_size])
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         staging_cache = staging_buffer[:, :, : len(slot_temp), :]
         lmc_ops.fused_multi_layer_kv_transfer(
@@ -364,7 +378,13 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     check_mem_obj_equal(memory_obj_baseline_list, memory_obj_fused_list)
 
     kv_cache_new = generate_kv_cache_paged_list_tensors(
-        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
     )
 
     kv_cache_pointers_new = torch.empty(
@@ -451,9 +471,7 @@ def test_fused_multi_layer_kvcache_separate_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = torch.Size(
-            [kvs, num_layers, len(slot_temp), hidden_dim_size]
-        )
+        mem_obj_shape = torch.Size([kvs, num_layers, len(slot_temp), hidden_dim_size])
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -479,9 +497,7 @@ def test_fused_multi_layer_kvcache_separate_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = torch.Size(
-            [kvs, num_layers, len(slot_temp), hidden_dim_size]
-        )
+        mem_obj_shape = torch.Size([kvs, num_layers, len(slot_temp), hidden_dim_size])
 
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         staging_cache = staging_buffer[:, :, : len(slot_temp), :]
@@ -567,21 +583,21 @@ def test_single_layer_kernel(
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
-        num_layers,
-        num_heads,
-        head_size,
-        block_size,
-        dtype,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
         vllm_two_major=vllm_two_major,
     )
     kv_cache_new = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
-        num_layers,
-        num_heads,
-        head_size,
-        block_size,
-        dtype,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
         vllm_two_major=vllm_two_major,
     )
     slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
@@ -671,33 +687,33 @@ def test_batched_fused_single_layer_kernel(
     kv_cache_src = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
-        num_layers,
-        num_heads,
-        head_size,
-        block_size,
-        dtype,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
         vllm_two_major=vllm_two_major,
     )
 
     kv_cache_dst_baseline = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
-        num_layers,
-        num_heads,
-        head_size,
-        block_size,
-        dtype,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
         vllm_two_major=vllm_two_major,
     )
 
     kv_cache_dst_fused = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
-        num_layers,
-        num_heads,
-        head_size,
-        block_size,
-        dtype,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
         vllm_two_major=vllm_two_major,
     )
 
