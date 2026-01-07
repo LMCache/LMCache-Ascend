@@ -26,7 +26,8 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
 
     container:
-      image: quay.io/ascend/vllm-ascend:v0.10.2rc1-openeuler
+      # TODO (gingfung): use strategy matrix for version tests
+      image: quay.io/ascend/vllm-ascend:v0.11.0-dev-openeuler
       env:
         SOC_VERSION: Ascend910B4
         PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
@@ -103,10 +104,11 @@ jobs:
         run: |
           
           echo ">>> Installing LMCache Core..."
-          pip install lmcache==0.3.7
+          # TODO (gingfung): use strategy matrix for different version tests
+          pip install lmcache==0.3.12
 
           echo ">>> Building LMCache-Ascend..."
-          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/aarch64-openEuler-linux/:$CPLUS_INCLUDE_PATH
+          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
           
           # Install in editable mode (-e) for testing
