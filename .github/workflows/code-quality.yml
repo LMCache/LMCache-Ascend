@@ -1,4 +1,4 @@
-name: CI
+name: Code Quality
 
 on:
   push:
@@ -18,6 +18,7 @@ on:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   pre-commit:
@@ -34,6 +35,7 @@ jobs:
             pypi.org:443
             files.pythonhosted.org:443
             atomgit.com:443
+            api.github.com:443
 
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
@@ -51,10 +53,30 @@ jobs:
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
         with:
           extra_args: --all-files
-
-  trigger-tests:
-    name: Trigger 910B Tests
-    needs: pre-commit
-    if: github.event_name == 'pull_request'
-    uses: ./.github/workflows/build-and-test.yml
-    secrets: inherit
+      
+      - name: 🟡 Set Hardware Test to Pending
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
+            
+            try {
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                description: 'Queued (Waiting for runner pick-up)...',
+                context: '910B Unit Tests Status'
+              });
+            } catch (error) {
+              // 403 means "Forbidden" (likely a Fork PR). We ignore it.
+              if (error.status === 403) {
+                console.log('⚠️ Could not set status (likely a Fork PR with read-only token). Skipping.');
+                return; // Exit gracefully
+              }
+              // If it's another error, throw it so we know
+              throw error;
+            }
