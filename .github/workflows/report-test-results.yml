@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["CI", "Ascend 910B Test"]
+    workflows: ["Ascend 910B Test"] # Must match the 'name' in your hardware file
     types:
       - completed
 
@@ -16,8 +16,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: >
-      ${{ github.event.workflow_run.conclusion != 'skipped' && 
-      (github.event.workflow_run.event == 'pull_request' || github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'workflow_call') }}
+      ${{ github.event.workflow_run.conclusion == 'success' || 
+          github.event.workflow_run.conclusion == 'failure' }}
 
     steps:
       - name: Checkout Code
@@ -42,3 +42,5 @@ jobs:
           path: "**/*.xml"
           reporter: java-junit
           fail-on-error: false
+          list-tests: 'failed'
+          list-suites: 'failed'

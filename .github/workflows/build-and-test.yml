@@ -1,8 +1,12 @@
 name: 'Ascend 910B Test'
 
 on:
-  workflow_call:
-  workflow_dispatch:
+  workflow_call:       
+  workflow_dispatch:   
+  workflow_run:
+    workflows: ["Code Quality"]
+    branches: [main, '*-dev']
+    types: [completed]
 
 permissions:
   contents: read
@@ -16,6 +20,9 @@ jobs:
     name: Test on 910B
     runs-on: [self-hosted, Linux, ARM64, 910b4]
     timeout-minutes: 30
+    if: >
+      github.event_name != 'workflow_run' || 
+      github.event.workflow_run.conclusion == 'success'
 
     container:
       image: quay.io/ascend/vllm-ascend:v0.10.2rc1-openeuler
@@ -50,7 +57,18 @@ jobs:
           echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
           echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - name: Checkout (Workflow Run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout (Dispatch or Call)
+        if: github.event_name != 'workflow_run'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: true
