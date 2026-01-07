@@ -62,11 +62,21 @@ jobs:
             const { owner, repo } = context.repo;
             const sha = context.payload.pull_request ? context.payload.pull_request.head.sha : context.sha;
             
-            await github.rest.repos.createCommitStatus({
-              owner,
-              repo,
-              sha,
-              state: 'pending',
-              description: 'Queued (Waiting for runner pick-up)...',
-              context: '910B Unit Tests Status'
-            });
+            try {
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                description: 'Queued (Waiting for runner pick-up)...',
+                context: '910B Unit Tests Status'
+              });
+            } catch (error) {
+              // 403 means "Forbidden" (likely a Fork PR). We ignore it.
+              if (error.status === 403) {
+                console.log('⚠️ Could not set status (likely a Fork PR with read-only token). Skipping.');
+                return; // Exit gracefully
+              }
+              // If it's another error, throw it so we know
+              throw error;
+            }
