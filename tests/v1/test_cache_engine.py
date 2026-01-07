@@ -31,10 +31,11 @@ import pytest
 @pytest.mark.parametrize("fmt", ["vllm"])
 @pytest.mark.parametrize("chunk_size", [128, 256])
 @pytest.mark.parametrize("backend", ["cpu", "local_disk", "remote"])
+@pytest.mark.parametrize("save_unfull_chunk", [False, True])
 @pytest.mark.parametrize("lmserver_v1_process", ["cpu"], indirect=True)
 def test_paged_retrieve_prefix_patched(
-    fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
+    fmt, chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
 ):
     original_paged_retrieve_prefix(
-        fmt, chunk_size, backend, lmserver_v1_process, autorelease_v1
+        fmt, chunk_size, backend, save_unfull_chunk, lmserver_v1_process, autorelease_v1
     )
