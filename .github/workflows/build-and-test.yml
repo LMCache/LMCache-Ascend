@@ -1,48 +1,29 @@
-name: 'CI: Lint & Ascend 910B Test'
+name: '910B Unit Tests'
 
 on:
-  push:
-    branches: ['main']
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
-  pull_request:
-    branches: ['main', '*-dev']
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - '.gitignore'
+  workflow_call:       
+  workflow_dispatch:   
+  workflow_run:
+    workflows: ["Code Quality"]
+    branches: [main, '*-dev']
+    types: [completed]
 
 permissions:
   contents: read
+  statuses: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint & Style Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - run: pip install pre-commit
-      - run: pre-commit run --all-files
-
-  # ==========================================
-  # JOB 2: TEST (Container Mode)
-  # ==========================================
   test-native:
-    name: Test on 910B
-    needs: lint
+    name: Unit Tests on 910B
     runs-on: [self-hosted, Linux, ARM64, 910b4]
     timeout-minutes: 30
+    if: >
+      github.event_name != 'workflow_run' || 
+      github.event.workflow_run.conclusion == 'success'
 
     container:
       image: quay.io/ascend/vllm-ascend:v0.10.2rc1-openeuler
@@ -77,10 +58,43 @@ jobs:
           echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
           echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
 
-      - uses: actions/checkout@v4
+      - name: Checkout (Workflow Run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout (Dispatch or Call)
+        if: github.event_name != 'workflow_run'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
           submodules: true
+      
+      - name: 🟡 Set Status to Running
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) || 
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) || 
+                        context.sha;
+
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: 'pending',
+              description: 'Running tests... (Click Details to watch)',
+              context: '910B Unit Tests Status',
+              target_url: target_url
+            });
 
       - name: 🔧 Fix Git Safe Directory
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -89,11 +103,9 @@ jobs:
         run: |
           
           echo ">>> Installing LMCache Core..."
-          # From your Dockerfile: NO_CUDA_EXT=1 is set in 'env' above
           pip install lmcache==0.3.7
 
           echo ">>> Building LMCache-Ascend..."
-          # We need to export these variables just like your Dockerfile does
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/aarch64-openEuler-linux/:$CPLUS_INCLUDE_PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
           
@@ -167,4 +179,25 @@ jobs:
         with:
           name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
           path: test-results.xml
+      
+      - name: 🟢🔴 Update Hardware Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) || 
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) || 
+                        context.sha;
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: state,
+              target_url: target_url,
+              description: state === 'success' ? 'Tests Passed' : 'Tests Failed',
+              context: '910B Unit Tests Status'
+            });
  
