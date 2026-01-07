@@ -6,8 +6,8 @@
   LMCache-Ascend Plugin
   </h3>
 
-  [![CI](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml)
-
+  [![Code Quality](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml)
+  
   <br />
 
   <p align="center">
