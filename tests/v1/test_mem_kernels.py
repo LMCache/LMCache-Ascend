@@ -43,21 +43,17 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
     pinned_cpu_size = 4 * 1024 * 1024 * 1024  # 4GB
     mem_allocator = PinMemoryAllocator(pinned_cpu_size)
 
-    # lmc_ops.multi_layer_kv_transfer(memory_obj_new.tensor,
-    #                                kv_cache_pointers, # TODO: initialize this
-    #                                slot_mapping_temp,
-    #                                kv_cache[0].device,
-    #                                len(slot_mapping_temp), True)
-
     # layer by layer extract
     memory_obj_old_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
-
+        mem_obj_shape = torch.Size(
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        )
+        
         memory_obj_old = mem_allocator.allocate(mem_obj_shape, dtype)
         for layer_id in range(num_layers):
             lmc_ops.load_and_reshape_flash(
@@ -70,7 +66,7 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
         memory_obj_old_list.append(memory_obj_old)
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch.npu.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("Old extract time: ", elapsed_time_ms / 1000)
 
@@ -85,12 +81,14 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
     kv_cache_pointers = kv_cache_pointers.npu()
 
     memory_obj_new_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -107,7 +105,7 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch.npu.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print("New extract time: ", elapsed_time_ms / 1000)
 
@@ -190,12 +188,14 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
     kv_cache_pointers = kv_cache_pointers.npu()
 
     memory_obj_list = []
-    start_event = torch.cuda.Event(enable_timing=True)
-    end_event = torch.cuda.Event(enable_timing=True)
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
     start_event.record()
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
     for chunk_id, slot_mapping_temp in enumerate(slot_mapping_chunked):
-        mem_obj_shape = [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        mem_obj_shape = torch.Size(
+            [2, num_layers, len(slot_mapping_temp), num_heads * head_size]
+        )
 
         memory_obj_new = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
@@ -212,7 +212,7 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
 
     end_event.record()
     # wait for all the operations to finish
-    torch.cuda.synchronize()
+    torch.npu.synchronize()
     elapsed_time_ms = start_event.elapsed_time(end_event)
     print(f"New extract time: {elapsed_time_ms / 1000:.4f}s")
 
@@ -309,7 +309,10 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        mem_obj_shape = torch.Size(
+            [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        )
+
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -335,7 +338,9 @@ def test_fused_multi_layer_kvcache_merged_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        mem_obj_shape = torch.Size(
+            [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        )
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         staging_cache = staging_buffer[:, :, : len(slot_temp), :]
         lmc_ops.fused_multi_layer_kv_transfer(
@@ -446,7 +451,9 @@ def test_fused_multi_layer_kvcache_separate_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        mem_obj_shape = torch.Size(
+            [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        )
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
@@ -472,7 +479,10 @@ def test_fused_multi_layer_kvcache_separate_fmt(
     start_event.record()
 
     for slot_temp in slot_mapping_chunked:
-        mem_obj_shape = [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        mem_obj_shape = torch.Size(
+            [kvs, num_layers, len(slot_temp), hidden_dim_size]
+        )
+
         memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
         staging_cache = staging_buffer[:, :, : len(slot_temp), :]
         lmc_ops.fused_multi_layer_kv_transfer(
@@ -726,7 +736,7 @@ def test_batched_fused_single_layer_kernel(
                 layer_memory_objs = []
                 layer_tensors = []
                 for chunk_id in range(num_chunks):
-                    chunk_shape = list(chunk_buffer_shapes[chunk_id])
+                    chunk_shape = torch.Size(chunk_buffer_shapes[chunk_id])
                     memory_obj = mem_allocator.allocate(chunk_shape, dtype)
                     layer_memory_objs.append(memory_obj)
                     layer_tensors.append(memory_obj.tensor)
