@@ -35,7 +35,7 @@ class TestChunkStatisticsBasic(UpstreamChunkStatisticsBasicTests):
     pass
 
 
-class TestChunkStatisticMetrics(UpstreamChunkStatisticsMetricsTests):
+class TestChunkStatisticsMetrics(UpstreamChunkStatisticsMetricsTests):
     pass
 
 
