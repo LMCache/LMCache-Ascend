@@ -22,7 +22,7 @@ def patched_hidden_dim_size(self) -> int:
         # i.e. a tuple of kv (numblocks, blocksize, heads, headdim)
         #      very unlikely, but potentially MLA with (1, ....)
         if self.shape[0] == 1:
-            raise ValueError("Invalid shape for hidden dim size: {self.shape}")
+            raise ValueError(f"Invalid shape for hidden dim size: {self.shape}")
 
         return self.shape[2] * self.shape[3]
     elif len(self.shape) == 3:
