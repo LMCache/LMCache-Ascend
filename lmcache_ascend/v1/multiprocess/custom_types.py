@@ -96,7 +96,7 @@ class AscendIPCWrapper(CudaIPCWrapper):
         if device_index is None:
             raise RuntimeError(
                 f"Device UUID {device_uuid} not found in the discovered devices."
-                "Please make sure the process can see all the GPU devices"
+                " Please make sure the process can see all the GPU devices."
             )
         return device_index
 
