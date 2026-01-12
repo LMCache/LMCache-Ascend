@@ -31,7 +31,7 @@ class AscendIPCWrapper(CudaIPCWrapper):
         self.device_uuid = AscendIPCWrapper._get_device_uuid(device_index)
 
     @staticmethod
-    def _get_device_uuid(device_index: int) -> int:
+    def _get_device_uuid(device_index: int) -> str:
         """
         Ascend does not support uuid from the get_device_properties.
         Retrieves the VDie ID (Silicon ID) for Ascend device.
