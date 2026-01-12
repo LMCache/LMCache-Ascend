@@ -51,8 +51,25 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
         lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
 
         # Third Party
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+
+        # First Party
+        import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
+
+        KVLayerGroupsManager.build_kv_layer_groups = (
+            ascend_kv_layer_groups.build_kv_layer_groups
+        )
+        KVLayerGroupInfo.hidden_dim_size = property(
+            ascend_kv_layer_groups.patched_hidden_dim_size
+        )
+
+        # Third Party
         import lmcache.integration.vllm.vllm_v1_adapter
 
+        # NOTE (gingfung): this is the main entry point of LMCache, and since we are
+        # patching this, every time we upgrade, we should re-evaluate the function, as
+        # the experience is that this function signatures or init process will change
+        # every N versions.
         lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
             ascend_init_lmcache_engine
         )
