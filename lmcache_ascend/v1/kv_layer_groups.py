@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import defaultdict
-from typing import Tuple
 
 # Third Party
 from lmcache.logging import init_logger
