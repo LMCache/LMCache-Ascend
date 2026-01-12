@@ -61,7 +61,7 @@ def build_kv_layer_groups(self, kv_caches: dict[str, torch.Tensor]) -> None:
     for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
         logger.debug(f"KVCache Type: {type(kv_cache)} - len: {len(kv_cache)}")
         # NOTE (gingfung): Ascend has tuple of kvcaches
-        if isinstance(kv_cache, Tuple):
+        if isinstance(kv_cache, tuple):
             shape = kv_cache[0].shape
             dtype = kv_cache[0].dtype
         elif isinstance(kv_cache, torch.Tensor):
