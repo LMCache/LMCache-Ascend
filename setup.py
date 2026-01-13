@@ -229,7 +229,9 @@ class CustomAscendCmakeBuildExt(build_ext):
             cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
             cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
             cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
-            cmake_cmd += [f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path};{torch_cmake_utils_path}"]
+            cmake_cmd += [
+                f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path};{torch_cmake_utils_path}"
+            ]
 
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
