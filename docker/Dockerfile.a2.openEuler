@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-FROM quay.io/ascend/vllm-ascend:v0.11.0-dev-openeuler
+FROM quay.io/ascend/vllm-ascend:v0.11.0-openeuler
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG SOC_VERSION=Ascend910B3

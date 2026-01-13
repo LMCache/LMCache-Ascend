@@ -27,7 +27,7 @@ jobs:
 
     container:
       # TODO (gingfung): use strategy matrix for version tests
-      image: quay.io/ascend/vllm-ascend:v0.11.0-dev-openeuler
+      image: quay.io/ascend/vllm-ascend:v0.11.0-openeuler
       env:
         SOC_VERSION: Ascend910B4
         PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
