@@ -203,7 +203,6 @@ class CustomAscendCmakeBuildExt(build_ext):
             f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
-            f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"
             f"  -DCMAKE_BUILD_TYPE=Release"
             f"  -DCMAKE_INSTALL_PREFIX={install_path}"
             f"  -DPYTHON_INCLUDE_PATH={python_include_path}"
@@ -217,6 +216,7 @@ class CustomAscendCmakeBuildExt(build_ext):
 
             ms_path = os.path.dirname(os.path.abspath(mindspore.__file__))
             cmake_cmd += [f"  -DMINDSPORE_PATH={ms_path}"]
+            cmake_cmd += [f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
         else:
             # Third Party
             import torch
@@ -225,9 +225,11 @@ class CustomAscendCmakeBuildExt(build_ext):
             torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
             torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
             torch_path = os.path.dirname(os.path.abspath(torch.__file__))
+            torch_cmake_utils_path = torch.utils.cmake_prefix_path
             cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
             cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
             cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
+            cmake_cmd += [f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path};{torch_cmake_utils_path}"]
 
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
