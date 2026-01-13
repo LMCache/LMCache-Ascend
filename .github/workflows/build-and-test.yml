@@ -50,7 +50,7 @@ jobs:
         -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
         -v /usr/local/dcmi:/usr/local/dcmi:ro
         -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro
-        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
         --user root
         --cap-add=SYS_PTRACE
 
