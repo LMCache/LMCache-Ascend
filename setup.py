@@ -225,7 +225,6 @@ class CustomAscendCmakeBuildExt(build_ext):
             torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
             torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
             torch_path = os.path.dirname(os.path.abspath(torch.__file__))
-            torch_cmake_utils_path = torch.utils.cmake_prefix_path
             cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
             cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
             cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
