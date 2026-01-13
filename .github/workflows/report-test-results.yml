@@ -16,8 +16,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: >
-      ${{ github.event.workflow_run.conclusion == 'success' || 
-          github.event.workflow_run.conclusion == 'failure' }}
+      (github.event.workflow_run.conclusion == 'success' ||
+      github.event.workflow_run.conclusion == 'failure') &&
+      github.event.workflow_run.pull_requests != ''
 
     steps:
       - name: Checkout Code
