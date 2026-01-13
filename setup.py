@@ -229,7 +229,7 @@ class CustomAscendCmakeBuildExt(build_ext):
             cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
             cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
             cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
-            torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, 'Torch')
+            torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
             cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
 
         if _cxx_compiler is not None:
