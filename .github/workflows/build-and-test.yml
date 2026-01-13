@@ -20,6 +20,10 @@ jobs:
     name: Unit Tests on 910B
     runs-on: [self-hosted, Linux, ARM64, 910b4]
     timeout-minutes: 30
+
+    environment: 
+      name: 910b-hardware
+    
     if: >
       github.event_name != 'workflow_run' || 
       github.event.workflow_run.conclusion == 'success'
