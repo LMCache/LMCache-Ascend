@@ -7,7 +7,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.3.7"
+LMCACHE_UPSTREAM_TAG = "v0.3.12"
 
 # Check if we've already patched to avoid redundant work
 if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
@@ -29,33 +29,6 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
 
         sys.modules["lmcache.c_ops"] = ascend_c_ops
 
-        # The following patches are related for single-layer offload in sync mode
-        # i.e. enable_async_loading = False
-        # in pre LMCache v0.3.9, the sync mode was broken for layerwise
-        # due to storage_manager post init as seen here:
-        #  https://github.com/LMCache/LMCache/issues/1794
-        #  https://github.com/LMCache/LMCache/pull/1852
-        #  https://github.com/LMCache/LMCache/pull/1795
-        #  TODO (gingfung): we should remove these once we release v0.3.9
-        # Third Party
-        from lmcache.v1.storage_backend.storage_manager import StorageManager
-
-        # First Party
-        from lmcache_ascend.v1.storage_backend.storage_manager import (
-            post_init_fix as storage_post_init_fix,
-        )
-
-        StorageManager.post_init = storage_post_init_fix
-        # Third Party
-        from lmcache.v1.cache_engine import LMCacheEngine
-
-        # First Party
-        from lmcache_ascend.v1.cache_engine import (
-            post_init_fix as cache_engine_post_init_fix,
-        )
-
-        LMCacheEngine.post_init = cache_engine_post_init_fix
-
         # Third Party
         from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 
@@ -70,8 +43,33 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
         )
 
         # Third Party
+        import lmcache.v1.multiprocess.custom_types as lm_mp_types
+
+        # First Party
+        from lmcache_ascend.v1.multiprocess.custom_types import AscendIPCWrapper
+
+        lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
+
+        # Third Party
+        from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+
+        # First Party
+        import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
+
+        KVLayerGroupsManager.build_kv_layer_groups = (
+            ascend_kv_layer_groups.build_kv_layer_groups
+        )
+        KVLayerGroupInfo.hidden_dim_size = property(
+            ascend_kv_layer_groups.patched_hidden_dim_size
+        )
+
+        # Third Party
         import lmcache.integration.vllm.vllm_v1_adapter
 
+        # NOTE (gingfung): this is the main entry point of LMCache, and since we are
+        # patching this, every time we upgrade, we should re-evaluate the function, as
+        # the experience is that this function signatures or init process will change
+        # every N versions.
         lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
             ascend_init_lmcache_engine
         )

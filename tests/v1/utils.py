@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
+from lmcache_tests.v1.utils import *
 import torch
 
 # First Party
@@ -13,12 +14,12 @@ def create_npu_connector(hidden_dim, num_layers):
 def generate_kv_cache_paged_list_tensors(
     num_blocks,
     device,
-    num_layers,
-    num_heads,
-    head_size,
     block_size=16,
     dtype=torch.bfloat16,
     use_mla=False,
+    num_layers=32,
+    num_heads=8,
+    head_size=128,
     vllm_two_major=True,
 ):
     """
