@@ -171,6 +171,12 @@ jobs:
              exit 0
           fi
 
+      - name: 🧾 Publish Test Summary
+        if: always()
+        uses: ./.github/actions/junit-summary
+        with:
+          junit-path: test-results.xml
+
       # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
       - name: 📤 Upload Debug Logs
         if: always()

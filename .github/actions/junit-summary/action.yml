@@ -1,0 +1,57 @@
+name: "JUnit Test Summary"
+description: "Publish colored JUnit test summary with failure listing"
+inputs:
+  junit-path:
+    description: "Path to JUnit XML file"
+    required: true
+    default: "test-results.xml"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Generate JUnit Summary
+      shell: bash
+      run: |
+        FILE="${{ inputs.junit-path }}"
+
+        echo "## 🧪 Unit Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+
+        if [ ! -f "$FILE" ]; then
+          echo "<span style='color:red'>❌ No JUnit XML found</span>" >> $GITHUB_STEP_SUMMARY
+          exit 0
+        fi
+
+        total=$(grep -o 'tests="[0-9]\+"' "$FILE" | grep -o '[0-9]\+' | awk '{s+=$1} END {print s+0}')
+        failures=$(grep -o 'failures="[0-9]\+"' "$FILE" | grep -o '[0-9]\+' | awk '{s+=$1} END {print s+0}')
+        errors=$(grep -o 'errors="[0-9]\+"' "$FILE" | grep -o '[0-9]\+' | awk '{s+=$1} END {print s+0}')
+        skipped=$(grep -o 'skipped="[0-9]\+"' "$FILE" | grep -o '[0-9]\+' | awk '{s+=$1} END {print s+0}')
+
+        if [ "$failures" -eq 0 ] && [ "$errors" -eq 0 ]; then
+          echo "<span style='color:green'>✅ All tests passed</span>" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "<span style='color:red'>❌ Test failures detected</span>" >> $GITHUB_STEP_SUMMARY
+        fi
+
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+        echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+        echo "| Total | $total |" >> $GITHUB_STEP_SUMMARY
+        echo "| Failures | $failures |" >> $GITHUB_STEP_SUMMARY
+        echo "| Errors | $errors |" >> $GITHUB_STEP_SUMMARY
+        echo "| Skipped | $skipped |" >> $GITHUB_STEP_SUMMARY
+
+        if [ "$failures" -ne 0 ] || [ "$errors" -ne 0 ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "<details><summary><strong>❌ Failed Tests</strong></summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          grep -n "<testcase" "$FILE" | \
+          grep -E "<failure|<error" -B1 | \
+          grep "<testcase" | \
+          sed -E 's/.*classname="([^"]+)".*name="([^"]+)".*/- \1::\2/' \
+          >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+        fi
