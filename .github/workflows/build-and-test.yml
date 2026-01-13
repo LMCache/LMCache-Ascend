@@ -114,6 +114,9 @@ jobs:
           echo ">>> Building LMCache-Ascend..."
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+
+          export Torch_DIR=$(python3 -c 'import torch; import os; print(os.path.join(torch.utils.cmake_prefix_path, "Torch"))')
+          echo "Manually set Torch_DIR to: $Torch_DIR"
           
           # Install in editable mode (-e) for testing
           python3 -m pip install -v --no-build-isolation -e . 
