@@ -41,6 +41,13 @@ void single_layer_kv_transfer_kernel_v2(
     const int32_t headDims, const int32_t numTokens, const int32_t blockSize,
     const bool page2L, const bool lmcTokensMajor);
 
+
+void single_layer_kv_transfer_kernel(kvcache_ops::AscendType type, kvcache_ops::AscendType slotType, 
+                                     uint32_t blockDim, void *stream, uint8_t *dstCacheTensor, 
+                                     uint8_t *keyCachePtr, uint8_t *valueCachePtr,
+                                     uint8_t *slotmappings, const int64_t hiddenDims, const int32_t numTokens, 
+                                     const bool page2L, const bool tokenMajor, const bool isMLA);
+
 void load_and_reshape_flash_kernel(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
     uint32_t blockDim, void *stream, uint8_t *dstCacheTensor,
@@ -83,6 +90,13 @@ void single_layer_kv_transfer(torch::Tensor &lmc_key_value_cache,
                               torch::Tensor &slot_mapping, const bool direction,
                               const bool token_major = false,
                               const bool vllm_two_major = false);
+
+void single_layer_kv_transfer_v1(torch::Tensor& lmc_key_value_cache,
+                              torch::Tensor& vllm_key_cache,
+                              torch::Tensor& vllm_value_cache,
+                              torch::Tensor& slot_mapping,
+                              const bool direction,
+                              const bool token_major = false);
 
 void batched_fused_single_layer_kv_transfer(
     std::vector<torch::Tensor> &lmc_tensors, torch::Tensor &staging_cache,

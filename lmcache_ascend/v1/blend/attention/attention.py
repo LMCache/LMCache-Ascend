@@ -9,10 +9,17 @@ from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
 from torch import nn
 
 # from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-from transformers.modeling_flash_attention_utils import flash_attn_varlen_func
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 import torch
+
+import torch_npu
+import transformers.integrations.npu_flash_attention as nfa
+if not hasattr(nfa, 'npu_fusion_attention'):
+    nfa.npu_fusion_attention = torch_npu.npu_fusion_attention
+from transformers.integrations.npu_flash_attention import (
+    npu_flash_attn_varlen_func as flash_attn_varlen_func
+)
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
