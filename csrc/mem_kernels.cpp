@@ -201,57 +201,180 @@ void multi_layer_kv_transfer_unilateral(
   throw py::error_already_set();
 };
 
-void single_layer_kv_transfer(
-    torch::Tensor &lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
-                                         // or
-                                         // [2, num_tokens, num_heads*head_size]
-    torch::Tensor &vllm_key_value_cache, // [2, num_blocks, block_size,
-                                         // num_heads, head_size]
-    torch::Tensor &slot_mapping,         // [num_tokens]
-    const bool direction, // false: LMCache to PagedBuffer, true: PagedBuffer to
-                          // LMCache
-    const bool token_major,   // true: lmc_key_value_cache is [num_tokens, 2,
-                              // num_heads*head_size] false: lmc_key_value_cache
-                              // is [2, num_tokens, num_heads*head_size]
-    const bool vllm_two_major // true: vllm_key_value_cache is [2, num_blocks,
-                              // block_size, num_heads, head_size] false:
-                              // vllm_key_value_cache is [num_blocks, 2,
-                              // block_size, num_heads, head_size]
+void single_layer_kv_transfer_separate_impl(
+    torch::Tensor
+        &lmc_key_value_cache, // [num_tokens, 2, num_heads*head_size]
+                              // or [2, num_tokens, num_heads*head_size]
+    torch::Tensor
+        &vllm_key_cache, // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor
+        &vllm_value_cache, // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor &slot_mapping, // [num_tokens]
+    const bool direction, // false: LMCache -> Paged, true: Paged -> LMCache
+    const bool
+        token_major // true: [tokens, 2, hidden], false: [2, tokens, hidden]
 ) {
+  SingleLayerKVConfig config = prepare_single_layer_kv_config(
+      lmc_key_value_cache, vllm_key_cache, slot_mapping, direction, token_major,
+      false // vllm_two_major is meaningless for SEPARATE_KV
+  );
+
+  const c10::OptionalDeviceGuard slot_device_guard(device_of(slot_mapping));
+
+  config.vllm_value_cache_ptr =
+      get_kernel_ptr<uint8_t, const torch::Tensor>(vllm_value_cache);
+  config.vllm_value_buffer_size =
+      static_cast<int64_t>(vllm_value_cache.nbytes());
+
+  compute_single_layer_ub_params(config, vllm_key_cache);
+
+  if (token_major) {
+    config.lmc_token_stride = lmc_key_value_cache.stride(0);
+    config.lmc_value_offset = lmc_key_value_cache.stride(1);
+  } else {
+    config.lmc_token_stride = lmc_key_value_cache.stride(1);
+    config.lmc_value_offset = lmc_key_value_cache.stride(0);
+  }
+
+  config.key_block_stride = vllm_key_cache.stride(0);
+  config.value_block_stride = vllm_value_cache.stride(0);
+
+  config.vllm_block_stride = config.key_block_stride;
+  config.vllm_value_offset = 0;
+
+  at_npu::native::OpCommand cmd;
+  cmd.Name("single_layer_kv_transfer_kernel_v2_separate");
+
+  cmd.SetCustomHandler([config]() -> int {
+    auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
+    auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
+
+    kvcache_ops::single_layer_kv_transfer_kernel_v2_separate(
+        dtype_num, slot_num, config.aiv_num, config.stream,
+        config.staging_cache_ptr, config.vllm_cache_ptr,
+        config.vllm_value_cache_ptr, config.slot_mapping_ptr,
+        config.key_block_stride, config.value_block_stride,
+        config.vllm_buffer_size, config.vllm_value_buffer_size,
+        config.lmc_token_stride, config.lmc_value_offset,
+        config.staging_cache_buffer_size, config.max_tokens_per_loop,
+        config.num_heads, config.head_dims, config.num_tokens,
+        config.block_size, config.direction, config.token_major);
+    return 0;
+  });
+
+  cmd.Run();
+  return;
+}
+
+void single_layer_kv_transfer_merged_impl(torch::Tensor &lmc_key_value_cache,
+                                          torch::Tensor &vllm_key_value_cache,
+                                          torch::Tensor &slot_mapping,
+                                          const bool direction,
+                                          const bool token_major,
+                                          const bool vllm_two_major) {
   SingleLayerKVConfig config = prepare_single_layer_kv_config(
       lmc_key_value_cache, vllm_key_value_cache, slot_mapping, direction,
       token_major, vllm_two_major);
 
   const c10::OptionalDeviceGuard slot_device_guard(device_of(slot_mapping));
+
   compute_single_layer_ub_params(config, vllm_key_value_cache);
 
-  // precompute the strides for lmc_buffer & vllm_buffer
   compute_single_layer_strides(config, lmc_key_value_cache,
                                vllm_key_value_cache, token_major,
                                vllm_two_major);
 
   at_npu::native::OpCommand cmd;
   cmd.Name("single_layer_kv_transfer_kernel_v2");
+
   cmd.SetCustomHandler([config]() -> int {
     auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
     auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
 
     kvcache_ops::single_layer_kv_transfer_kernel_v2(
         dtype_num, slot_num, config.aiv_num, config.stream,
-        config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-        config.vllm_block_stride, config.vllm_value_offset,
-        config.vllm_buffer_size, config.lmc_token_stride,
-        config.lmc_value_offset, config.lmc_buffer_size,
-        config.max_tokens_per_loop, config.num_heads, config.head_dims,
-        config.num_tokens, config.block_size, config.direction,
-        config.token_major);
+        config.staging_cache_ptr, config.vllm_cache_ptr,
+        config.slot_mapping_ptr, config.vllm_block_stride,
+        config.vllm_value_offset, config.vllm_buffer_size,
+        config.lmc_token_stride, config.lmc_value_offset,
+        config.staging_cache_buffer_size, config.max_tokens_per_loop,
+        config.num_heads, config.head_dims, config.num_tokens,
+        config.block_size, config.direction, config.token_major);
     return 0;
   });
+
   cmd.Run();
   return;
-};
+}
 
-void batched_fused_single_layer_kv_transfer(
+void single_layer_kv_transfer(
+    torch::Tensor
+        &lmc_key_value_cache, // [num_tokens, 2, num_heads*head_size]
+                              // or [2, num_tokens, num_heads*head_size]
+    std::vector<torch::Tensor> &vllm_kv_caches,
+    // SEPARATE_KV: list[k_tensor, v_tensor]
+    // k_tensor/v_tensor = [num_blocks, block_size, num_heads, head_size]
+    // MERGED_KV:
+    // vllm_two_major=true:  [2, num_blocks, block_size, num_heads, head_size]
+    // vllm_two_major=false: [num_blocks, 2, block_size, num_heads, head_size]
+    torch::Tensor &slot_mapping, // [num_tokens]
+    const bool direction, // false: LMCache -> Paged, true: Paged -> LMCache
+    const int kvcache_format_raw, // 1: MERGED_KV, 2: SEPARATE_KV
+    const bool
+        token_major, // true: [tokens, 2, hidden], false: [2, tokens, hidden]
+    const bool vllm_two_major // true: [2, blocks, ...], false: [blocks, 2, ...]
+                              // (only for MERGED_KV)
+) {
+  kvcache_ops::KVCacheFormat kvcache_format =
+      static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
+
+  if (kvcache_format != kvcache_ops::KVCacheFormat::MERGED_KV &&
+      kvcache_format != kvcache_ops::KVCacheFormat::SEPARATE_KV) {
+    std::string errStr =
+        "Invalid KV cache format: " + std::to_string(kvcache_format_raw) +
+        ". Expected 1 (MERGED_KV) or 2 (SEPARATE_KV)";
+    PyErr_SetString(PyExc_ValueError, errStr.c_str());
+    throw py::error_already_set();
+  }
+
+  if (vllm_kv_caches.empty()) {
+    PyErr_SetString(PyExc_ValueError, "vllm_kv_caches cannot be empty");
+    throw py::error_already_set();
+  }
+
+  if (kvcache_format == kvcache_ops::KVCacheFormat::MERGED_KV) {
+    // MERGED_KV: 期望 1 个 5D tensor
+    if (vllm_kv_caches.size() != 1) {
+      std::string errStr = "MERGED_KV expects 1 tensor, got " +
+                           std::to_string(vllm_kv_caches.size());
+      PyErr_SetString(PyExc_ValueError, errStr.c_str());
+      throw py::error_already_set();
+    }
+
+    torch::Tensor &vllm_key_value_cache = vllm_kv_caches[0];
+
+    single_layer_kv_transfer_merged_impl(
+        lmc_key_value_cache, vllm_key_value_cache, slot_mapping, direction,
+        token_major, vllm_two_major);
+  } else {
+    if (vllm_kv_caches.size() != 2) {
+      std::string errStr = "SEPARATE_KV expects 2 tensors (K and V), got " +
+                           std::to_string(vllm_kv_caches.size());
+      PyErr_SetString(PyExc_ValueError, errStr.c_str());
+      throw py::error_already_set();
+    }
+
+    torch::Tensor &vllm_key_cache = vllm_kv_caches[0];
+    torch::Tensor &vllm_value_cache = vllm_kv_caches[1];
+
+    single_layer_kv_transfer_separate_impl(lmc_key_value_cache, vllm_key_cache,
+                                           vllm_value_cache, slot_mapping,
+                                           direction, token_major);
+  }
+  return;
+}
+
+void batched_fused_single_layer_kv_transfer_separate_impl(
     std::vector<torch::Tensor>
         &lmc_tensors, // N CPU pinned memory tensors
                       // token_major=true:  [num_tokens, 2, num_heads*head_size]
@@ -261,21 +384,223 @@ void batched_fused_single_layer_kv_transfer(
                                   // num_heads*head_size] token_major=false: [2,
                                   // num_tokens, num_heads*head_size]
     torch::Tensor
-        &vllm_key_value_cache,        // vllm_two_major=true:  [2, num_blocks,
-                                      // block_size, num_heads, head_size]
-                                      // vllm_two_major=false: [num_blocks, 2,
-                                      // block_size, num_heads, head_size]
+        &vllm_key_cache, // [num_blocks, block_size, num_heads, head_size]
+    torch::Tensor
+        &vllm_value_cache, // [num_blocks, block_size, num_heads, head_size]
     torch::Tensor &slot_mapping_full, // [num_tokens]
     std::vector<int64_t>
         &chunk_offsets,                // token offset in staging for each chunk
     std::vector<int64_t> &chunk_sizes, // token count for each chunk
-    const bool direction, // false: CPU -> staging -> paged (to_gpu) true: paged
-                          // -> staging -> CPU (from_gpu)
+    const bool direction, // false: CPU -> staging -> paged (to_gpu)
+                          // true:  paged -> staging -> CPU (from_gpu)
     const bool
-        token_major, // true: [tokens, 2, hidden], false: [2, tokens, hidden]
-    const bool vllm_two_major // true: [2, blocks, ...], false: [blocks, 2, ...]
+        token_major // true: [tokens, 2, hidden], false: [2, tokens, hidden]
 ) {
   size_t num_chunks = lmc_tensors.size();
+
+  if (chunk_offsets.size() != num_chunks || chunk_sizes.size() != num_chunks) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        "chunk_offsets and chunk_sizes must have the same size as lmc_tensors");
+    throw py::error_already_set();
+  }
+
+  if (num_chunks == 0) {
+    PyErr_SetString(
+        PyExc_ValueError,
+        "num_chunks must be greater than 0. Check 'starts' and 'ends' inputs.");
+    throw py::error_already_set();
+  }
+
+  for (size_t i = 0; i < num_chunks; ++i) {
+    if (lmc_tensors[i].is_cuda() ||
+        lmc_tensors[i].device().type() == c10::DeviceType::PrivateUse1) {
+      std::string errStr = "lmc_tensors[" + std::to_string(i) +
+                           "] must be on CPU (pinned memory)";
+      PyErr_SetString(PyExc_RuntimeError, errStr.c_str());
+      throw py::error_already_set();
+    }
+  }
+
+  if (vllm_key_cache.sizes() != vllm_value_cache.sizes()) {
+    std::string errStr =
+        "vllm_key_cache and vllm_value_cache must have the same shape. "
+        "Got key: " +
+        torch::str(vllm_key_cache.sizes()) +
+        ", value: " + torch::str(vllm_value_cache.sizes());
+    PyErr_SetString(PyExc_RuntimeError, errStr.c_str());
+    throw py::error_already_set();
+  }
+
+  const c10::OptionalDeviceGuard slot_device_guard(
+      device_of(slot_mapping_full));
+
+  SingleLayerKVConfig config = prepare_single_layer_kv_config(
+      staging_cache,
+      vllm_key_cache, // K shape = V shape
+      slot_mapping_full, direction, token_major,
+      false // vllm_two_major is meaningless for SEPARATE_KV
+  );
+
+  // for SEPARATE_KV
+  config.vllm_value_cache_ptr =
+      get_kernel_ptr<uint8_t, const torch::Tensor>(vllm_value_cache);
+  config.vllm_value_buffer_size =
+      static_cast<int64_t>(vllm_value_cache.nbytes());
+
+  compute_single_layer_ub_params(config, vllm_key_cache);
+
+  if (token_major) {
+    config.lmc_token_stride = staging_cache.stride(0);
+    config.lmc_value_offset = staging_cache.stride(1);
+  } else {
+    config.lmc_token_stride = staging_cache.stride(1);
+    config.lmc_value_offset = staging_cache.stride(0);
+  }
+
+  // Calculate the block stride for K and V respectively.
+  // vllm_key_cache/vllm_value_cache shape:   [num_blocks, block_size,
+  // num_heads, head_size]
+  config.key_block_stride = vllm_key_cache.stride(0);
+  config.value_block_stride = vllm_value_cache.stride(0);
+
+  // Set vllm_block_stride
+  config.vllm_block_stride = config.key_block_stride;
+
+  // not used in SEPARATE_KV
+  config.vllm_value_offset = 0;
+
+  int64_t element_size = staging_cache.element_size();
+  int64_t bytes_per_token = config.lmc_token_stride * element_size;
+  int64_t staging_v_plane_offset = config.lmc_value_offset * element_size;
+
+  std::vector<uint8_t *> lmc_ptrs(num_chunks);
+  std::vector<int64_t> lmc_copy_sizes(num_chunks);
+  std::vector<int64_t> lmc_v_offsets(num_chunks);
+
+  for (size_t i = 0; i < num_chunks; ++i) {
+    lmc_ptrs[i] = static_cast<uint8_t *>(lmc_tensors[i].data_ptr());
+    lmc_copy_sizes[i] = chunk_sizes[i] * bytes_per_token;
+
+    if (!token_major) {
+      lmc_v_offsets[i] = lmc_tensors[i].stride(0) * element_size;
+    }
+  }
+
+  at_npu::native::OpCommand cmd;
+  cmd.Name("batched_fused_single_layer_kv_transfer_kernel_v2_separate");
+
+  cmd.SetCustomHandler([config, num_chunks, lmc_ptrs, lmc_copy_sizes,
+                        chunk_offsets, bytes_per_token, staging_v_plane_offset,
+                        lmc_v_offsets]() -> int {
+    auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
+    auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
+    aclError ret;
+
+    if (!config.direction) {
+      // Step 1: Multiple H2D memcpy (CPU -> staging)
+      for (size_t i = 0; i < num_chunks; ++i) {
+        uint8_t *staging_base =
+            config.staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
+        int64_t chunk_kv_bytes = lmc_copy_sizes[i];
+
+        if (config.token_major) {
+          ret = aclrtMemcpyAsync(staging_base, chunk_kv_bytes, lmc_ptrs[i],
+                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy failed for chunk ", i,
+                      ", ret=", ret);
+        } else {
+          // K plane
+          ret = aclrtMemcpyAsync(staging_base, chunk_kv_bytes, lmc_ptrs[i],
+                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (K) failed for chunk ",
+                      i, ", ret=", ret);
+
+          // V plane
+          ret = aclrtMemcpyAsync(staging_base + staging_v_plane_offset,
+                                 chunk_kv_bytes, lmc_ptrs[i] + lmc_v_offsets[i],
+                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (V) failed for chunk ",
+                      i, ", ret=", ret);
+        }
+      }
+
+      // Step 2: Scatter kernel (staging -> paged K and V)
+      kvcache_ops::single_layer_kv_transfer_kernel_v2_separate(
+          dtype_num, slot_num, config.aiv_num, config.stream,
+          config.staging_cache_ptr,    // staging buffer
+          config.vllm_cache_ptr,       // K cache (paged)
+          config.vllm_value_cache_ptr, // V cache (paged)
+          config.slot_mapping_ptr, config.key_block_stride,
+          config.value_block_stride, config.vllm_buffer_size,
+          config.vllm_value_buffer_size, config.lmc_token_stride,
+          config.lmc_value_offset, config.staging_cache_buffer_size,
+          config.max_tokens_per_loop, config.num_heads, config.head_dims,
+          config.num_tokens, config.block_size,
+          false, // page2L = false (scatter)
+          config.token_major);
+    } else {
+      // Step 1: Gather kernel (paged -> staging)
+      kvcache_ops::single_layer_kv_transfer_kernel_v2_separate(
+          dtype_num, slot_num, config.aiv_num, config.stream,
+          config.staging_cache_ptr, config.vllm_cache_ptr,
+          config.vllm_value_cache_ptr, config.slot_mapping_ptr,
+          config.key_block_stride, config.value_block_stride,
+          config.vllm_buffer_size, config.vllm_value_buffer_size,
+          config.lmc_token_stride, config.lmc_value_offset,
+          config.staging_cache_buffer_size, config.max_tokens_per_loop,
+          config.num_heads, config.head_dims, config.num_tokens,
+          config.block_size,
+          true, // page2L = true (gather)
+          config.token_major);
+
+      // Step 2: Multiple D2H memcpy (staging -> CPU)
+      for (size_t i = 0; i < num_chunks; ++i) {
+        uint8_t *staging_base =
+            config.staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
+        int64_t chunk_kv_bytes = lmc_copy_sizes[i];
+
+        if (config.token_major) {
+          ret = aclrtMemcpyAsync(lmc_ptrs[i], chunk_kv_bytes, staging_base,
+                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy failed for chunk ", i,
+                      ", ret=", ret);
+        } else {
+          // K plane
+          ret = aclrtMemcpyAsync(lmc_ptrs[i], chunk_kv_bytes, staging_base,
+                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (K) failed for chunk ",
+                      i, ", ret=", ret);
+
+          // V plane
+          ret = aclrtMemcpyAsync(lmc_ptrs[i] + lmc_v_offsets[i], chunk_kv_bytes,
+                                 staging_base + staging_v_plane_offset,
+                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
+                                 config.stream);
+          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (V) failed for chunk ",
+                      i, ", ret=", ret);
+        }
+      }
+    }
+    return 0;
+  });
+
+  cmd.Run();
+}
+
+void batched_fused_single_layer_kv_transfer_merged_impl(
+    std::vector<torch::Tensor> &lmc_tensors, torch::Tensor &staging_cache,
+    torch::Tensor &vllm_key_value_cache, torch::Tensor &slot_mapping_full,
+    std::vector<int64_t> &chunk_offsets, std::vector<int64_t> &chunk_sizes,
+    const bool direction, const bool token_major, const bool vllm_two_major) {
+
+  size_t num_chunks = lmc_tensors.size();
+
   if (chunk_offsets.size() != num_chunks || chunk_sizes.size() != num_chunks) {
     PyErr_SetString(
         PyExc_RuntimeError,
@@ -330,6 +655,7 @@ void batched_fused_single_layer_kv_transfer(
 
   at_npu::native::OpCommand cmd;
   cmd.Name("batched_fused_single_layer_kv_transfer_kernel_v2");
+
   cmd.SetCustomHandler([config, num_chunks, lmc_ptrs, lmc_copy_sizes,
                         chunk_offsets, bytes_per_token, staging_v_plane_offset,
                         lmc_v_offsets]() -> int {
@@ -342,10 +668,11 @@ void batched_fused_single_layer_kv_transfer(
       // Step 1: Multiple H2D memcpy
       for (size_t i = 0; i < num_chunks; ++i) {
         uint8_t *staging_base =
-            config.lmc_cache_ptr + chunk_offsets[i] * bytes_per_token;
+            config.staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
         int64_t chunk_kv_bytes = lmc_copy_sizes[i];
 
         if (config.token_major) {
+          // token_major: [tokens, 2, hidden]
           ret = aclrtMemcpyAsync(staging_base, chunk_kv_bytes, lmc_ptrs[i],
                                  chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
                                  config.stream);
@@ -372,29 +699,38 @@ void batched_fused_single_layer_kv_transfer(
       // Step 2: Scatter (staging -> paged KV cache)
       kvcache_ops::single_layer_kv_transfer_kernel_v2(
           dtype_num, slot_num, config.aiv_num, config.stream,
-          config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-          config.vllm_block_stride, config.vllm_value_offset,
+          config.staging_cache_ptr, // staging buffer
+          config.vllm_cache_ptr,    // paged KV cache (MERGED)
+          config.slot_mapping_ptr,
+          config.vllm_block_stride, // MERGED: single stride
+          config.vllm_value_offset, // MERGED: K->V offset
           config.vllm_buffer_size, config.lmc_token_stride,
-          config.lmc_value_offset, config.lmc_buffer_size,
+          config.lmc_value_offset, config.staging_cache_buffer_size,
           config.max_tokens_per_loop, config.num_heads, config.head_dims,
-          config.num_tokens, config.block_size, false, config.token_major);
-    }
+          config.num_tokens, config.block_size,
+          false, // page2L = false (scatter)
+          config.token_major);
+    } 
     // from_gpu (paged -> staging -> CPU)
     else {
       // Step 1: Gather (paged -> staging)
       kvcache_ops::single_layer_kv_transfer_kernel_v2(
           dtype_num, slot_num, config.aiv_num, config.stream,
-          config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-          config.vllm_block_stride, config.vllm_value_offset,
-          config.vllm_buffer_size, config.lmc_token_stride,
-          config.lmc_value_offset, config.lmc_buffer_size,
-          config.max_tokens_per_loop, config.num_heads, config.head_dims,
-          config.num_tokens, config.block_size, true, config.token_major);
+          config.staging_cache_ptr, // staging buffer
+          config.vllm_cache_ptr,    // paged KV cache (MERGED)
+          config.slot_mapping_ptr, config.vllm_block_stride,
+          config.vllm_value_offset, config.vllm_buffer_size,
+          config.lmc_token_stride, config.lmc_value_offset,
+          config.staging_cache_buffer_size, config.max_tokens_per_loop,
+          config.num_heads, config.head_dims, config.num_tokens,
+          config.block_size,
+          true, // page2L = true (gather)
+          config.token_major);
 
       // Step 2: Multiple D2H memcpy
       for (size_t i = 0; i < num_chunks; ++i) {
         uint8_t *staging_base =
-            config.lmc_cache_ptr + chunk_offsets[i] * bytes_per_token;
+            config.staging_cache_ptr + chunk_offsets[i] * bytes_per_token;
         int64_t chunk_kv_bytes = lmc_copy_sizes[i];
 
         if (config.token_major) {
@@ -404,14 +740,15 @@ void batched_fused_single_layer_kv_transfer(
           TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy failed for chunk ", i,
                       ", ret=", ret);
         } else {
-          // K
+          // two_major: Copy K and V separately
+          // K plane
           ret = aclrtMemcpyAsync(lmc_ptrs[i], chunk_kv_bytes, staging_base,
                                  chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
                                  config.stream);
           TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (K) failed for chunk ",
                       i, ", ret=", ret);
 
-          // V
+          // V plane
           ret = aclrtMemcpyAsync(lmc_ptrs[i] + lmc_v_offsets[i], chunk_kv_bytes,
                                  staging_base + staging_v_plane_offset,
                                  chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
@@ -424,7 +761,110 @@ void batched_fused_single_layer_kv_transfer(
 
     return 0;
   });
+
   cmd.Run();
+}
+
+void batched_fused_single_layer_kv_transfer(
+    std::vector<torch::Tensor>
+        &lmc_tensors, // N CPU pinned memory tensors
+                      // token_major=true:  [num_tokens, 2, num_heads*head_size]
+                      // token_major=false: [2, num_tokens, num_heads*head_size]
+    torch::Tensor &staging_cache, // NPU staging buffer
+                                  // token_major=true:  [num_tokens, 2,
+                                  // num_heads*head_size] token_major=false: [2,
+                                  // num_tokens, num_heads*head_size]
+    std::vector<torch::Tensor>    // separate format： list[k_tensor, v_tensor]
+        &vllm_kv_caches, // k_tensor/v_tensor = [num_blocks，block_size,
+                         // num_heads, head_size]
+                         //  Mergeed format：
+                         //  vllm_two_major=true:  [2, num_blocks, block_size,
+                         //  num_heads, head_size] vllm_two_major=false:
+                         //  [num_blocks, 2, block_size, num_heads, head_size]
+    torch::Tensor &slot_mapping_full, // [num_tokens]
+    std::vector<int64_t>
+        &chunk_offsets,                // token offset in staging for each chunk
+    std::vector<int64_t> &chunk_sizes, // token count for each chunk
+    const bool direction, // false: CPU -> staging -> paged (to_gpu) true: paged
+                          // -> staging -> CPU (from_gpu)
+    const int kvcache_format_raw,
+    const bool
+        token_major, // true: [tokens, 2, hidden], false: [2, tokens, hidden]
+    const bool vllm_two_major // true: [2, blocks, ...], false: [blocks, 2, ...]
+) {
+  kvcache_ops::KVCacheFormat kvcache_format =
+      static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
+
+  if (kvcache_format != kvcache_ops::KVCacheFormat::MERGED_KV &&
+      kvcache_format != kvcache_ops::KVCacheFormat::SEPARATE_KV) {
+    std::string errStr =
+        "Invalid KV cache format: " + std::to_string(kvcache_format_raw) +
+        ". Expected 1 (MERGED_KV) or 2 (SEPARATE_KV)";
+    PyErr_SetString(PyExc_ValueError, errStr.c_str());
+    throw py::error_already_set();
+  }
+
+  size_t num_chunks = lmc_tensors.size();
+  if (chunk_offsets.size() != num_chunks || chunk_sizes.size() != num_chunks) {
+    PyErr_SetString(
+        PyExc_RuntimeError,
+        "chunk_offsets and chunk_sizes must have the same size as lmc_tensors");
+    throw py::error_already_set();
+  }
+
+  if (num_chunks == 0) {
+    PyErr_SetString(PyExc_ValueError, "num_chunks must be greater than 0.");
+    throw py::error_already_set();
+  }
+
+  for (size_t i = 0; i < num_chunks; ++i) {
+    if (lmc_tensors[i].is_cuda() ||
+        lmc_tensors[i].device().type() == c10::DeviceType::PrivateUse1) {
+      std::string errStr = "lmc_tensors[" + std::to_string(i) +
+                           "] must be on CPU (pinned memory)";
+      PyErr_SetString(PyExc_RuntimeError, errStr.c_str());
+      throw py::error_already_set();
+    }
+  }
+
+  if (kvcache_format == kvcache_ops::KVCacheFormat::MERGED_KV) {
+    torch::Tensor &vllm_key_value_cache = vllm_kv_caches[0];
+
+    if (vllm_key_value_cache.dim() != 5) {
+      std::string errStr = "MERGED_KV expects 5D tensor, got " +
+                           std::to_string(vllm_key_value_cache.dim()) + "D";
+      PyErr_SetString(PyExc_ValueError, errStr.c_str());
+      throw py::error_already_set();
+    }
+
+    batched_fused_single_layer_kv_transfer_merged_impl(
+        lmc_tensors, staging_cache, vllm_key_value_cache, slot_mapping_full,
+        chunk_offsets, chunk_sizes, direction, token_major, vllm_two_major);
+  } else {
+
+    torch::Tensor &vllm_key_cache = vllm_kv_caches[0];
+    torch::Tensor &vllm_value_cache = vllm_kv_caches[1];
+
+    if (vllm_key_cache.dim() != 4 || vllm_value_cache.dim() != 4) {
+      std::string errStr = "SEPARATE_KV expects 4D tensors, got " +
+                           std::to_string(vllm_key_cache.dim()) + "D and " +
+                           std::to_string(vllm_value_cache.dim()) + "D";
+      PyErr_SetString(PyExc_ValueError, errStr.c_str());
+      throw py::error_already_set();
+    }
+
+    if (vllm_key_cache.sizes() != vllm_value_cache.sizes()) {
+      std::string errStr = "K and V caches must have the same shape. Got K: " +
+                           torch::str(vllm_key_cache.sizes()) +
+                           ", V: " + torch::str(vllm_value_cache.sizes());
+      PyErr_SetString(PyExc_ValueError, errStr.c_str());
+      throw py::error_already_set();
+    }
+
+    batched_fused_single_layer_kv_transfer_separate_impl(
+        lmc_tensors, staging_cache, vllm_key_cache, vllm_value_cache,
+        slot_mapping_full, chunk_offsets, chunk_sizes, direction, token_major);
+  }
   return;
 }
 

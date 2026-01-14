@@ -59,19 +59,19 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
 }
 
 SingleLayerKVConfig prepare_single_layer_kv_config(
-    const torch::Tensor &lmc_cache, const torch::Tensor &vllm_cache,
-    const torch::Tensor &slot_mapping, bool direction, bool token_major,
+    const torch::Tensor &staging_cache, const torch::Tensor &vllm_cache,
+    const torch::Tensor &slot_mapping_full, bool direction, bool token_major,
     bool vllm_two_major) {
   SingleLayerKVConfig config;
 
-  config.lmc_cache_ptr =
-      get_kernel_ptr<uint8_t, const torch::Tensor>(lmc_cache);
+  config.staging_cache_ptr =
+      get_kernel_ptr<uint8_t, const torch::Tensor>(staging_cache);
   config.vllm_cache_ptr =
       get_kernel_ptr<uint8_t, const torch::Tensor>(vllm_cache);
   config.slot_mapping_ptr =
-      get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping);
+      get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping_full);
 
-  config.num_tokens = slot_mapping.size(0);
+  config.num_tokens = slot_mapping_full.size(0);
   config.num_heads = vllm_cache.size(-2);
   config.head_dims = vllm_cache.size(-1);
   config.block_size = vllm_cache.size(-3);
@@ -79,9 +79,9 @@ SingleLayerKVConfig prepare_single_layer_kv_config(
 
   bool is_mla = false;
   if (token_major) {
-    is_mla = lmc_cache.size(1) == 1;
+    is_mla = staging_cache.size(1) == 1;
   } else {
-    is_mla = lmc_cache.size(0) == 1;
+    is_mla = staging_cache.size(0) == 1;
   }
 
   if (is_mla) {
@@ -91,13 +91,14 @@ SingleLayerKVConfig prepare_single_layer_kv_config(
   }
 
   config.scalar_type = vllm_cache.scalar_type();
-  config.slot_type = slot_mapping.scalar_type();
+  config.slot_type = slot_mapping_full.scalar_type();
   config.socName = aclrtGetSocName();
 
   config.direction = direction;
   config.token_major = token_major;
 
-  config.lmc_buffer_size = static_cast<int64_t>(lmc_cache.nbytes());
+  config.staging_cache_buffer_size =
+      static_cast<int64_t>(staging_cache.nbytes());
   config.vllm_buffer_size = static_cast<int64_t>(vllm_cache.nbytes());
 
   return config;

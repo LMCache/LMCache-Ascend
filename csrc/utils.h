@@ -85,7 +85,7 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
 
 struct SingleLayerKVConfig {
 
-  uint8_t *lmc_cache_ptr;
+  uint8_t *staging_cache_ptr;
   uint8_t *vllm_cache_ptr;
   uint8_t *slot_mapping_ptr;
 
@@ -108,16 +108,22 @@ struct SingleLayerKVConfig {
   int64_t vllm_block_stride;
   int64_t vllm_value_offset;
 
-  int64_t lmc_buffer_size;
+  int64_t staging_cache_buffer_size;
   int64_t vllm_buffer_size;
 
   bool direction;
   bool token_major;
+
+  // SEPARATE_KV
+  uint8_t *vllm_value_cache_ptr;  // Pointer to the V cache
+  int64_t vllm_value_buffer_size; // Size of the V cache
+  int64_t key_block_stride;       // Block stride of the K cache
+  int64_t value_block_stride;     // Block stride of the V cache
 };
 
 SingleLayerKVConfig prepare_single_layer_kv_config(
-    const torch::Tensor &lmc_cache, const torch::Tensor &vllm_cache,
-    const torch::Tensor &slot_mapping, bool direction, bool token_major,
+    const torch::Tensor &staging_cache, const torch::Tensor &vllm_cache,
+    const torch::Tensor &slot_mapping_full, bool direction, bool token_major,
     bool vllm_two_major);
 
 void compute_single_layer_ub_params(SingleLayerKVConfig &config,

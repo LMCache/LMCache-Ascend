@@ -615,17 +615,19 @@ def test_single_layer_kernel(
     for layer_id in range(num_layers):
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache[layer_id],
+            [kv_cache[layer_id]],
             slot_mapping,
             True,
+            1,
             token_major,
             vllm_two_major,
         )
         lmc_ops.single_layer_kv_transfer(
             tmp_gpu_buffer,
-            kv_cache_new[layer_id],
+            [kv_cache_new[layer_id]],
             slot_mapping,
             False,
+            1,
             token_major,
             vllm_two_major,
         )
@@ -637,6 +639,110 @@ def test_single_layer_kernel(
         num_heads=num_heads,
         head_size=head_size,
         vllm_two_major=vllm_two_major,
+    )
+
+
+# TODO: MLA is not supported for layerwise yet
+@pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("num_blocks", [1000])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_heads", [8, 1])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("token_major", [True, False])
+def test_single_layer_kernel_separate_kv(
+    num_tokens,
+    num_layers,
+    num_blocks,
+    block_size,
+    num_heads,
+    head_size,
+    token_major,
+):
+    """
+    Test single_layer_kv_transfer with SEPARATE_KV format
+    - from_gpu: GPU KV cache -> staging buffer
+    - to_gpu: staging buffer -> GPU KV cache
+    - Verify: src == dst
+    """
+    device = "npu"
+    kvs = 2
+    hidden_dim_size = num_heads * head_size
+    dtype = torch.bfloat16
+
+    # Generate SEPARATE_KV format caches: List[Tuple[Tensor, Tensor]]
+    kv_cache_src = generate_kv_cache_paged_list_tuple_tensors(
+        num_blocks,
+        device,
+        num_layers,
+        num_heads,
+        head_size,
+        block_size,
+        dtype,
+    )
+
+    kv_cache_dst = generate_kv_cache_paged_list_tuple_tensors(
+        num_blocks,
+        device,
+        num_layers,
+        num_heads,
+        head_size,
+        block_size,
+        dtype,
+    )
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    # Staging buffer
+    if token_major:
+        tmp_gpu_buffer = torch.empty(
+            (num_tokens, kvs, hidden_dim_size), dtype=dtype, device=device
+        )
+    else:
+        tmp_gpu_buffer = torch.empty(
+            (kvs, num_tokens, hidden_dim_size), dtype=dtype, device=device
+        )
+
+    # Transfer test: GPU -> staging -> GPU
+    for layer_id in range(num_layers):
+        # Convert tuple to list for C++ interface
+        kv_list_src = list(kv_cache_src[layer_id])  # (K, V) -> [K, V]
+        kv_list_dst = list(kv_cache_dst[layer_id])
+
+        # from_gpu: GPU cache -> staging buffer
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_list_src,
+            slot_mapping,
+            True,  # from_gpu
+            2,  # kvcache_format = SEPARATE_KV
+            token_major,
+            False,  # vllm_two_major (not used for SEPARATE_KV)
+        )
+
+        # to_gpu: staging buffer -> GPU cache
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_list_dst,
+            slot_mapping,
+            False,  # to_gpu
+            2,  # kvcache_format = SEPARATE_KV
+            token_major,
+            False,
+        )
+
+    torch.npu.synchronize()
+
+    # Verify correctness
+    check_paged_kv_cache_equal(
+        kv_cache_src,
+        kv_cache_dst,
+        slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
+        vllm_two_major=False,  # Not applicable for SEPARATE_KV
+        kv_format=1,  # SEPARATE_KV
     )
 
 
@@ -771,9 +877,10 @@ def test_batched_fused_single_layer_kernel(
         for layer_id in range(num_layers):
             lmc_ops.single_layer_kv_transfer(
                 staging_cache_baseline,
-                kv_cache_src[layer_id],
+                [kv_cache_src[layer_id]],
                 slot_mapping_full,
                 True,
+                1,
                 token_major,
                 vllm_two_major,
             )
@@ -802,11 +909,12 @@ def test_batched_fused_single_layer_kernel(
             lmc_ops.batched_fused_single_layer_kv_transfer(
                 cpu_fused[layer_id],
                 staging_cache_fused,
-                kv_cache_src[layer_id],
+                [kv_cache_src[layer_id]],
                 slot_mapping_full,
                 chunk_offsets,
                 chunk_sizes,
                 True,
+                1,  # merged kv
                 token_major,
                 vllm_two_major,
             )
@@ -846,9 +954,10 @@ def test_batched_fused_single_layer_kernel(
 
             lmc_ops.single_layer_kv_transfer(
                 staging_cache_baseline,
-                kv_cache_dst_baseline[layer_id],
+                [kv_cache_dst_baseline[layer_id]],
                 slot_mapping_full,
                 False,
+                1,
                 token_major,
                 vllm_two_major,
             )
@@ -864,11 +973,12 @@ def test_batched_fused_single_layer_kernel(
             lmc_ops.batched_fused_single_layer_kv_transfer(
                 cpu_baseline[layer_id],
                 staging_cache_fused,
-                kv_cache_dst_fused[layer_id],
+                [kv_cache_dst_fused[layer_id]],
                 slot_mapping_full,
                 chunk_offsets,
                 chunk_sizes,
                 False,
+                1,  # merged kv
                 token_major,
                 vllm_two_major,
             )
@@ -909,4 +1019,153 @@ def test_batched_fused_single_layer_kernel(
         del staging_cache_fused
         del cpu_baseline
         del cpu_fused
+        torch.npu.empty_cache()
+
+@pytest.mark.parametrize("num_tokens", [256, 1024])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("num_chunks", [1, 3])
+@pytest.mark.parametrize("num_blocks", [1000])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_heads", [8])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("token_major", [True, False])
+def test_batched_fused_single_layer_kernel_separate_kv(
+    num_tokens,
+    num_layers,
+    num_chunks,
+    num_blocks,
+    block_size,
+    num_heads,
+    head_size,
+    token_major,
+):
+    """
+    Test for SEPARATE_KV format (K and V stored separately)
+    """
+    device = "npu"
+    kvs = 2
+    hidden_dim_size = num_heads * head_size
+    dtype = torch.bfloat16
+
+    # Compute chunk partitioning
+    base_chunk_size = num_tokens // num_chunks
+    remainder = num_tokens % num_chunks
+
+    chunk_sizes = []
+    chunk_offsets = []
+    current_offset = 0
+
+    for i in range(num_chunks):
+        size = base_chunk_size + (1 if i < remainder else 0)
+        chunk_sizes.append(size)
+        chunk_offsets.append(current_offset)
+        current_offset += size
+
+    # Generate KV caches with SEPARATE_KV format
+    kv_cache_src = generate_kv_cache_paged_list_tuple_tensors(
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+    )
+
+    kv_cache_dst = generate_kv_cache_paged_list_tuple_tensors(
+        num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
+    )
+
+    slot_mapping_list = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping_full = torch.tensor(slot_mapping_list, device=device)
+
+    def get_buffer_shape(n_tokens):
+        if token_major:
+            return (n_tokens, kvs, hidden_dim_size)
+        else:
+            return (kvs, n_tokens, hidden_dim_size)
+
+    full_buffer_shape = get_buffer_shape(num_tokens)
+
+    staging_cache = torch.empty(full_buffer_shape, dtype=dtype, device=device)
+
+    total_cpu_bytes = 0
+    for chunk_size in chunk_sizes:
+        chunk_bytes = chunk_size * kvs * hidden_dim_size * torch.finfo(dtype).bits // 8
+        total_cpu_bytes += chunk_bytes * num_layers
+    total_cpu_bytes = int(total_cpu_bytes * 1.2)
+
+    mem_allocator = PinMemoryAllocator(total_cpu_bytes)
+
+    try:
+        cpu_tensors = []
+        for layer_id in range(num_layers):
+            layer_tensors = []
+            for chunk_id in range(num_chunks):
+                chunk_shape = torch.Size(get_buffer_shape(chunk_sizes[chunk_id]))
+                memory_obj = mem_allocator.allocate(chunk_shape, dtype)
+                layer_tensors.append(memory_obj.tensor)
+            cpu_tensors.append(layer_tensors)
+
+        start_event = torch.npu.Event(enable_timing=True)
+        end_event = torch.npu.Event(enable_timing=True)
+        start_event.record()
+
+        for layer_id in range(num_layers):
+            kv_list = list(kv_cache_src[layer_id])  # (K, V) -> [K, V]
+
+            lmc_ops.batched_fused_single_layer_kv_transfer(
+                cpu_tensors[layer_id],
+                staging_cache,
+                kv_list,
+                slot_mapping_full,
+                chunk_offsets,
+                chunk_sizes,
+                True,  # from_gpu
+                2,  # kvcache_format = SEPARATE_KV
+                token_major,
+                False,
+            )
+
+        end_event.record()
+        torch.npu.synchronize()
+        from_gpu_time = start_event.elapsed_time(end_event)
+
+        start_event.record()
+
+        for layer_id in range(num_layers):
+            kv_list = list(kv_cache_dst[layer_id])
+
+            lmc_ops.batched_fused_single_layer_kv_transfer(
+                cpu_tensors[layer_id],
+                staging_cache,
+                kv_list,
+                slot_mapping_full,
+                chunk_offsets,
+                chunk_sizes,
+                False,  # to_gpu
+                2,  # kvcache_format = SEPARATE_KV
+                token_major,
+                False,
+            )
+
+        end_event.record()
+        torch.npu.synchronize()
+        to_gpu_time = start_event.elapsed_time(end_event)
+
+        print(
+            f"\n[SEPARATE_KV] from_gpu: {from_gpu_time:.3f} ms, "
+            f"to_gpu: {to_gpu_time:.3f} ms"
+        )
+
+        check_paged_kv_cache_equal(
+            kv_cache_src,
+            kv_cache_dst,
+            slot_mapping_full,
+            num_heads=num_heads,
+            head_size=head_size,
+            vllm_two_major=False,  
+            kv_format=1,  # SEPARATE_KV
+        )
+
+    finally:
+        mem_allocator.close()
+        del kv_cache_src
+        del kv_cache_dst
+        del staging_cache
+        del cpu_tensors
         torch.npu.empty_cache()

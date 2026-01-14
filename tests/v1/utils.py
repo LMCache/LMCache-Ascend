@@ -67,15 +67,18 @@ def generate_kv_cache_paged_list_tuple_tensors(
 
 
 def check_paged_kv_cache_equal(
-    left, right, slot_mapping, num_heads=8, head_size=128, vllm_two_major=True
+    left, right, slot_mapping, num_heads=8, head_size=128,
+    vllm_two_major=True, kv_format=0,
 ):
     """
-    check whether two paged kv caches are the same at slot_mapping
+    Check whether two paged kv caches are the same at slot_mapping.
+    Supports both MERGED_KV and SEPARATE_KV formats.
     """
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
     for left_kv, right_kv in zip(left, right, strict=False):
-        if not vllm_two_major:
+        # MERGED_KV only
+        if kv_format == 0 and not vllm_two_major:
             left_kv = left_kv.transpose(0, 1)
             right_kv = right_kv.transpose(0, 1)
 
