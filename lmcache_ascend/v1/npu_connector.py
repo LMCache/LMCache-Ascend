@@ -22,7 +22,7 @@ import lmcache_ascend.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 _IS_310P = None
-
+ENGINE_NAME = "vllm-instance"
 
 def is_310p():
     global _IS_310P
