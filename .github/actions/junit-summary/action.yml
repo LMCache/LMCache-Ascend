@@ -1,0 +1,95 @@
+name: "JUnit Test Summary"
+description: "Publish colored JUnit test summary with failure listing and stack traces"
+inputs:
+  junit-path:
+    description: "Path to JUnit XML file"
+    required: true
+    default: "test-results.xml"
+  ignore-missing:
+    description: "If true, the step will not fail if the XML file is missing (logs a warning instead)"
+    required: false
+    default: "false"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Generate JUnit Summary
+      shell: python
+      env:
+        XML_PATH: ${{ inputs.junit-path }}
+        IGNORE_MISSING: ${{ inputs.ignore-missing }}
+        GITHUB_STEP_SUMMARY: ${{ env.GITHUB_STEP_SUMMARY }}
+      run: |
+        import os
+        import sys
+        import xml.etree.ElementTree as ET
+
+        # --- Configuration ---
+        xml_path = os.environ.get("XML_PATH")
+        ignore_missing = os.environ.get("IGNORE_MISSING") == "true"
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+
+        def write_summary(content):
+            """Helper to append to the GitHub summary file."""
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(content + "\n")
+
+        # --- 1. File Validation ---
+        if not os.path.exists(xml_path):
+            message = f"### ⚠️ JUnit XML not found: `{xml_path}`"
+            write_summary(message)
+            print(f"::warning::{message}")
+            
+            # Fail the step unless ignore_missing is true
+            if ignore_missing:
+                sys.exit(0)
+            else:
+                sys.exit(1)
+
+        try:
+            tree = ET.parse(xml_path)
+            root = tree.getroot()
+        except ET.ParseError as e:
+            write_summary(f"### ❌ Error parsing JUnit XML")
+            write_summary(f"File: `{xml_path}` is not valid XML.")
+            print(f"::error::XML Parse Error: {e}")
+            sys.exit(1)
+
+        # --- 2. Stats Collection ---
+        # Handle both <testsuites> (root) and single <testsuite> (root)
+        testsuites = []
+        if root.tag == "testsuites":
+            testsuites = root.findall(".//testsuite")
+        elif root.tag == "testsuite":
+            testsuites = [root]
+        
+        # Fallback: if 'testsuites' is root but has no children, or other structures
+        if not testsuites and root.tag == "testsuite":
+             testsuites = [root]
+
+        total = 0
+        failures = 0
+        errors = 0
+        skipped = 0
+
+        for suite in testsuites:
+            # Safely cast to int, defaulting to 0 if attribute is missing
+            total += int(suite.attrib.get("tests", 0))
+            failures += int(suite.attrib.get("failures", 0))
+            errors += int(suite.attrib.get("errors", 0))
+            skipped += int(suite.attrib.get("skipped", 0))
+
+        # --- 3. Output Generation ---
+        write_summary("## 🧪 Unit Test Results")
+        
+        if failures == 0 and errors == 0:
+            write_summary("### ✅ All tests passed")
+        else:
+            write_summary("### ❌ Test failures detected")
+
+        write_summary(f"| Metric | Count |")
+        write_summary(f"| --- | --- |")
+        write_summary(f"| Total | {total} |")
+        write_summary(f"| Failures | {failures} |")
+        write_summary(f"| Errors | {errors} |")
+        write_summary
