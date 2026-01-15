@@ -202,54 +202,66 @@ void multi_layer_kv_transfer_unilateral(
 };
 
 void single_layer_kv_transfer(
-    torch::Tensor &lmc_key_value_cache,  // [num_tokens, 2, num_heads*head_size]
-                                         // or
-                                         // [2, num_tokens, num_heads*head_size]
-    torch::Tensor &vllm_key_value_cache, // [2, num_blocks, block_size,
-                                         // num_heads, head_size]
-    torch::Tensor &slot_mapping,         // [num_tokens]
-    const bool direction, // false: LMCache to PagedBuffer, true: PagedBuffer to
-                          // LMCache
-    const bool token_major,   // true: lmc_key_value_cache is [num_tokens, 2,
-                              // num_heads*head_size] false: lmc_key_value_cache
-                              // is [2, num_tokens, num_heads*head_size]
-    const bool vllm_two_major // true: vllm_key_value_cache is [2, num_blocks,
-                              // block_size, num_heads, head_size] false:
-                              // vllm_key_value_cache is [num_blocks, 2,
-                              // block_size, num_heads, head_size]
+    torch::Tensor
+        &lmc_key_value_cache, // [num_tokens, 2, num_heads*head_size]
+                              // or [2, num_tokens, num_heads*head_size]
+    std::vector<torch::Tensor> &vllm_kv_caches,
+    // SEPARATE_KV: list[k_tensor, v_tensor]
+    // k_tensor/v_tensor = [num_blocks, block_size, num_heads, head_size]
+    // MERGED_KV:
+    // vllm_two_major=true:  [2, num_blocks, block_size, num_heads, head_size]
+    // vllm_two_major=false: [num_blocks, 2, block_size, num_heads, head_size]
+    torch::Tensor &slot_mapping, // [num_tokens]
+    const bool direction, // false: LMCache -> Paged, true: Paged -> LMCache
+    const int kvcache_format_raw, // 1: MERGED_KV, 2: SEPARATE_KV
+    const bool
+        token_major, // true: [tokens, 2, hidden], false: [2, tokens, hidden]
+    const bool vllm_two_major // true: [2, blocks, ...], false: [blocks, 2, ...]
+                              // (only for MERGED_KV)
 ) {
-  SingleLayerKVConfig config = prepare_single_layer_kv_config(
-      lmc_key_value_cache, vllm_key_value_cache, slot_mapping, direction,
-      token_major, vllm_two_major);
+  bool is_separate = validate_vllm_caches(vllm_kv_caches, kvcache_format_raw);
 
   const c10::OptionalDeviceGuard slot_device_guard(device_of(slot_mapping));
-  compute_single_layer_ub_params(config, vllm_key_value_cache);
 
-  // precompute the strides for lmc_buffer & vllm_buffer
-  compute_single_layer_strides(config, lmc_key_value_cache,
-                               vllm_key_value_cache, token_major,
-                               vllm_two_major);
+  SingleLayerKVConfig config = prepare_single_layer_kv_config(
+      lmc_key_value_cache, vllm_kv_caches, slot_mapping, direction, token_major,
+      vllm_two_major, is_separate);
 
   at_npu::native::OpCommand cmd;
-  cmd.Name("single_layer_kv_transfer_kernel_v2");
-  cmd.SetCustomHandler([config]() -> int {
-    auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
-    auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
+  cmd.Name(is_separate ? "single_layer_kv_transfer_kernel_v2_separate"
+                       : "single_layer_kv_transfer_kernel_v2");
 
-    kvcache_ops::single_layer_kv_transfer_kernel_v2(
-        dtype_num, slot_num, config.aiv_num, config.stream,
-        config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-        config.vllm_block_stride, config.vllm_value_offset,
-        config.vllm_buffer_size, config.lmc_token_stride,
-        config.lmc_value_offset, config.lmc_buffer_size,
-        config.max_tokens_per_loop, config.num_heads, config.head_dims,
-        config.num_tokens, config.block_size, config.direction,
-        config.token_major);
+  cmd.SetCustomHandler([config, is_separate]() -> int {
+    if (!is_separate) {
+      // Merged KV Kernel
+      kvcache_ops::single_layer_kv_transfer_kernel_v2(
+          config.ub_params.scalar_type_num, config.ub_params.slot_type_num,
+          config.ub_params.aiv_num, config.ub_params.stream,
+          config.ptrs.lmc_ptr, config.ptrs.vllm_k_ptr,
+          config.ptrs.slot_mapping_ptr, config.strides.vllm_k_stride,
+          config.strides.vllm_val_offset, config.strides.vllm_k_bytes,
+          config.strides.lmc_token_stride, config.strides.lmc_val_offset,
+          config.strides.lmc_bytes, config.ub_params.max_tokens_per_loop,
+          config.dims.num_heads, config.dims.head_dims, config.dims.num_tokens,
+          config.dims.block_size, config.direction, config.token_major);
+    } else {
+      // Separate KV Kernel
+      kvcache_ops::single_layer_kv_transfer_kernel_v2_separate(
+          config.ub_params.scalar_type_num, config.ub_params.slot_type_num,
+          config.ub_params.aiv_num, config.ub_params.stream,
+          config.ptrs.lmc_ptr, config.ptrs.vllm_k_ptr, config.ptrs.vllm_v_ptr,
+          config.ptrs.slot_mapping_ptr, config.strides.vllm_k_stride,
+          config.strides.vllm_v_stride, config.strides.vllm_k_bytes,
+          config.strides.vllm_v_bytes, config.strides.lmc_token_stride,
+          config.strides.lmc_val_offset, config.strides.lmc_bytes,
+          config.ub_params.max_tokens_per_loop, config.dims.num_heads,
+          config.dims.head_dims, config.dims.num_tokens, config.dims.block_size,
+          config.direction, config.token_major);
+    }
     return 0;
   });
   cmd.Run();
-  return;
-};
+}
 
 void batched_fused_single_layer_kv_transfer(
     std::vector<torch::Tensor>
@@ -260,172 +272,69 @@ void batched_fused_single_layer_kv_transfer(
                                   // token_major=true:  [num_tokens, 2,
                                   // num_heads*head_size] token_major=false: [2,
                                   // num_tokens, num_heads*head_size]
-    torch::Tensor
-        &vllm_key_value_cache,        // vllm_two_major=true:  [2, num_blocks,
-                                      // block_size, num_heads, head_size]
-                                      // vllm_two_major=false: [num_blocks, 2,
-                                      // block_size, num_heads, head_size]
+    std::vector<torch::Tensor>    // separate format： list[k_tensor, v_tensor]
+        &vllm_kv_caches, // k_tensor/v_tensor = [num_blocks，block_size,
+                         // num_heads, head_size]
+                         //  Mergeed format：
+                         //  vllm_two_major=true:  [2, num_blocks, block_size,
+                         //  num_heads, head_size] vllm_two_major=false:
+                         //  [num_blocks, 2, block_size, num_heads, head_size]
     torch::Tensor &slot_mapping_full, // [num_tokens]
     std::vector<int64_t>
         &chunk_offsets,                // token offset in staging for each chunk
     std::vector<int64_t> &chunk_sizes, // token count for each chunk
     const bool direction, // false: CPU -> staging -> paged (to_gpu) true: paged
                           // -> staging -> CPU (from_gpu)
+    const int kvcache_format_raw,
     const bool
         token_major, // true: [tokens, 2, hidden], false: [2, tokens, hidden]
     const bool vllm_two_major // true: [2, blocks, ...], false: [blocks, 2, ...]
 ) {
-  size_t num_chunks = lmc_tensors.size();
-  if (chunk_offsets.size() != num_chunks || chunk_sizes.size() != num_chunks) {
-    PyErr_SetString(
-        PyExc_RuntimeError,
-        "chunk_offsets and chunk_sizes must have the same size as lmc_tensors");
-    throw py::error_already_set();
-  }
 
-  if (num_chunks == 0) {
-    PyErr_SetString(
-        PyExc_ValueError,
-        "num_chunks must be greater than 0. Check 'starts' and 'ends' inputs.");
-    throw py::error_already_set();
-  }
-
-  for (size_t i = 0; i < num_chunks; ++i) {
-    if (lmc_tensors[i].is_cuda() ||
-        lmc_tensors[i].device().type() == c10::DeviceType::PrivateUse1) {
-      std::string errStr = "lmc_tensors[" + std::to_string(i) +
-                           "] must be on CPU (pinned memory)";
-      PyErr_SetString(PyExc_RuntimeError, errStr.c_str());
-      throw py::error_already_set();
-    }
-  }
-
-  SingleLayerKVConfig config = prepare_single_layer_kv_config(
-      staging_cache, vllm_key_value_cache, slot_mapping_full, direction,
-      token_major, vllm_two_major);
+  bool is_separate = validate_vllm_caches(vllm_kv_caches, kvcache_format_raw);
 
   const c10::OptionalDeviceGuard slot_device_guard(
       device_of(slot_mapping_full));
-  compute_single_layer_ub_params(config, vllm_key_value_cache);
 
-  compute_single_layer_strides(config, staging_cache, vllm_key_value_cache,
-                               token_major, vllm_two_major);
+  SingleLayerKVConfig config = prepare_single_layer_kv_config(
+      staging_cache, vllm_kv_caches, slot_mapping_full, direction, token_major,
+      vllm_two_major, is_separate);
 
   int64_t element_size = staging_cache.element_size();
-  int64_t bytes_per_token = config.lmc_token_stride * element_size;
-  int64_t staging_v_plane_offset = config.lmc_value_offset * element_size;
 
-  std::vector<uint8_t *> lmc_ptrs(num_chunks);
-  std::vector<int64_t> lmc_copy_sizes(num_chunks);
-  std::vector<int64_t> lmc_v_offsets(num_chunks);
+  if (!is_separate) {
+    auto launcher = [config](bool is_gather) {
+      kvcache_ops::single_layer_kv_transfer_kernel_v2(
+          config.ub_params.scalar_type_num, config.ub_params.slot_type_num,
+          config.ub_params.aiv_num, config.ub_params.stream,
+          config.ptrs.lmc_ptr, config.ptrs.vllm_k_ptr,
+          config.ptrs.slot_mapping_ptr, config.strides.vllm_k_stride,
+          config.strides.vllm_val_offset, config.strides.vllm_k_bytes,
+          config.strides.lmc_token_stride, config.strides.lmc_val_offset,
+          config.strides.lmc_bytes, config.ub_params.max_tokens_per_loop,
+          config.dims.num_heads, config.dims.head_dims, config.dims.num_tokens,
+          config.dims.block_size, is_gather, config.token_major);
+    };
+    run_batched_fused_transfer(config, lmc_tensors, chunk_offsets, chunk_sizes,
+                               element_size, launcher);
 
-  for (size_t i = 0; i < num_chunks; ++i) {
-    lmc_ptrs[i] = static_cast<uint8_t *>(lmc_tensors[i].data_ptr());
-    lmc_copy_sizes[i] = chunk_sizes[i] * bytes_per_token;
-
-    if (!token_major) {
-      lmc_v_offsets[i] = lmc_tensors[i].stride(0) * element_size;
-    }
+  } else {
+    auto launcher = [config](bool is_gather) {
+      kvcache_ops::single_layer_kv_transfer_kernel_v2_separate(
+          config.ub_params.scalar_type_num, config.ub_params.slot_type_num,
+          config.ub_params.aiv_num, config.ub_params.stream,
+          config.ptrs.lmc_ptr, config.ptrs.vllm_k_ptr, config.ptrs.vllm_v_ptr,
+          config.ptrs.slot_mapping_ptr, config.strides.vllm_k_stride,
+          config.strides.vllm_v_stride, config.strides.vllm_k_bytes,
+          config.strides.vllm_v_bytes, config.strides.lmc_token_stride,
+          config.strides.lmc_val_offset, config.strides.lmc_bytes,
+          config.ub_params.max_tokens_per_loop, config.dims.num_heads,
+          config.dims.head_dims, config.dims.num_tokens, config.dims.block_size,
+          is_gather, config.token_major);
+    };
+    run_batched_fused_transfer(config, lmc_tensors, chunk_offsets, chunk_sizes,
+                               element_size, launcher);
   }
-
-  at_npu::native::OpCommand cmd;
-  cmd.Name("batched_fused_single_layer_kv_transfer_kernel_v2");
-  cmd.SetCustomHandler([config, num_chunks, lmc_ptrs, lmc_copy_sizes,
-                        chunk_offsets, bytes_per_token, staging_v_plane_offset,
-                        lmc_v_offsets]() -> int {
-    auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
-    auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
-    aclError ret;
-
-    // to_gpu (CPU -> staging -> paged)
-    if (!config.direction) {
-      // Step 1: Multiple H2D memcpy
-      for (size_t i = 0; i < num_chunks; ++i) {
-        uint8_t *staging_base =
-            config.lmc_cache_ptr + chunk_offsets[i] * bytes_per_token;
-        int64_t chunk_kv_bytes = lmc_copy_sizes[i];
-
-        if (config.token_major) {
-          ret = aclrtMemcpyAsync(staging_base, chunk_kv_bytes, lmc_ptrs[i],
-                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy failed for chunk ", i,
-                      ", ret=", ret);
-        } else {
-          // K plane
-          ret = aclrtMemcpyAsync(staging_base, chunk_kv_bytes, lmc_ptrs[i],
-                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (K) failed for chunk ",
-                      i, ", ret=", ret);
-
-          // V plane
-          ret = aclrtMemcpyAsync(staging_base + staging_v_plane_offset,
-                                 chunk_kv_bytes, lmc_ptrs[i] + lmc_v_offsets[i],
-                                 chunk_kv_bytes, ACL_MEMCPY_HOST_TO_DEVICE,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "H2D memcpy (V) failed for chunk ",
-                      i, ", ret=", ret);
-        }
-      }
-
-      // Step 2: Scatter (staging -> paged KV cache)
-      kvcache_ops::single_layer_kv_transfer_kernel_v2(
-          dtype_num, slot_num, config.aiv_num, config.stream,
-          config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-          config.vllm_block_stride, config.vllm_value_offset,
-          config.vllm_buffer_size, config.lmc_token_stride,
-          config.lmc_value_offset, config.lmc_buffer_size,
-          config.max_tokens_per_loop, config.num_heads, config.head_dims,
-          config.num_tokens, config.block_size, false, config.token_major);
-    }
-    // from_gpu (paged -> staging -> CPU)
-    else {
-      // Step 1: Gather (paged -> staging)
-      kvcache_ops::single_layer_kv_transfer_kernel_v2(
-          dtype_num, slot_num, config.aiv_num, config.stream,
-          config.lmc_cache_ptr, config.vllm_cache_ptr, config.slot_mapping_ptr,
-          config.vllm_block_stride, config.vllm_value_offset,
-          config.vllm_buffer_size, config.lmc_token_stride,
-          config.lmc_value_offset, config.lmc_buffer_size,
-          config.max_tokens_per_loop, config.num_heads, config.head_dims,
-          config.num_tokens, config.block_size, true, config.token_major);
-
-      // Step 2: Multiple D2H memcpy
-      for (size_t i = 0; i < num_chunks; ++i) {
-        uint8_t *staging_base =
-            config.lmc_cache_ptr + chunk_offsets[i] * bytes_per_token;
-        int64_t chunk_kv_bytes = lmc_copy_sizes[i];
-
-        if (config.token_major) {
-          ret = aclrtMemcpyAsync(lmc_ptrs[i], chunk_kv_bytes, staging_base,
-                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy failed for chunk ", i,
-                      ", ret=", ret);
-        } else {
-          // K
-          ret = aclrtMemcpyAsync(lmc_ptrs[i], chunk_kv_bytes, staging_base,
-                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (K) failed for chunk ",
-                      i, ", ret=", ret);
-
-          // V
-          ret = aclrtMemcpyAsync(lmc_ptrs[i] + lmc_v_offsets[i], chunk_kv_bytes,
-                                 staging_base + staging_v_plane_offset,
-                                 chunk_kv_bytes, ACL_MEMCPY_DEVICE_TO_HOST,
-                                 config.stream);
-          TORCH_CHECK(ret == ACL_ERROR_NONE, "D2H memcpy (V) failed for chunk ",
-                      i, ", ret=", ret);
-        }
-      }
-    }
-
-    return 0;
-  });
-  cmd.Run();
-  return;
 }
 
 void load_and_reshape_flash(
