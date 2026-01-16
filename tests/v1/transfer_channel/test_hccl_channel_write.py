@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 # Standard
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
@@ -6,6 +7,11 @@ import multiprocessing as mp
 import sys
 import time
 import warnings
+
+# First Party
+from tests.bootstrap import prepare_environment
+
+prepare_environment()
 
 # Third Party
 from lmcache.logging import init_logger
@@ -18,9 +24,6 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
-from tests.bootstrap import prepare_environment
-
-prepare_environment()
 
 
 @dataclass

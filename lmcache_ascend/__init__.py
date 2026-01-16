@@ -6,14 +6,10 @@ from lmcache_ascend import _build_info
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.3.12"
-
-<<<<<<< Updated upstream
-=======
 LMCACHE_ASCEND_PATCHED = False
 
->>>>>>> Stashed changes
 # Check if we've already patched to avoid redundant work
-if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
+if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "pytorch":
         # Standard
         from functools import partial
@@ -124,4 +120,4 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
     else:
         raise ValueError("Unsupported framework!")
 
-    os.environ["LMCACHE_ASCEND_PATCHED"] = "1"
+    LMCACHE_ASCEND_PATCHED = True

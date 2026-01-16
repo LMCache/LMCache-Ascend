@@ -18,12 +18,12 @@ This example demonstrates how to run LMCache with P2P KV Cache Sharing using HCC
     ```bash
     VLLM_REPO=https://github.com/vllm-project/vllm.git
     VLLM_TAG=v0.11.0
-    git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /home/amory/lmcache/vllm
-    cd /home/amory/lmcache/vllm
+    git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/lmcache/vllm
+    cd /workspace/lmcache/vllm
     # Apply transfer performance fix on ARM in anticipation of https://github.com/vllm-project/vllm/pull/30228
-    git apply /home/amory/lmcache/LMCache-Ascend/docker/vllm-utils.diff
+    git apply /workspace/lmcache/LMCache-Ascend/docker/vllm-utils.diff
     # NOTE: There is an Ascend Triton but we don't currently support it properly.
-    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /home/amory/lmcache/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /workspace/lmcache/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
         python3 -m pip uninstall -y triton
     ```
 - Install VLLM-Ascend v0.11.0
@@ -33,32 +33,32 @@ This example demonstrates how to run LMCache with P2P KV Cache Sharing using HCC
 
     VLLM_ASCEND_REPO=https://github.com/vllm-project/vllm-ascend.git
     VLLM_ASCEND_TAG=v0.11.0
-    git clone --depth 1 $VLLM_ASCEND_REPO --branch $VLLM_ASCEND_TAG /home/amory/lmcache/vllm-ascend
-    cd /home/amory/lmcache/vllm-ascend
+    git clone --depth 1 $VLLM_ASCEND_REPO --branch $VLLM_ASCEND_TAG /workspace/lmcache/vllm-ascend
+    cd /workspace/lmcache/vllm-ascend
     # Apply fix for vllm scheduler to postpone scheduling of async fetched sequences
-    git apply /home/amory/lmcache/LMCache-Ascend/docker/vllm-sched.diff
+    git apply /workspace/lmcache/LMCache-Ascend/docker/vllm-sched.diff
 
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
-      python3 -m pip install -v -e /home/amory/lmcache/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
+      python3 -m pip install -v -e /workspace/lmcache/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
     ```
 - Install LMcache
     ```bash
     LMCACHE_REPO=https://github.com/LMCache/LMCache.git
     LMCACHE_TAG=v0.3.12
-    git clone --depth 1 $LMCACHE_REPO --branch $LMCACHE_TAG /home/amory/lmcache/LMCache
+    git clone --depth 1 $LMCACHE_REPO --branch $LMCACHE_TAG /workspace/lmcache/LMCache
     # our build is based on arm64
-    sed -i "s/^infinistore$/infinistore; platform_machine == 'x86_64'/" /home/amory/lmcache/LMCache/requirements/common.txt
+    sed -i "s/^infinistore$/infinistore; platform_machine == 'x86_64'/" /workspace/lmcache/LMCache/requirements/common.txt
 
     # To support P2P sharing with TP>1, patch KV controller in anticipation of https://github.com/LMCache/LMCache/pull/2406
-    git apply /home/amory/lmcache/LMCache-Ascend/docker/lmcache-controller.diff
+    git apply /workspace/lmcache/LMCache-Ascend/docker/lmcache-controller.diff
 
-    export NO_CUDA_EXT=1 && python3 -m pip install -v -e /home/amory/lmcache/LMCache
+    export NO_CUDA_EXT=1 && python3 -m pip install -v -e /workspace/lmcache/LMCache
     ```
 - Install LMCache-Ascend
     ```bash
-    cd /home/amory/lmcache/LMCache-Ascend
+    cd /workspace/lmcache/LMCache-Ascend
     git submodule update --init --recursive
 
     pip install -e . --no-build-isolation
@@ -78,7 +78,7 @@ PYTHONHASHSEED=123 lmcache_controller --host 0.0.0.0 --port 9000 --monitor-ports
 Launch instance 1
 
 ```bash
-export LMCACHE_CONFIG_FILE=/home/amory/lmcache/LMCache-Ascend/examples/kv_cache_reuse/share_across_instances/p2p_sharing/example1.yaml
+export LMCACHE_CONFIG_FILE=/workspace/lmcache/LMCache-Ascend/examples/kv_cache_reuse/share_across_instances/p2p_sharing/example1.yaml
 export ASCEND_RT_VISIBLE_DEVICES=2,3
 export VLLM_ENABLE_V1_MULTIPROCESSING=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -102,7 +102,7 @@ python \
 
 Launch instance 2
 ```bash
-export LMCACHE_CONFIG_FILE=/home/amory/lmcache/LMCache-Ascend/examples/kv_cache_reuse/share_across_instances/p2p_sharing/example2.yaml
+export LMCACHE_CONFIG_FILE=/workspace/lmcache/LMCache-Ascend/examples/kv_cache_reuse/share_across_instances/p2p_sharing/example2.yaml
 export ASCEND_RT_VISIBLE_DEVICES=6,7
 export VLLM_ENABLE_V1_MULTIPROCESSING=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn

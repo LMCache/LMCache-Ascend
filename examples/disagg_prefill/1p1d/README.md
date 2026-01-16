@@ -55,7 +55,7 @@ This example demonstrates how to run LMCache with disaggregated prefill using HC
     ```
 - Install LMCache-Ascend
     ```bash
-    cd /workspace-Ascend
+    cd /workspace/LMCache-Ascend
     git submodule update --init --recursive
     
     pip install -e . --no-build-isolation
