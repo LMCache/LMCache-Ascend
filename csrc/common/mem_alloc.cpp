@@ -7,7 +7,6 @@
 #include <numaif.h>
 #include <string>
 #include <sys/mman.h>
-
 uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
   void *ptr = nullptr;
   // no flags

@@ -1,0 +1,19 @@
+diff --git a/vllm_ascend/core/scheduler.py b/vllm_ascend/core/scheduler.py
+index cc6822f..88c22e9 100644
+--- a/vllm_ascend/core/scheduler.py
++++ b/vllm_ascend/core/scheduler.py
+@@ -150,6 +150,14 @@ class AscendScheduler(Scheduler):
+                         self.connector.get_num_new_matched_tokens(
+                             request, num_new_local_computed_tokens))
+ 
++                    # TODO: newly added, alo present in vllm scheduler
++                    if num_external_computed_tokens is None:
++                        # The request cannot be scheduled because
++                        # the KVConnector couldn't determine
++                        # the number of matched tokens.
++                        skip_cur_request()
++                        continue
++
+                 # Total computed tokens (local + external).
+                 num_computed_tokens = (num_new_local_computed_tokens +
+                                        num_external_computed_tokens)
