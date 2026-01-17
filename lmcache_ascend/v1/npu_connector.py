@@ -10,7 +10,7 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
 import torch
 
 # First Party
@@ -86,7 +86,12 @@ class KVCacheFormat(Enum):
             if use_mla or is_mla_shape:
                 return KVCacheFormat.MERGED_KV
 
-            if shape[0] == 2:
+            # Flash Attention：[2, num_blocks, block_size, num_heads, head_size]
+            if ndim == 5 and shape[0] == 2:
+                return KVCacheFormat.MERGED_KV
+
+            # Flash Infer：[num_blocks, 2, block_size, num_heads, head_size]
+            if ndim == 5 and shape[1] == 2:
                 return KVCacheFormat.MERGED_KV
 
         return KVCacheFormat.UNDEFINED
@@ -465,6 +470,97 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
 
 class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
+    def __init__(
+        self,
+        hidden_dim_size: int,
+        num_layers: int,
+        use_gpu: bool = False,
+        **kwargs,
+    ):
+        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
+
+        self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
+
+        # layerwise mode currently does not support MLA
+        self.use_mla = kwargs.get("use_mla", False)
+
+    def _lazy_initialize_buffer(self, kv_caches):
+        """
+        Lazily initialize the GPU buffer allocator if it is not initialized yet.
+        Currently, we use the `kv_caches` (kv cache pointer) to determine
+        the gpu buffer size in gpu connector.
+        Also, the first request might be a bit slower due to buffer creation.
+
+        Supports both legacy formats and new SEPARATE_KV format:
+        - Legacy MERGED_KV: [2, num_blocks, block_size, num_heads, head_size]
+        - New SEPARATE_KV: tuple(key_tensor, value_tensor) where each is
+          [num_blocks, block_size, num_heads, head_size]
+        """
+        if self.use_gpu and self.gpu_buffer_allocator is None:
+            logger.info("Lazily initializing GPU buffer.")
+
+            self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
+
+            if self.kv_format == KVCacheFormat.UNDEFINED:
+                raise ValueError(
+                    "Undefined KV cache format detected. "
+                    "Unable to determine the format of input kv_caches."
+                )
+
+            logger.info(f"Detected KV cache format: {self.kv_format.name}")
+
+            first_layer_cache = kv_caches[0]
+
+            if self.kv_format == KVCacheFormat.SEPARATE_KV:
+                key_tensor = first_layer_cache[0]
+                value_tensor = first_layer_cache[1]
+
+                assert key_tensor.shape == value_tensor.shape, (
+                    f"Key and Value tensors must have identical shapes, "
+                    f"got key={key_tensor.shape}, value={value_tensor.shape}"
+                )
+
+                k_cache_shape_per_layer = key_tensor.shape
+                self.vllm_two_major = False
+
+            elif self.kv_format == KVCacheFormat.MERGED_KV:
+                assert (
+                    first_layer_cache.shape[0] == 2 or first_layer_cache.shape[1] == 2
+                ), (
+                    "MERGED_KV format should have shape [num_layers, 2, num_blocks, "
+                    "block_size, num_heads, head_size] or "
+                    "[num_layers, num_blocks, 2, block_size, num_heads, head_size]"
+                    f"Got shape: {first_layer_cache.shape}"
+                )
+
+                self.vllm_two_major = first_layer_cache.shape[0] == 2
+
+                if self.vllm_two_major:
+                    # Flash Attention: [2, num_blocks, block_size, num_heads, head_size]
+                    k_cache_shape_per_layer = first_layer_cache[0].shape
+                else:
+                    # Flash Infer: [num_blocks, 2, block_size, num_heads, head_size]
+                    k_cache_shape_per_layer = first_layer_cache[:, 0].shape
+            else:
+                raise ValueError(f"Unsupported KV cache format: {self.kv_format}")
+
+            max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
+
+            logger.info(
+                f"Lazily initializing GPU buffer:\n"
+                f"  - Format: {self.kv_format.name}\n"
+                f"  - Key cache shape per layer: {k_cache_shape_per_layer}\n"
+                f"  - Max tokens: {max_tokens}"
+            )
+
+            num_elements_key = k_cache_shape_per_layer.numel()
+            num_elements = num_elements_key * 2
+            gpu_buffer_size = num_elements * self.element_size
+
+            self.gpu_buffer_allocator = GPUMemoryAllocator(
+                gpu_buffer_size, device=self.device
+            )
+
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
         """
         This function is a generator that moves the KV cache from the memory
@@ -549,15 +645,23 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                         assert memory_obj.metadata.fmt == MemoryFormat.KV_T2D
                         cpu_tensors.append(memory_obj.tensor)
 
+                    # Unified kvcaches
+                    kv_cache = self.kvcaches[layer_id]
+                    if isinstance(kv_cache, tuple):
+                        kv_list = list(kv_cache)  # (K, V) → [K, V]
+                    else:
+                        kv_list = [kv_cache]  # tensor → [tensor]
+
                     # Fused transfer: N H2D memcpy + 1 scatter kernel
                     lmc_ops.batched_fused_single_layer_kv_transfer(
                         cpu_tensors,  # CPU memory objects
                         tmp_gpu_buffer_obj.tensor,  # GPU staging buffer
-                        self.kvcaches[layer_id],  # paged KV cache
+                        kv_list,
                         slot_mapping_full,
                         chunk_offsets,  # offset for each chunk
                         chunk_sizes,  # size for each chunk
                         False,  # to_gpu
+                        self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                         True,  # token_major
                         self.vllm_two_major,
                     )
@@ -567,11 +671,20 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                         starts, ends, memory_objs_layer, strict=False
                     ):
                         assert memory_obj.tensor is not None
+
+                        # Unified kvcaches
+                        kv_cache = self.kvcaches[layer_id]
+                        if isinstance(kv_cache, tuple):
+                            kv_list = list(kv_cache)
+                        else:
+                            kv_list = [kv_cache]
+
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id],
+                            kv_list,
                             slot_mapping[start:end],
                             False,
+                            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                             True,
                             self.vllm_two_major,
                         )
@@ -679,15 +792,23 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                         assert memory_obj.tensor is not None
                         cpu_tensors.append(memory_obj.tensor)
 
+                    # Unified kvcaches
+                    kv_cache = self.kvcaches[layer_id]
+                    if isinstance(kv_cache, tuple):
+                        kv_list = list(kv_cache)
+                    else:
+                        kv_list = [kv_cache]
+
                     # Fused transfer: 1 scatter kernel + N D2H memcpy
                     lmc_ops.batched_fused_single_layer_kv_transfer(
                         cpu_tensors,
                         tmp_gpu_buffer_obj.tensor,
-                        self.kvcaches[layer_id],
+                        kv_list,
                         slot_mapping_full,
                         chunk_offsets,
                         chunk_sizes,
                         True,  # from_gpu
+                        self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                         True,  # token_major
                         self.vllm_two_major,
                     )
@@ -696,11 +817,19 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                         starts, ends, memory_objs_layer, strict=False
                     ):
                         assert memory_obj.tensor is not None
+
+                        kv_cache = self.kvcaches[layer_id]
+                        if isinstance(kv_cache, tuple):
+                            kv_list = list(kv_cache)
+                        else:
+                            kv_list = [kv_cache]
+
                         lmc_ops.single_layer_kv_transfer(
                             memory_obj.tensor,
-                            self.kvcaches[layer_id],
+                            kv_list,
                             slot_mapping[start:end],
                             True,
+                            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                             True,
                             self.vllm_two_major,
                         )
