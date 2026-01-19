@@ -44,10 +44,38 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         - chunk_size: The MAX size of the chunk to be copied to GPU.
         - dtype: The data type of the intermediate buffer.
         """
-        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
+        self.is_310p = is_310p()
+        if self.is_310p:
+            self.hidden_dim_size = hidden_dim_size
+            self.num_layers = num_layers
+            self.kv_cache_pointers = torch.empty(
+                num_layers, dtype=torch.int64, device="cpu"
+            )
+            # Not sure we need a dict here. Maybe a single GPU connector always
+            # works with a single device?
+            self.kv_cache_pointers_on_gpu: dict[int, torch.Tensor] = {}
+            self.page_buffer_size = 0
+
+            self.kvcaches: Optional[List[torch.Tensor]] = None
+
+            self.gpu_buffer: Optional[torch.Tensor] = None
+            self.use_mla = "use_mla" in kwargs and kwargs["use_mla"]
+            if use_gpu:
+                assert "chunk_size" in kwargs, (
+                    "chunk_size should be provided to create a GPU buffer."
+                )
+                assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
+                assert "device" in kwargs, (
+                    "device should be provided to create a GPU buffer."
+                )
+                shape = self.get_shape(kwargs["chunk_size"])
+                self.gpu_buffer = torch.empty(
+                    shape, dtype=kwargs["dtype"], device=kwargs["device"]
+                )
+        else:
+            super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
 
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
-        self.is_310p = is_310p()
 
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
@@ -217,10 +245,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError("KV cache format is not initialized!")
 
-        with torch.cuda.stream(self.store_stream):
-            use_tmp_buf = self.is_310p or (
-                self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2]
-            )
+        def _core_logic():
+            use_tmp_buf = self.is_310p or (self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2])
             if use_tmp_buf:
                 if self.is_310p:
                     self.gpu_buffer.zero_()
@@ -237,17 +263,24 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.page_buffer_size,
                 True,
                 self.use_mla,
-                self.kv_format.value,
+                self.kv_format.value
             )
-
+            
             if use_tmp_buf:
                 np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
 
-        # if not memory_obj.tensor.is_cuda:
-        # Force a synchronize if the target buffer is NOT CUDA device
-        # NOTE: for better performance, we may not want to sync for every
-        # memory object
-        self.store_stream.synchronize()
+        if self.is_310p:
+            _core_logic()
+            torch.cuda.synchronize()
+        else:
+            with torch.cuda.stream(self.store_stream):
+                _core_logic()
+
+            # if not memory_obj.tensor.is_cuda:
+            #     Force a synchronize if the target buffer is NOT CUDA device
+            #     NOTE: for better performance, we may not want to sync for every
+            #     memory object
+            self.store_stream.synchronize()
 
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
@@ -255,3 +288,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
         return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+
+    # TODO(Jiayi): need to optimize to enable real batching
+    def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        def _core_loop():
+            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+                self.to_gpu(memory_obj, start, end, **kwargs)
+
+        if self.is_310p:
+            _core_loop()
+            torch.cuda.synchronize()
+        else:
+            with torch.cuda.stream(self.load_stream):
+                _core_loop()
+            self.load_stream.synchronize()
