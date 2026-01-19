@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # Standard
-from typing import List
+from typing import List, Optional
 
 # Third Party
 from lmcache.logging import init_logger
