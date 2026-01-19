@@ -245,7 +245,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError("KV cache format is not initialized!")
 
-        def _core_logic():
+        def _data_transfer():
             use_tmp_buf = self.is_310p or (self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2])
             if use_tmp_buf:
                 if self.is_310p:
@@ -270,11 +270,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
 
         if self.is_310p:
-            _core_logic()
+            _data_transfer()
             torch.cuda.synchronize()
         else:
             with torch.cuda.stream(self.store_stream):
-                _core_logic()
+                _data_transfer()
 
             # if not memory_obj.tensor.is_cuda:
             #     Force a synchronize if the target buffer is NOT CUDA device
@@ -291,14 +291,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     # TODO(Jiayi): need to optimize to enable real batching
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
-        def _core_loop():
+        def _batched_data_transfer():
             for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
                 self.to_gpu(memory_obj, start, end, **kwargs)
 
         if self.is_310p:
-            _core_loop()
+            _batched_data_transfer()
             torch.cuda.synchronize()
         else:
             with torch.cuda.stream(self.load_stream):
-                _core_loop()
+                _batched_data_transfer()
             self.load_stream.synchronize()
