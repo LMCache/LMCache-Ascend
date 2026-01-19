@@ -194,8 +194,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         if self.is_310p:
-            if self.gpu_buffer is None:
-                raise ValueError("gpu_buffer is not initialized")
+            assert (
+                self.gpu_buffer is not None
+            ), "gpu_buffer should have been initialized"
             # memory_obj -> tmp_gpu_buffer -> kvcaches
             self.gpu_buffer.zero_()
             target_gpu_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
