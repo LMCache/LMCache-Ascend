@@ -64,7 +64,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 assert "chunk_size" in kwargs, (
                     "chunk_size should be provided to create a GPU buffer."
                 )
-                assert "dtype" in kwargs, "dtype should be provided to create a GPU buffer."
+                assert "dtype" in kwargs, (
+                    "dtype should be provided to create a GPU buffer."
+                )
                 assert "device" in kwargs, (
                     "device should be provided to create a GPU buffer."
                 )
@@ -246,7 +248,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("KV cache format is not initialized!")
 
         def _data_transfer():
-            use_tmp_buf = self.is_310p or (self.gpu_buffer is not None and end - start != self.gpu_buffer.shape[2])
+            use_tmp_buf = self.is_310p or (
+                self.gpu_buffer is not None 
+                and (end - start) != self.gpu_buffer.shape[2]
+            )
             if use_tmp_buf:
                 if self.is_310p:
                     self.gpu_buffer.zero_()
