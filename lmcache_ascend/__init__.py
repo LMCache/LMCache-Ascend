@@ -64,6 +64,26 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
         )
 
         # Third Party
+        import lmcache.v1.storage_backend.connector.mooncakestore_connector as lmc_mks_connector  # noqa: E501
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.connector.mooncakestore_connector import (  # noqa: E501
+            _batched_put_with_metadata,
+            _batched_put_zero_copy,
+        )
+
+        # NOTE (gingfung): these two function patches fixes the double free ref counts
+        # we took the upstream merged post v0.3.12 into our current branch,
+        # please remove after.
+        # Ref - https://github.com/LMCache/LMCache/pull/2415
+        lmc_mks_connector.MooncakestoreConnector._batched_put_zero_copy = (
+            _batched_put_zero_copy
+        )
+        lmc_mks_connector.MooncakestoreConnector._batched_put_with_metadata = (
+            _batched_put_with_metadata
+        )
+
+        # Third Party
         import lmcache.integration.vllm.vllm_v1_adapter
 
         # NOTE (gingfung): this is the main entry point of LMCache, and since we are
