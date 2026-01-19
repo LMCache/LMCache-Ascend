@@ -6,10 +6,14 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Coroutine,
+    Dict,
     Generator,
     List,
     Optional,
     Sequence,
+    Tuple,
+    Union,
+    cast,
 )
 import asyncio
 import functools
@@ -21,6 +25,7 @@ import torch
 # First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.observability import PrometheusLogger
 from lmcache.utils import (
     CacheEngineKey,
     _lmcache_nvtx_annotate,
@@ -32,17 +37,13 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
 )
-from lmcache.v1.storage_backend import CreateStorageBackends
+from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.storage_manager import (
-    StorageManager,
-)
-
-from lmcache_ascend.v1.npu_connector import is_310p
+from lmcache.v1.storage_backend.storage_manager import AsyncSerializer, AsyncSingleSerializer
 
 if TYPE_CHECKING:
     # First Party
@@ -51,6 +52,7 @@ if TYPE_CHECKING:
         LMCacheAsyncLookupServer,
     )
 
+from lmcache_ascend.v1.npu_connector import is_310p
 
 # Helper function to allocate and copy memory objects between D and H
 def allocate_and_copy_objects_310p(
@@ -105,15 +107,14 @@ def allocate_and_copy_objects_310p(
     return keys[: len(allocated_objects)], allocated_objects
 
 
-
 def StorageManager__init__(
     self,
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     event_manager: EventManager,
     lmcache_worker: Optional["LMCacheWorker"] = None,
+    async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,
 ):
-
     self.config = config
     self.metadata = metadata
     self.loop = asyncio.new_event_loop()
@@ -125,7 +126,8 @@ def StorageManager__init__(
     )
     self.thread.start()
 
-    if torch.cuda.is_available():
+    # For scheduler role, always use CPU device
+    if is_cuda_worker(metadata):
         dst_device = "cuda"
     else:
         dst_device = "cpu"
@@ -139,9 +141,14 @@ def StorageManager__init__(
         )
     )
 
+    # the backend used for actual storage
+    self.non_allocator_backends = self.get_non_allocator_backends()
+
     self.enable_pd = config.enable_pd
 
-    self.allocator_backend = self._get_allocator_backend(config)
+    self.allocator_backend = None
+    if metadata.role != "scheduler":
+        self.allocator_backend = self._get_allocator_backend(config)
     if config.local_cpu:
         self.local_cpu_backend = self.storage_backends["LocalCPUBackend"]
 
@@ -153,13 +160,26 @@ def StorageManager__init__(
 
     self.event_manager = event_manager
 
-    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None
+    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
+        async_lookup_server
+    )
+    self.async_serializer: Optional[AsyncSerializer] = None
 
     # The cuda stream for internal copies during put
-    if torch.cuda.is_available():
+    if is_cuda_worker(metadata):
         if is_310p():
             self.internal_copy_stream = None
         else:
             self.internal_copy_stream = torch.cuda.Stream()
     else:
         self.internal_copy_stream = None
+
+    # freeze mode: only use local_cpu backend for retrieval
+    self._freeze = False
+    self._freeze_lock = threading.RLock()
+
+    if not self.enable_pd and self.config.enable_async_loading:
+        assert self.allocator_backend is not None
+        self.async_serializer = AsyncSingleSerializer(self.loop)
+
+    self._setup_metrics()
