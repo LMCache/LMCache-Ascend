@@ -23,8 +23,8 @@ async def _batched_put_zero_copy(
     self, keys: List[CacheEngineKey], memory_objs: List[MemoryObj]
 ) -> None:
     key_strs = [k.to_string() for k in keys]
-    buffer_ptrs: list[int] = []
-    buffer_sizes: list[int] = []
+    buffer_ptrs: List[int] = []
+    buffer_sizes: List[int] = []
     for obj in memory_objs:
         tensor = obj.tensor
         assert tensor is not None
