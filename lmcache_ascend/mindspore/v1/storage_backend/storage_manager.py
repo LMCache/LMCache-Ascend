@@ -139,9 +139,7 @@ def StorageManager__init__(
 
     self.event_manager = event_manager
 
-    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
-        async_lookup_server
-    )
+    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = async_lookup_server
     self.async_serializer: Optional[AsyncSerializer] = None
 
     # The cuda stream for internal copies during put
