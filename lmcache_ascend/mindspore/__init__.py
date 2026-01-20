@@ -12,6 +12,18 @@ from lmcache_ascend import c_ops
 
 sys.modules["lmcache.c_ops"] = c_ops
 
+# Third Party
+import lmcache.v1.storage_backend.storage_manager as sm_module
+
+# First Party
+from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
+    StorageManager__init__,
+    allocate_and_copy_objects_310p,
+)
+
+sm_module.StorageManager.__init__ = StorageManager__init__
+sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
+
 # First Party
 from lmcache_ascend.mindspore.v1.memory_management import _allocate_cpu_memory
 
