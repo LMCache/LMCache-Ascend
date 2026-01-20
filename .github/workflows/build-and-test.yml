@@ -44,6 +44,7 @@ jobs:
         --label owner=ci-test-runner
         --add-host=host.docker.internal:192.168.1.1
         --device /dev/davinci0
+        --device /dev/davinci1
         --device /dev/davinci_manager
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
