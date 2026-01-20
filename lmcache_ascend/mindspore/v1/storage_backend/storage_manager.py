@@ -1,49 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from concurrent.futures import Future
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Coroutine,
-    Dict,
-    Generator,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-    cast,
-)
+from typing import TYPE_CHECKING, Optional, Sequence
 import asyncio
-import functools
 import threading
 
 # Third Party
-import torch
-
-# First Party
 from lmcache.config import LMCacheEngineMetadata
-from lmcache.logging import init_logger
-from lmcache.observability import PrometheusLogger
-from lmcache.utils import (
-    CacheEngineKey,
-    _lmcache_nvtx_annotate,
-    start_loop_in_thread_with_exceptions,
-)
+from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.event_manager import EventManager, EventStatus, EventType
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
-)
+from lmcache.v1.event_manager import EventManager
+from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
 )
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.storage_manager import AsyncSerializer, AsyncSingleSerializer
+from lmcache.v1.storage_backend.storage_manager import (
+    AsyncSerializer,
+    AsyncSingleSerializer,
+)
+import torch
 
 if TYPE_CHECKING:
     # First Party
@@ -52,7 +29,9 @@ if TYPE_CHECKING:
         LMCacheAsyncLookupServer,
     )
 
+# First Party
 from lmcache_ascend.v1.npu_connector import is_310p
+
 
 # Helper function to allocate and copy memory objects between D and H
 def allocate_and_copy_objects_310p(
@@ -91,7 +70,7 @@ def allocate_and_copy_objects_310p(
 
         if memory_obj is None or memory_obj.tensor is None:
             break
-        
+
         if is_310p():
             memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         else:
@@ -99,11 +78,11 @@ def allocate_and_copy_objects_310p(
                 memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
         allocated_objects.append(memory_obj)
 
-    if is_310p():     
-        torch.cuda.synchronize()       
+    if is_310p():
+        torch.cuda.synchronize()
     else:
         stream.synchronize()
-    
+
     return keys[: len(allocated_objects)], allocated_objects
 
 

@@ -194,9 +194,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         if self.is_310p:
-            assert (
-                self.gpu_buffer is not None
-            ), "gpu_buffer should have been initialized"
+            assert self.gpu_buffer is not None, (
+                "gpu_buffer should have been initialized"
+            )
             # memory_obj -> tmp_gpu_buffer -> kvcaches
             self.gpu_buffer.zero_()
             target_gpu_buffer = self.gpu_buffer[:, :, : end - start, :].contiguous()
@@ -252,7 +252,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         def _data_transfer():
             use_tmp_buf = self.is_310p or (
-                self.gpu_buffer is not None 
+                self.gpu_buffer is not None
                 and (end - start) != self.gpu_buffer.shape[2]
             )
             if use_tmp_buf:
@@ -271,9 +271,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.page_buffer_size,
                 True,
                 self.use_mla,
-                self.kv_format.value
+                self.kv_format.value,
             )
-            
+
             if use_tmp_buf:
                 np.copyto(memory_obj.tensor, target_buffer.cpu().numpy())
 
