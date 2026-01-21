@@ -106,9 +106,9 @@ def test_cudaipc_wrapper_multiprocess_serialization():
     )
     process.start()
 
-    # NOTE (gingfung): we increased from 10 to 20 because of additional
+    # NOTE (gingfung): we increased from 10 to 30 because of additional
     # torch_npu setup, and lmcache_tests import
-    process.join(timeout=20)
+    process.join(timeout=30)
 
     # Check if process completed successfully
     if process.is_alive():
@@ -154,3 +154,4 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             f"Tensor {i}: post-modification checksum mismatch. "
             f"Expected {new_expected_checksum}, got {actual_checksum}"
         )
+
