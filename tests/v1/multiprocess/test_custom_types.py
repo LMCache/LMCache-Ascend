@@ -154,4 +154,3 @@ def test_cudaipc_wrapper_multiprocess_serialization():
             f"Tensor {i}: post-modification checksum mismatch. "
             f"Expected {new_expected_checksum}, got {actual_checksum}"
         )
-
