@@ -50,6 +50,19 @@ void batched_fused_single_layer_kv_transfer_wrapper(
 }
 
 PYBIND11_MODULE(c_ops, m) {
+  m.def("get_device_ptr", [](uintptr_t ptr_addr) {
+    return reinterpret_cast<uintptr_t>(
+        get_device_ptr(reinterpret_cast<void *>(ptr_addr)));
+  });
+  m.def("register_mapping",
+        [](uintptr_t host_ptr, uintptr_t dev_ptr, size_t size) {
+          return reinterpret_cast<uintptr_t>(
+              register_mapping(reinterpret_cast<void *>(host_ptr),
+                               reinterpret_cast<void *>(dev_ptr), size));
+        });
+  m.def("unregister_ptr", [](uintptr_t ptr_addr) {
+    return unregister_ptr(reinterpret_cast<void *>(ptr_addr));
+  });
   m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
   m.def("fused_multi_layer_kv_transfer", &fused_multi_layer_kv_transfer);
   m.def("multi_layer_kv_transfer_310p", &multi_layer_kv_transfer_310p);

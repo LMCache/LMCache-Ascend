@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import os
-
 # First Party
 from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.3.12"
+LMCACHE_ASCEND_PATCHED = False
 
 # Check if we've already patched to avoid redundant work
-if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
+if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "pytorch":
         # Standard
         from functools import partial
@@ -28,6 +27,24 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
         import lmcache_ascend.c_ops as ascend_c_ops
 
         sys.modules["lmcache.c_ops"] = ascend_c_ops
+
+        # First Party
+        from lmcache_ascend.v1.transfer_channel import (
+            CreateTransferChannel as AscendCreateTransferChannel,
+        )
+        from lmcache_ascend.v1.transfer_channel import (
+            get_correct_device as ascend_get_correct_device,
+        )
+
+        # Make sure to import before importing init_lmcache_engine, otherwise
+        # CreateTransferChannel gets patched after the original version is
+        # already imported.
+        sys.modules[
+            "lmcache.v1.transfer_channel"
+        ].CreateTransferChannel = AscendCreateTransferChannel
+        sys.modules[
+            "lmcache.v1.transfer_channel.transfer_utils"
+        ].get_correct_device = ascend_get_correct_device
 
         # Third Party
         from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
@@ -123,4 +140,4 @@ if os.environ.get("LMCACHE_ASCEND_PATCHED") != "1":
     else:
         raise ValueError("Unsupported framework!")
 
-    os.environ["LMCACHE_ASCEND_PATCHED"] = "1"
+    LMCACHE_ASCEND_PATCHED = True

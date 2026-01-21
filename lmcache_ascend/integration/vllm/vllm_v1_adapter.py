@@ -165,6 +165,7 @@ def init_lmcache_engine(
         tpg.broadcast,
         tpg.broadcast_object,
     )
+
     if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
         assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
             "remote_enable_mla_worker_id_as0", metadata.use_mla

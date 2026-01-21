@@ -1,0 +1,9 @@
+local_cpu: False # Enable local CPU RAM cache for fast access
+
+enable_pd: True
+transfer_channel: "hccl"
+pd_role: "sender"
+pd_proxy_host: "localhost"
+pd_proxy_port: 7500
+pd_buffer_size: 2415919104 #1207959552 # 1.xxGB
+pd_buffer_device: "npu" # Use npu memory for buffering
