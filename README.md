@@ -7,6 +7,7 @@
   </h3>
 
   [![Code Quality](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml/badge.svg?branch=main)](https://github.com/LMCache/LMCache-Ascend/actions/workflows/code-quality.yml)
+  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/LMCache/LMCache-Ascend)
   
   <br />
 
