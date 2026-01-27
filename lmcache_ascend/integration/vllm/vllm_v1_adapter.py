@@ -19,12 +19,20 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.utils import get_kv_cache_torch_dtype
 import torch
 
+from lmcache_ascend import _build_info
 # First Party
-from lmcache_ascend.v1.npu_connector import (
-    VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
-)
+if _build_info.__framework_name__ == "pytorch":
+    from lmcache_ascend.v1.npu_connector import (
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
+elif _build_info.__framework_name__ == "mindspore":
+    from lmcache_ascend.mindspore.v1.npu_connector import (
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
 
 logger = init_logger(__name__)
 

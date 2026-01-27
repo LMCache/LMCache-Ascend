@@ -18,7 +18,11 @@ from typing import List, Optional
 
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector import (
+    VLLMBufferLayerwiseGPUConnector,
+    VLLMPagedMemGPUConnectorV2,
+    VLLMPagedMemLayerwiseGPUConnector,
+)
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 import numpy as np
 import torch
@@ -310,3 +314,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             with torch.cuda.stream(self.load_stream):
                 _batched_data_transfer()
             self.load_stream.synchronize()
+
+class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
+    pass
+
+class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
+    pass
