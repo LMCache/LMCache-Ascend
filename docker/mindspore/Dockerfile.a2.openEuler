@@ -1,0 +1,35 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+FROM hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-800I-A2-mindspore2.7.1.post1-openeuler24.03-lts-sp2-20260116
+
+ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
+ARG PIP_NO_CACHE_DIR=1
+
+ENV LMCACHE_TRACK_USAGE=false
+
+WORKDIR /workspace
+
+COPY . /workspace/LMCache-Ascend/
+
+RUN yum install -y numactl-devel && \
+    NO_CUDA_EXT=1 pip install lmcache==0.3.7 --no-deps && \
+    cd LMCache-Ascend && export SOC_VERSION=Ascend910B3 && \
+    USE_MINDSPORE=1 pip install -r requirement_ms.txt --no-build-isolation -v -e .
+
+CMD ["/bin/bash"]
+
+
