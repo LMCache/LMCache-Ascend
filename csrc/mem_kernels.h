@@ -15,9 +15,10 @@ void multi_layer_kv_transfer_kernel(
 
 void multi_layer_kv_transfer_kernel_310p(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
-    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches,
-    uint8_t *dstCacheTensor, uint8_t *slotmappings, const int64_t hiddenDims,
-    const int32_t kvs, const int32_t numLayers, const int64_t pageBuffSize,
+    const kvcache_ops::KVCacheFormat kvcache_format, uint32_t blockDim,
+    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
+    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
+    const int32_t numLayers, const int64_t pageBuffSize,
     const int32_t numTokensChunk, const bool page2L, const int32_t numKVHead,
     const int32_t headSize, const int32_t blockSize);
 
@@ -70,7 +71,7 @@ void multi_layer_kv_transfer_310p(
     const torch::Tensor &slot_mapping,   // [num_tokens]
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int num_kv_head,
-    const int head_size, const int block_size);
+    const int head_size, const int block_size, const int kvcache_format_raw);
 
 void multi_layer_kv_transfer_unilateral(
     torch::Tensor &key_value, const torch::Tensor &key_ptrs,
