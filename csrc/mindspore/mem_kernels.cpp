@@ -187,16 +187,18 @@ public:
         static_cast<uint8_t *>(key_value_ptrs.GetDataPtr());
     uint8_t *slot_mapping_ptr =
         static_cast<uint8_t *>(slot_mappings.GetDataPtr());
-    kvcache_ops::multi_layer_kv_transfer_kernel(
+    kvcache_ops::multi_layer_kv_transfer_kernel_310p(
         key_value_type_, slot_type, kvcache_format, aiv_num, stream(),
         paged_kv_dev_ptr, lmc_offset_dptr, slot_mapping_ptr, hidden_dims_,
-        kv_size, num_layers, page_buffer_size_, num_tokens, direction_);
+        kv_size, num_layers, page_buffer_size_, num_tokens, direction_,
+        num_kv_head_, head_size_, block_size_);
   }
 
   static void Eval(ms::Tensor key_value, ms::Tensor key_value_ptrs,
                    ms::Tensor slot_mappings, const int page_buffer_size,
                    const bool direction, const bool use_mla,
-                   const int kvcache_format_raw) {
+                   const int num_kv_head, const int head_size,
+                   const int block_size, const int kvcache_format_raw) {
     auto runner =
         std::make_shared<MultiLayerKvTransferOp310p>("MultiLayerKvTransfer");
     runner->key_value_type_ = get_dtype_from_ms(key_value.data_type());
@@ -204,6 +206,9 @@ public:
     runner->page_buffer_size_ = page_buffer_size;
     runner->direction_ = direction;
     runner->use_mla_ = use_mla;
+    runner->num_kv_head_ = num_kv_head;
+    runner->head_size_ = head_size;
+    runner->block_size_ = block_size;
     runner->kvcache_format_raw_ = kvcache_format_raw;
     runner->Run({key_value, key_value_ptrs, slot_mappings}, {});
   }
@@ -213,6 +218,9 @@ public:
   int page_buffer_size_{0};
   bool direction_{0};
   bool use_mla_{0};
+  int num_kv_head_{0};
+  int head_size_{0};
+  int block_size_{0};
   int kvcache_format_raw_{0};
 };
 
@@ -221,11 +229,13 @@ void multi_layer_kv_transfer_ms(
     ms::Tensor key_value_ptrs, // [num_layers]
     ms::Tensor slot_mapping,   // [num_tokens]
     const int page_buffer_size, const bool direction, const bool use_mla,
+    const int num_kv_head, const int head_size, const int block_size,
     const int kvcache_format_raw) {
 
   ms::pynative::PyboostRunner::Call<0>(
       MultiLayerKvTransferOp310p::Eval, key_value, key_value_ptrs, slot_mapping,
-      page_buffer_size, direction, use_mla, kvcache_format_raw);
+      page_buffer_size, direction, use_mla, num_kv_head, head_size, block_size,
+      kvcache_format_raw);
 }
 
 void multi_layer_kv_transfer_unilateral(ms::Tensor &key_value,
