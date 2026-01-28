@@ -134,6 +134,23 @@ if not LMCACHE_ASCEND_PATCHED:
         from lmcache_ascend.v1.system_detection import _read_from_sys
 
         lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
+
+        # Third Party
+        import lmcache.v1.lookup_client.lmcache_lookup_client as lmc_lookup_client
+
+        # First Party
+        from lmcache_ascend.v1.lookup_client.lmcache_lookup_client import lookup
+
+        lmc_lookup_client.LMCacheLookupClient.lookup = lookup
+
+        # Third Party
+        import lmcache.v1.token_database as lmc_token_database
+
+        # First Party
+        from lmcache_ascend.v1.token_database import process_tokens
+
+        lmc_token_database.SegmentTokenDatabase.process_tokens = process_tokens
+
     elif _build_info.__framework_name__ == "mindspore":
         # First Party
         import lmcache_ascend.mindspore  # noqa: F401

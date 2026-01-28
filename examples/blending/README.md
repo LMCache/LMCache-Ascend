@@ -1,18 +1,24 @@
 # CacheBlend Implementation Guide
 
 ## 1. Critical Preparations
-### 1.1 Bug Fix & Patch Application
-A known bug in **CacheBlend** (LMCache v0.3.7) causes low cache hit rates, with a fix scheduled for the v0.3.10 release. Apply this patch before proceeding:
-```bash
-cd /workspace/LMCache
-git apply /workspace/LMCache-Ascend/lmcache_ascend/v1/blend/cacheblend_patch.diff
+
+### 1.1 vLLM-Ascend Ad-Hoc Modifications
+
+These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
+
+#### Option 1: Automatic Patching (Recommended)
+
+You can apply these changes automatically without needing to reinstall vllm-ascend from source. Simply run the following command:
+
+```
+python /LMCache-Ascend/examples/blending/patch_vllm_npu_worker.py
 ```
 
-### 1.2 vLLM-Ascend Ad-Hoc Modifications
-Temporary modifications are required to enable CacheBlend in vLLM-Ascend, following guidelines from the official LMCache documentation: <https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md>
+#### Option 2: Manual Modification
+If you prefer to update the code manually, please modify the following file:
 
 **File Path**: `vllm-ascend/vllm-ascend/worker/worker_v1.py`
-1. In the `init_worker_distributed_environment` function: Comment out the line `ensure_kv_transfer_initialized(vllm_config)`
+1. In the `_init_worker_distributed_environment` function: Comment out the line `ensure_kv_transfer_initialized(vllm_config)`
 2. At the end of the `load_model` function: Add the following Python snippet
 ```python
 from lmcache.v1.compute.models.utils import VLLMModelTracker
