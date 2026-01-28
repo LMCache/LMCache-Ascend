@@ -20,11 +20,23 @@ from vllm.utils import get_kv_cache_torch_dtype
 import torch
 
 # First Party
-from lmcache_ascend.v1.npu_connector import (
-    VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
-)
+from lmcache_ascend import _build_info
+
+if _build_info.__framework_name__ == "pytorch":
+    # First Party
+    from lmcache_ascend.v1.npu_connector import (
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
+elif _build_info.__framework_name__ == "mindspore":
+    # First Party
+    from lmcache_ascend.mindspore.v1.npu_connector import (
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
+
 
 logger = init_logger(__name__)
 

@@ -257,13 +257,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             tmp_gpu_buffer,
             kv_cache_pointers,
             slot_mapping[start:end],
-            self.kvcaches[0].device,
+            self.kvcaches_device,
             self.page_buffer_size,
             False,
             self.use_mla,
             self.num_kv_head,
             self.head_size,
             self.block_size,
+            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
         )
 
     def from_gpu_310p(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -308,13 +309,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             tmp_gpu_buffer,
             kv_cache_pointers,
             slot_mapping[start:end],
-            self.kvcaches[0].device,
+            self.kvcaches_device,
             self.page_buffer_size,
             True,
             self.use_mla,
             self.num_kv_head,
             self.head_size,
             self.block_size,
+            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
         )
 
         memory_obj.tensor.copy_(tmp_gpu_buffer)

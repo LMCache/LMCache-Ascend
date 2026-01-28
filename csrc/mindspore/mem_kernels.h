@@ -12,6 +12,15 @@ void multi_layer_kv_transfer_kernel(
     const int32_t numLayers, const int64_t pageBuffSize,
     const int32_t numTokensChunk, const bool page2L);
 
+void multi_layer_kv_transfer_kernel_310p(
+    kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
+    const kvcache_ops::KVCacheFormat kvcacheFormat, uint32_t blockDim,
+    void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
+    uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
+    const int32_t numLayers, const int64_t pageBuffSize,
+    const int32_t numTokensChunk, const bool page2L, const int32_t numKVHead,
+    const int32_t headSize, const int32_t blockSize);
+
 void single_layer_kv_transfer_kernel(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
     uint32_t blockDim, void *stream, uint8_t *dstCacheTensor,
@@ -40,6 +49,7 @@ void multi_layer_kv_transfer_ms(
     ms::Tensor key_value_ptrs, // [num_layers]
     ms::Tensor slot_mapping,   // [num_tokens]
     const int page_buffer_size, const bool direction, const bool use_mla,
+    const int num_kv_head, const int head_size, const int block_size,
     const int kvcache_format_raw);
 
 void multi_layer_kv_transfer_unilateral(ms::Tensor &key_value,
