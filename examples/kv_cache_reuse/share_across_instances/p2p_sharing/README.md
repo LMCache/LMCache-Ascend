@@ -68,7 +68,7 @@ This example demonstrates how to run LMCache with P2P KV Cache Sharing using HCC
 
 ### Usage
 
-Prerequisites: ensure the LMCache config files are correctly configured for the desired paralellism level. To use P2P KV Cache Sharing across hosts, substitute `localhost` with the IP of the corresponding server.
+Prerequisites: ensure the LMCache config files are correctly configured for the desired parallelism level. To use P2P KV Cache Sharing across hosts, substitute localhost with the IP of the corresponding server.
 
 
 Launch controller
