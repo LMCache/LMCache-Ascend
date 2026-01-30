@@ -12,6 +12,18 @@ import lmcache
 
 sys.modules["lmcache.c_ops"] = c_ops
 
+# Third Party
+import lmcache.v1.storage_backend.storage_manager as sm_module
+
+# First Party
+from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
+    StorageManager__init__,
+    allocate_and_copy_objects_310p,
+)
+
+sm_module.StorageManager.__init__ = StorageManager__init__
+sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
+
 # First Party
 from lmcache_ascend.mindspore.v1.memory_management import _allocate_cpu_memory
 
@@ -84,3 +96,15 @@ from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
 import lmcache.v1.system_detection
 
 lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
+
+# Third Party
+import lmcache.integration.vllm.vllm_v1_adapter
+
+# First Party
+from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+    init_lmcache_engine as ascend_init_lmcache_engine,
+)
+
+lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
+    ascend_init_lmcache_engine
+)
