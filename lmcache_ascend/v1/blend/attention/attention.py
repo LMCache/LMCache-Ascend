@@ -7,6 +7,8 @@ from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
 from torch import nn
+
+# from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 import torch
@@ -18,6 +20,14 @@ if not hasattr(nfa, "npu_fusion_attention"):
 # Third Party
 from transformers.integrations.npu_flash_attention import (
     npu_flash_attn_varlen_func as flash_attn_varlen_func,
+)
+
+from torch_npu import npu_fused_infer_attention_score
+import transformers.integrations.npu_flash_attention as nfa
+if not hasattr(nfa, 'npu_fusion_attention'):
+    nfa.npu_fusion_attention = torch_npu.npu_fusion_attention
+from transformers.integrations.npu_flash_attention import (
+    npu_flash_attn_varlen_func as flash_attn_varlen_func
 )
 
 
@@ -159,6 +169,8 @@ class LMCAttnBackend(AttentionInterface):
     This backend uses the FlashAttention implementation
     for efficient attention computation.
     """
+    def init_attn_metadata( self, input_ids: torch.tensor, **kwargs,): 
+        pass
 
     def __init__(
         self,
@@ -194,3 +206,121 @@ class LMCAttnBackend(AttentionInterface):
         **kwargs,
     ) -> LMCFlashAttnMetadata:
         pass
+class ZLMCFlashAttnBackend(AttentionInterface):
+    """
+    FlashAttention backend for LMCache on Ascend NPU.
+    Wrapper for torch_npu.npu_fused_infer_attention_score.
+    """
+
+    def __init__(
+        self,
+        vllm_attn: "Attention",
+    ):
+        self.vllm_attn = vllm_attn
+        self.vllm_attn_impl = vllm_attn.impl
+
+    def forward_contiguous(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: "ZLMCFlashAttnMetadata",
+        **kwargs,
+    ) -> torch.Tensor:
+        """
+        Executes NPU Fused Attention.
+        Handles both [Batch, Seq, Heads, Dim] and [TotalSeq, Heads, Dim] inputs.
+        """
+        # 1. Extract LMCache specific metadata
+        blend_metadata = kwargs.get('blend_metadata')
+
+        # 2. Handle Input Shapes and Contiguity
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
+
+        # 3. Robust Dimension Extraction
+        if query.dim() == 3:
+            # Input is (TotalSeqLen, NumHeads, HeadDim)
+            # We treat this as Batch=1, Seq=TotalSeqLen
+            q_seq_len = query.shape[0]
+            num_heads = query.shape[1]
+            # head_dim = query.shape[2]
+
+            kv_seq_len = key.shape[0]
+            num_kv_heads = key.shape[1]
+            
+            # Unsqueeze to create pseudo-batch dimension for NPU (BSND requirements)
+            query_input = query.unsqueeze(0)
+            key_input = key.unsqueeze(0)
+            value_input = value.unsqueeze(0)
+        else:
+            raise NotImplementedError
+
+        # 4. Determine Positions
+        q_positions = None
+        
+        if blend_metadata is not None and hasattr(blend_metadata, 'imp_indices'):
+            q_positions = blend_metadata.imp_indices
+        elif 'q_positions' in kwargs:
+            q_positions = kwargs['q_positions']
+        
+        if q_positions is None:
+            # Note: For flattened 3D input, q_seq_len is the total token count
+            q_positions = torch.arange(q_seq_len, device=query.device, dtype=torch.long)
+
+        k_positions = torch.arange(kv_seq_len, device=query.device, dtype=torch.long)
+
+        # 5. Construct Custom Boolean Mask for NPU
+        if q_positions.dim() == 1:
+            mask_condition = (q_positions.unsqueeze(1) < k_positions.unsqueeze(0))
+            # Reshape to (1, 1, Q, K) to broadcast over Batch and Heads
+            atten_mask = mask_condition.unsqueeze(0).unsqueeze(0)
+        else:
+            # If q_positions is [Batch, Seq]
+            raise NotImplementedError
+            mask_condition = (q_positions.unsqueeze(-1) >= k_positions.unsqueeze(0))
+            atten_mask = mask_condition.unsqueeze(1)
+
+        atten_mask = atten_mask.to(torch.bool)
+
+        result_tuple = npu_fused_infer_attention_score(
+            query=query_input, # Use the prepared input
+            key=key_input,
+            value=value_input,
+            atten_mask=atten_mask,
+            actual_seq_lengths=None,
+            actual_seq_lengths_kv=None,
+            num_heads=num_heads,          # Now correctly extracted
+            num_key_value_heads=num_kv_heads, # Now correctly extracted
+            scale=self.vllm_attn_impl.scale,
+            input_layout="BSND", 
+            sparse_mode=0,
+            softmax_lse_flag=False
+        )
+        
+        attention_out = result_tuple[0]
+
+        # 7. Copy to output
+        if output is not None:
+            # Ensure shape matches output
+            if output.shape != attention_out.shape:
+                 # Flatten back if input was 3D but we processed as 4D
+                 attention_out = attention_out.reshape(output.shape)
+            output.copy_(attention_out)
+            return output
+
+        return attention_out
+
+
+    def init_attn_metadata(
+        self,
+        input_ids: torch.Tensor,
+        **kwargs,
+    ) -> "LMCAttnMetadata":
+        """
+        Initialize attention metadata.
+        """
+        raise NotImplementedError
+
