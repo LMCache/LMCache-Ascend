@@ -2,16 +2,16 @@
 # Standard
 import random
 
-# Third Party
-from lmcache.v1.memory_management import MemoryFormat, MixedMemoryAllocator
-from utils import check_paged_kv_cache_equal, generate_kv_cache_paged_list_tuple_tensors
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 import mindspore as ms
 import numpy as np
 import pytest
 import torch
+from utils import check_paged_kv_cache_equal, generate_kv_cache_paged_list_tuple_tensors
 
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
+# Third Party
+from lmcache.v1.memory_management import MemoryFormat, MixedMemoryAllocator
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 8000])

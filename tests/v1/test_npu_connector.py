@@ -3,6 +3,14 @@
 # Standard
 from unittest.mock import patch
 
+import pytest
+
+# First Party
+from lmcache_ascend.v1.npu_connector import (
+    VLLMPagedMemLayerwiseNPUConnector,
+    VLLMPagedMemNPUConnectorV2,
+)
+
 # Third Party
 # TODO (gingfung): once we have sglang kernel, re-enable test_sglang_connector_with_gpu_and_mla
 from lmcache_tests.v1.test_gpu_connector import (
@@ -16,13 +24,6 @@ from lmcache_tests.v1.test_gpu_connector import (
 )
 from lmcache_tests.v1.test_gpu_connector import (
     test_vllm_paged_connector_v2_with_gpu_and_mla as original_test_vllm_paged_connector_v2_with_gpu_and_mla,
-)
-import pytest
-
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
 )
 
 

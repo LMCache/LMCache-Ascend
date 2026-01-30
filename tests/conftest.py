@@ -5,11 +5,11 @@ import os
 import subprocess
 import sys
 
-# Third Party
-import pytest
-
 # First Party
 import lmcache_ascend
+
+# Third Party
+import pytest
 
 """
 LMCache Test Bootstrap & Fixture Inheritance
@@ -152,8 +152,8 @@ def setup_npu_backend():
         if _build_info.__framework_name__ == "pytorch":
             # This applies the monkeypatch to torch.cuda -> torch.npu
             # Third Party
-            from torch_npu.contrib import transfer_to_npu  # noqa: F401
             import torch
+            from torch_npu.contrib import transfer_to_npu  # noqa: F401
 
             print("   ✅ Applied 'transfer_to_npu' patch.")
             # initialize context

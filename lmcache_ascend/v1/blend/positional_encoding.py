@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, Callable, Dict, Optional
+from unittest.mock import MagicMock
+
+import torch
+from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
+
+import lmcache.c_ops as lmc_ops
 
 # Third Party
 from lmcache.logging import init_logger
-from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
-import lmcache.c_ops as lmc_ops
-import torch
-from unittest.mock import MagicMock, patch
-from vllm.forward_context import set_forward_context, get_forward_context
 
 logger = init_logger(__name__)
 
@@ -183,12 +185,14 @@ def get_fused_rope(
 
     dummy_vllm_config = MagicMock()
     dummy_vllm_config.parallel_config.data_parallel_size = 1
-    dummy_vllm_config.compilation_config.static_forward_context = False 
+    dummy_vllm_config.compilation_config.static_forward_context = False
     dummy_attn_metadata = MagicMock()
     with set_forward_context(dummy_attn_metadata, dummy_vllm_config):
         forward_context = get_forward_context()
         forward_context.is_first_layer = False
-        correct = validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size)
+        correct = validate_reverse_correctness(
+            rope, reverse_rope, fused_rope, head_size
+        )
     if not correct:
         logger.error(
             "Fused/reverse rotary encoding is not correct! Will disable blending!"

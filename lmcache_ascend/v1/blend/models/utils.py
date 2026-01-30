@@ -2,9 +2,10 @@
 # Standard
 from typing import Dict
 
+from torch import nn
+
 # Third Party
 from lmcache.logging import init_logger
-from torch import nn
 
 logger = init_logger(__name__)
 

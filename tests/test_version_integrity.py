@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from importlib.metadata import PackageNotFoundError, version
 import warnings
-
-# Third Party
-import pytest
+from importlib.metadata import PackageNotFoundError, version
 
 # First Party
 import lmcache_ascend
+
+# Third Party
+import pytest
 
 
 def test_dependency_compatibility():

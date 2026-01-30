@@ -2,6 +2,18 @@
 # Standard
 from typing import Union
 
+import torch
+
+# First Party
+from lmcache_ascend.v1.npu_connector import (
+    VLLMBufferLayerwiseNPUConnector,
+    VLLMPagedMemLayerwiseNPUConnector,
+    VLLMPagedMemNPUConnectorV2,
+)
+from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.utils import get_kv_cache_torch_dtype
+
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
@@ -12,17 +24,6 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
 from lmcache.logging import init_logger
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
-from vllm.utils import get_kv_cache_torch_dtype
-import torch
-
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
-)
 
 logger = init_logger(__name__)
 

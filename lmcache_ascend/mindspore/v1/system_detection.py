@@ -2,14 +2,14 @@
 # Standard
 from typing import Optional
 
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
+import mindspore as ms
+from vllm.platforms import current_platform
+
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.system_detection import NUMAMapping
-from vllm.platforms import current_platform
-import mindspore as ms
-
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

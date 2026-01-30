@@ -14,9 +14,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ctypes
+
 # Standard
 from typing import List, Optional, Tuple, Union
-import ctypes
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
+import mindspore as ms
+import numpy as np
+import sortedcontainers
+import torch
 
 # Third Party
 from lmcache.logging import init_logger
@@ -30,13 +38,6 @@ from lmcache.v1.memory_management import (
     TensorMemoryObj,
 )
 from lmcache.v1.system_detection import NUMAMapping
-import mindspore as ms
-import numpy as np
-import sortedcontainers
-import torch
-
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
 
 # Local
 from ._tensor import (

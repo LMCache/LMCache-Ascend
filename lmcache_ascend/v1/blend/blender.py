@@ -2,14 +2,15 @@
 # Standard
 from typing import Optional, Union
 
-# Third Party
-from lmcache.logging import init_logger
-from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
-from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
 # First Party
 from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
+
+# Third Party
+from lmcache.logging import init_logger
+from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
+from lmcache.v1.config import LMCacheEngineConfig
 
 logger = init_logger(__name__)
 
@@ -90,7 +91,10 @@ class LMCBlender:
         else:
             q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
 
-        if layer_id in self.common_metadata.check_layers:
+        if (
+            layer_id in self.common_metadata.check_layers
+            and self.common_metadata.recomp_ratios[0] > 0
+        ):
             assert k[num_falses:].shape[0] == old_k.shape[0], (
                 "Mismatch between number of tokens in k "
                 "(after skipping falses) and old_k"
@@ -105,6 +109,7 @@ class LMCBlender:
 
             # TODO(Jiayi): remove `[0]` hardcode
             topk_num = int(total_len * self.common_metadata.recomp_ratios[0])
+            topk_num = max(topk_num, 1)
 
             top_indices = torch.topk(diff_k, k=topk_num).indices
             top_indices, _ = torch.sort(top_indices)

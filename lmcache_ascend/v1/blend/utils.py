@@ -2,12 +2,12 @@
 # Standard
 from typing import TYPE_CHECKING
 
+# First Party
+from lmcache_ascend.v1.blend.blender import LMCBlender
+
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.compute.models.utils import VLLMModelTracker
-
-# First Party
-from lmcache_ascend.v1.blend.blender import LMCBlender
 
 if TYPE_CHECKING:
     # Third Party

@@ -2,23 +2,24 @@
 # Standard
 from typing import Optional
 
-# Third Party
-from lmcache.v1.compute.attention.abstract import AttentionInterface
-from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
-from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
+import torch
+import torch_npu
+import transformers.integrations.npu_flash_attention as nfa
 from torch import nn
 
 # from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-import torch
 
-import torch_npu
-import transformers.integrations.npu_flash_attention as nfa
-if not hasattr(nfa, 'npu_fusion_attention'):
+# Third Party
+from lmcache.v1.compute.attention.abstract import AttentionInterface
+from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
+from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
+
+if not hasattr(nfa, "npu_fusion_attention"):
     nfa.npu_fusion_attention = torch_npu.npu_fusion_attention
 from transformers.integrations.npu_flash_attention import (
-    npu_flash_attn_varlen_func as flash_attn_varlen_func
+    npu_flash_attn_varlen_func as flash_attn_varlen_func,
 )
 
 
@@ -188,3 +189,10 @@ class LMCAttnBackend(AttentionInterface):
         )
 
         return output
+
+    def init_attn_metadata(
+        self,
+        input_ids: torch.tensor,
+        **kwargs,
+    ) -> LMCFlashAttnMetadata:
+        pass
