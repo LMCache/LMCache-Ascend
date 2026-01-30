@@ -550,6 +550,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
                 # kv_caches[0]: [tuple(k,v)，tuple(k,v)]
+                if is_310p():
+                    self.block_size = first_tensor.shape[3]
                 assert first_tensor.dim() >= 2
                 self.page_buffer_size = first_tensor.shape[0] * first_tensor.shape[1]
             else:
