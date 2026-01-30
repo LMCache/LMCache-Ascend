@@ -216,9 +216,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
 
-        use_shared_buffer_mapping = kwargs.get("use_shared_buffer_mapping", True)
-        buffer_mapping = self.buffer_mapping if use_shared_buffer_mapping else {}
-
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
         self._lazy_initialize_buffer(self.kvcaches)
@@ -235,10 +232,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         for start, end in zip(starts, ends, strict=False):
             gap_mask[start - buf_offset : end - buf_offset] = False
 
-        # self.current_gap_positions = torch.where(gap_mask)[0]
-        current_gap_positions = torch.where(gap_mask)[0]
-        if use_shared_buffer_mapping:
-            self.current_gap_positions = current_gap_positions
+        self.current_gap_positions = torch.where(gap_mask)[0]
 
         buf_offset = starts[0]
         if self.cache_positions:
@@ -273,7 +267,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         for layer_id in range(self.num_layers + 2):
             if layer_id > 1:
                 lmc_ops.single_layer_kv_transfer(
-                    buffer_mapping[layer_id - 2].tensor,
+                    self.buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
                     False,
@@ -281,7 +275,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     False,  # shape is [2, num_tokens, hidden_dim]
                     self.vllm_two_major,
                 )
-                del buffer_mapping[layer_id - 2]
+                del self.buffer_mapping[layer_id - 2]
 
                 logger.debug(f"Finished loading layer {layer_id - 2} into paged memory")
 
@@ -305,10 +299,12 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     )
 
                 # gap zeroing after RoPE
-                if current_gap_positions.numel():
-                    compute_gpu_buffer_obj.tensor[:, current_gap_positions] = 0.0
+                if self.current_gap_positions.numel():
+                    compute_gpu_buffer_obj.tensor[:, self.current_gap_positions] = 0.0
 
-                buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
+                self.buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
+
+                logger.debug(f"Finished loading layer {layer_id - 1} into buffer")
 
             if layer_id < self.num_layers:
                 memory_objs_layer = yield
@@ -340,21 +336,10 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         load_gpu_buffer_obj.ref_count_down()
         compute_gpu_buffer_obj.ref_count_down()
 
-        if use_shared_buffer_mapping:
-            assert len(self.buffer_mapping) == 0, (
-                "There are still layers in the buffer mapping after "
-                "releasing the GPU buffers."
-            )
-        else:
-            assert len(buffer_mapping) == 0, (
-                "There are still layers in the buffer mapping after "
-                "releasing the GPU buffers."
-            )
-
-        # assert len(self.buffer_mapping) == 0, (
-        #     "There are still layers in the buffer mapping after "
-        #     "releasing the GPU buffers."
-        # )
+        assert len(self.buffer_mapping) == 0, (
+            "There are still layers in the buffer mapping after "
+            "releasing the GPU buffers."
+        )
 
         yield
 
@@ -458,7 +443,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     strict=False,
                 ):
                     assert memory_obj.tensor is not None
-
                     memory_obj.tensor[0].copy_(
                         tmp_gpu_buffer_obj.tensor[0][buf_start:buf_end],
                         non_blocking=True,
