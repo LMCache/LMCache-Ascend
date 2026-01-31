@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Patch vLLM-Ascend worker for LMCache model tracking.
+"""
+1. Patch vLLM-Ascend worker for LMCache model tracking.
 
 This script:
   - locates vllm_ascend.worker.worker_v1 via import
   - applies the LMCache model registration + KV transfer init changes to load_model
   - comments out ensure_kv_transfer_initialized in _init_worker_distributed_environment
   - creates a backup of the original file
+
+2. Patch vLLM-Ascend for Rotary Embedding 
 """
 
 # Future
@@ -25,6 +28,18 @@ _IMPORTS_TO_ADD = [
     "from lmcache.v1.compute.models.utils import VLLMModelTracker\n",
 ]
 
+TARGET_MODULE = "vllm_ascend.ops.rotary_embedding"
+TARGET_FUNC = "_rope_forward_oot"
+REQUIRED_VERSIONS = [
+    "0.10.2rc1", "0.11.0rc0", "0.11.0rc1", 
+    "0.11.0rc2", "0.11.0rc3", "0.11.0"
+]
+
+def get_vllm_ascend_version():
+    try:
+        return importlib.metadata.version("vllm-ascend")
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 def _find_module_path(module_name: str) -> Path:
     """Find the file system path of a python module."""
@@ -180,6 +195,51 @@ def patch_ascend_worker(path: Path) -> bool:
     return True
 
 
+def patch_rope_forward(path: Path) -> bool:
+    """
+    Applies the 'self.cos = None' patch to _rope_forward_oot.
+    """
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    
+    start_idx = -1
+    indent = ""
+
+    for i, line in enumerate(lines):
+        if f"def {TARGET_FUNC}(" in line:
+            start_idx = i
+            for j in range(i + 1, len(lines)):
+                stripped = lines[j].lstrip()
+                if stripped and not stripped.startswith('"""'):
+                    indent = lines[j][:len(lines[j]) - len(stripped)]
+                    break
+            break
+
+    if start_idx == -1:
+        print(f"Error: Could not find function {TARGET_FUNC}")
+        return False
+
+    already_patched = False
+    for i in range(start_idx + 1, start_idx + 10):
+        if i < len(lines) and "self.cos = None" in lines[i]:
+            already_patched = True
+            break
+    
+    if already_patched:
+        return False
+
+    insert_pos = start_idx
+    while ")" not in lines[insert_pos]:
+        insert_pos += 1
+    insert_pos += 1
+
+    patch_line = f"{indent}self.cos = None  # Added by Patch to force fallback\n"
+    lines.insert(insert_pos, patch_line)
+
+    _backup_file(path)
+    path.write_text("".join(lines), encoding="utf-8")
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -187,8 +247,14 @@ def main() -> int:
         default="vllm_ascend.worker.worker_v1",
         help="Module path to patch (default: vllm_ascend.worker.worker_v1)",
     )
+    parser.add_argument(
+        "--rope-module",
+        default="vllm_ascend.ops.rotary_embedding",
+        help="Rotary embedding module path to patch",
+    )
     args = parser.parse_args()
 
+    # --- 1. Patch Worker ---
     try:
         target_path = _find_module_path(args.module)
     except Exception as exc:
@@ -204,14 +270,29 @@ def main() -> int:
 
         traceback.print_exc()
         return 1
+    
+    # --- 2. Patch Rotary Embedding ---
+    try:
+        current_version = get_vllm_ascend_version()
+        if current_version not in REQUIRED_VERSIONS:
+            print(f"Skipping RoPE patch: vllm-ascend version {current_version} is not in the required list.")
+        else:
+            rope_path = _find_module_path(args.rope_module)
+            did_patch_rope = patch_rope_forward(rope_path)
+            
+            if did_patch_rope:
+                print(f"Successfully patched rope_forward: {rope_path}")
+            else:
+                print(f"Rope forward already patched or no changes needed: {rope_path}")
+                
+    except Exception as exc:
+        print(f"Error patching rope module: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
 
-    if did_patch:
-        print(f"Successfully patched {target_path}")
-        print("Backup created alongside the original file.")
-    else:
-        print(f"No changes needed or already patched: {target_path}")
-
-    print("Restart vLLM-Ascend workers after patching.")
+    print("\nAll patch operations completed.")
+    print("Please restart vLLM-Ascend workers to apply changes.")
     return 0
 
 

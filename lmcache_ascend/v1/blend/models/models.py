@@ -5,7 +5,6 @@ from torch import nn
 # First Party
 from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnBackend,LMCAttnBackend,ZLMCFlashAttnBackend
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
-import os
 
 class LMCModel(nn.Module):
     def __init__(

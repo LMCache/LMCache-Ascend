@@ -8,7 +8,7 @@ These temporary (ad-hoc) modifications are necessary for the cacheblend feature,
 You can apply these changes automatically without needing to reinstall vllm-ascend from source. Simply run the following command:
 
 ```
-python /LMCache-Ascend/examples/blending/patch_vllm_npu_worker.py
+python /LMCache-Ascend/examples/blending/patch_vllm_ascend.py
 ```
 
 #### Option 2: Manual Modification

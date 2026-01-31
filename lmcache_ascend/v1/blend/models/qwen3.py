@@ -21,6 +21,7 @@ def qk_post_processing(q, k, attn_layer, positions):
     )
     k_by_head = attn_layer.k_norm(k_by_head)
     k = k_by_head.view(k.shape)
+    q, k = attn_layer.rotary_emb(positions, q, k)
     return q, k
 
 

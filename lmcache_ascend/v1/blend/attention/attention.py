@@ -23,12 +23,6 @@ from transformers.integrations.npu_flash_attention import (
 )
 
 from torch_npu import npu_fused_infer_attention_score
-import transformers.integrations.npu_flash_attention as nfa
-if not hasattr(nfa, 'npu_fusion_attention'):
-    nfa.npu_fusion_attention = torch_npu.npu_fusion_attention
-from transformers.integrations.npu_flash_attention import (
-    npu_flash_attn_varlen_func as flash_attn_varlen_func
-)
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -169,9 +163,6 @@ class LMCAttnBackend(AttentionInterface):
     This backend uses the FlashAttention implementation
     for efficient attention computation.
     """
-    def init_attn_metadata( self, input_ids: torch.tensor, **kwargs,): 
-        pass
-
     def __init__(
         self,
         vllm_attn: Attention,
@@ -206,6 +197,8 @@ class LMCAttnBackend(AttentionInterface):
         **kwargs,
     ) -> LMCFlashAttnMetadata:
         pass
+
+
 class ZLMCFlashAttnBackend(AttentionInterface):
     """
     FlashAttention backend for LMCache on Ascend NPU.
@@ -225,7 +218,7 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: "ZLMCFlashAttnMetadata",
+        attn_metadata: "FlashAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -280,8 +273,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         else:
             # If q_positions is [Batch, Seq]
             raise NotImplementedError
-            mask_condition = (q_positions.unsqueeze(-1) >= k_positions.unsqueeze(0))
-            atten_mask = mask_condition.unsqueeze(1)
 
         atten_mask = atten_mask.to(torch.bool)
 
@@ -312,7 +303,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
             return output
 
         return attention_out
-
 
     def init_attn_metadata(
         self,
