@@ -22,18 +22,11 @@ class LMCModel(nn.Module):
         self.num_layers = len(vllm_model.model.layers)
 
         self.vllm_attn_layers = []
-        eager = False
-        if not eager:
-            self.lmc_attn_layers: list[ZLMCFlashAttnBackend] = []
-        else:
-            self.lmc_attn_layers: list[LMCAttnBackend] = []
+        self.lmc_attn_layers: list[ZLMCFlashAttnBackend] = []
         for i in range(self.num_layers):
             vllm_attn = vllm_model.model.layers[i].self_attn.attn
             self.vllm_attn_layers.append(vllm_attn)
-            if not eager:
-                self.lmc_attn_layers.append(ZLMCFlashAttnBackend(vllm_attn))
-            else:
-                self.lmc_attn_layers.append(LMCAttnBackend(vllm_attn))
+            self.lmc_attn_layers.append(ZLMCFlashAttnBackend(vllm_attn))
 
         # NOTE(Jiayi): better not to pass the blender in init
         # if we want to make this LMCModel more general.

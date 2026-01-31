@@ -166,11 +166,11 @@ class TestLMCBlender:
         device = "cpu"
         # Use larger num_tokens to accommodate the way topk works with dim=[1]
         num_tokens = 200  # Increased to handle potential large indices from topk
-        q = torch.randn(num_tokens, 32, 128, device=device)
-        k = torch.randn(num_tokens, 32, 128, device=device)
-        v = torch.randn(num_tokens, 32, 128, device=device)
+        q = torch.randn(num_tokens, 4096, device=device)
+        k = torch.randn(num_tokens, 1024, device=device)
+        v = torch.randn(num_tokens, 1024, device=device)
         residual = torch.randn(num_tokens, 4096, device=device)
-        attn_output = torch.randn(num_tokens, 32, 128, device=device)
+        attn_output = torch.randn(num_tokens, 4096, device=device)
         attn_metadata = Mock(spec=LMCAttnMetadata)
         attn_metadata.update_from_top_indices = Mock()
 
@@ -192,17 +192,17 @@ class TestLMCBlender:
         # Check that we get valid tensors back and their shapes
         recomp_ratio = blender.common_metadata.recomp_ratios[0]
         topk_num = int(num_tokens * recomp_ratio)
-        assert q_res.shape == (num_tokens, topk_num, 32, 128)
+        assert q_res.shape == (topk_num, 4096)
         assert k_res.shape == k.shape
         assert v_res.shape == v.shape
-        assert residual_res.shape == (num_tokens, topk_num, 4096)
-        assert attn_output_res.shape == (topk_num, 32, 128)
+        assert residual_res.shape == (topk_num, 4096)
+        assert attn_output_res.shape == (topk_num, 4096)
 
         # Check metadata updates
         assert blender.metadata.imp_indices is not None
-        assert blender.metadata.imp_indices.shape == (num_tokens, topk_num)
+        assert blender.metadata.imp_indices.shape == (topk_num,)
         assert blender.metadata.positions is not None
-        assert blender.metadata.positions.shape == (num_tokens, topk_num)
+        assert blender.metadata.positions.shape == (topk_num,)
 
     def test_blend_layer_generator(self, blender):
         """Test blend_layer method returns generator."""
