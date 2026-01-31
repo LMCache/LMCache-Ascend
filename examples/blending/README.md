@@ -1,5 +1,18 @@
 # CacheBlend Implementation Guide
 
+## Capability Matrix
+
+The following table defines the support level of CacheBlend across various component combinations:
+
+| vLLM Version | LMCache Version | Status | Stability Level | CacheBlend Support | Note |
+| :--- | :--- | :--- | :--- | :---: | :--- |
+| **0.9.2** | **0.3.3 / 0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.10.0** | **0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.11.0** | **0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.9.2** | **0.3.12** | 🔴 Conflict | **N/A** | **None** | Version mismatch; usage not advised. |
+| **0.10.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.11.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
+
 ## 1. Critical Preparations
 
 ### 1.1 vLLM-Ascend Ad-Hoc Modifications
