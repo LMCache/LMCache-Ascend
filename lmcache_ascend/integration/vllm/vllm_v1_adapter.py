@@ -2,18 +2,6 @@
 # Standard
 from typing import Union
 
-import torch
-
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
-)
-from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tp_group
-from vllm.utils import get_kv_cache_torch_dtype
-
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
@@ -31,6 +19,11 @@ import torch
 
 # First Party
 from lmcache_ascend import _build_info
+from lmcache_ascend.v1.npu_connector import (
+    VLLMBufferLayerwiseNPUConnector,
+    VLLMPagedMemLayerwiseNPUConnector,
+    VLLMPagedMemNPUConnectorV2,
+)
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party

@@ -2,12 +2,11 @@
 # Standard
 from typing import Optional
 
-import torch
-from vllm.platforms import current_platform
-
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.system_detection import NUMAMapping
+from vllm.platforms import current_platform
+import torch
 
 logger = init_logger(__name__)
 

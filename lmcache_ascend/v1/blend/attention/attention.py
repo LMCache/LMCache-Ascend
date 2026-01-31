@@ -17,11 +17,11 @@ import transformers.integrations.npu_flash_attention as nfa
 
 if not hasattr(nfa, "npu_fusion_attention"):
     nfa.npu_fusion_attention = torch_npu.npu_fusion_attention
+# Third Party
+from torch_npu import npu_fused_infer_attention_score
 from transformers.integrations.npu_flash_attention import (
     npu_flash_attn_varlen_func as flash_attn_varlen_func,
 )
-
-from torch_npu import npu_fused_infer_attention_score
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -162,6 +162,7 @@ class LMCAttnBackend(AttentionInterface):
     This backend uses the FlashAttention implementation
     for efficient attention computation.
     """
+
     def __init__(
         self,
         vllm_attn: Attention,
@@ -217,7 +218,7 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: "FlashAttnMetadata",
+        attn_metadata: "LMCFlashAttnMetadata",
         **kwargs,
     ) -> torch.Tensor:
         """
@@ -225,7 +226,7 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         Handles both [Batch, Seq, Heads, Dim] and [TotalSeq, Heads, Dim] inputs.
         """
         # 1. Extract LMCache specific metadata
-        blend_metadata = kwargs.get('blend_metadata')
+        blend_metadata = kwargs.get("blend_metadata")
 
         # 2. Handle Input Shapes and Contiguity
         query = query.contiguous()
@@ -242,7 +243,7 @@ class ZLMCFlashAttnBackend(AttentionInterface):
 
             kv_seq_len = key.shape[0]
             num_kv_heads = key.shape[1]
-            
+
             # Unsqueeze to create pseudo-batch dimension for NPU (BSND requirements)
             query_input = query.unsqueeze(0)
             key_input = key.unsqueeze(0)
@@ -252,12 +253,12 @@ class ZLMCFlashAttnBackend(AttentionInterface):
 
         # 4. Determine Positions
         q_positions = None
-        
-        if blend_metadata is not None and hasattr(blend_metadata, 'imp_indices'):
+
+        if blend_metadata is not None and hasattr(blend_metadata, "imp_indices"):
             q_positions = blend_metadata.imp_indices
-        elif 'q_positions' in kwargs:
-            q_positions = kwargs['q_positions']
-        
+        elif "q_positions" in kwargs:
+            q_positions = kwargs["q_positions"]
+
         if q_positions is None:
             # Note: For flattened 3D input, q_seq_len is the total token count
             q_positions = torch.arange(q_seq_len, device=query.device, dtype=torch.long)
@@ -266,7 +267,7 @@ class ZLMCFlashAttnBackend(AttentionInterface):
 
         # 5. Construct Custom Boolean Mask for NPU
         if q_positions.dim() == 1:
-            mask_condition = (q_positions.unsqueeze(1) < k_positions.unsqueeze(0))
+            mask_condition = q_positions.unsqueeze(1) < k_positions.unsqueeze(0)
             # Reshape to (1, 1, Q, K) to broadcast over Batch and Heads
             atten_mask = mask_condition.unsqueeze(0).unsqueeze(0)
         else:
@@ -276,28 +277,28 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         atten_mask = atten_mask.to(torch.bool)
 
         result_tuple = npu_fused_infer_attention_score(
-            query=query_input, # Use the prepared input
+            query=query_input,  # Use the prepared input
             key=key_input,
             value=value_input,
             atten_mask=atten_mask,
             actual_seq_lengths=None,
             actual_seq_lengths_kv=None,
-            num_heads=num_heads,          # Now correctly extracted
-            num_key_value_heads=num_kv_heads, # Now correctly extracted
+            num_heads=num_heads,  # Now correctly extracted
+            num_key_value_heads=num_kv_heads,  # Now correctly extracted
             scale=self.vllm_attn_impl.scale,
-            input_layout="BSND", 
+            input_layout="BSND",
             sparse_mode=0,
-            softmax_lse_flag=False
+            softmax_lse_flag=False,
         )
-        
+
         attention_out = result_tuple[0]
 
         # 7. Copy to output
         if output is not None:
             # Ensure shape matches output
             if output.shape != attention_out.shape:
-                 # Flatten back if input was 3D but we processed as 4D
-                 attention_out = attention_out.reshape(output.shape)
+                # Flatten back if input was 3D but we processed as 4D
+                attention_out = attention_out.reshape(output.shape)
             output.copy_(attention_out)
             return output
 
@@ -307,9 +308,8 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         self,
         input_ids: torch.Tensor,
         **kwargs,
-    ) -> "LMCAttnMetadata":
+    ) -> "LMCFlashAttnMetadata":
         """
         Initialize attention metadata.
         """
         raise NotImplementedError
-

@@ -4,16 +4,15 @@
 from unittest.mock import Mock, patch
 
 # Third Party
+from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
+from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
+from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
+from lmcache.v1.config import LMCacheEngineConfig
 import pytest
 import torch
 
 # First Party
 from lmcache_ascend.v1.blend.blender import LMCBlender
-
-from lmcache.v1.compute.attention.metadata import LMCAttnMetadata
-from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
-from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
-from lmcache.v1.config import LMCacheEngineConfig
 
 
 class TestLMCBlendMetadata:

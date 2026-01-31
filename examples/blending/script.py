@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import asdict
 import argparse
 import contextlib
 import os
-from dataclasses import asdict
 
 # Third Party
 from transformers import AutoTokenizer

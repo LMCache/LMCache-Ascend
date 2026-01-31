@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from pathlib import Path
 import configparser
 import glob
 import logging
@@ -9,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-from pathlib import Path
 
 # Third Party
 from setuptools import Extension, find_packages, setup

@@ -3,10 +3,9 @@
 This file contain methods for  torch.Tensor or np.ndarray.
 """
 
-import ctypes
-
 # Standard
 from typing import Union
+import ctypes
 
 # Third Party
 import numpy as np
@@ -21,8 +20,8 @@ USE_MS = False
 if _build_info.__framework_name__ == "mindspore":
     USE_MS = True
     # Third Party
-    import mindspore as ms
     from mindspore.common import np_dtype
+    import mindspore as ms
 
 MS_DTYPE_SIZE = {}
 

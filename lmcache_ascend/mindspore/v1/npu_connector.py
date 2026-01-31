@@ -30,10 +30,8 @@ import torch
 # First Party
 from lmcache_ascend.v1.npu_connector import KVCacheFormat, is_310p
 
-# Third Party
-from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

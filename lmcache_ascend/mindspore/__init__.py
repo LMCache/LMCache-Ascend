@@ -4,11 +4,11 @@
 # Standard
 import sys
 
-# First Party
-from lmcache_ascend import c_ops
-
 # Third Party
 import lmcache
+
+# First Party
+from lmcache_ascend import c_ops
 
 sys.modules["lmcache.c_ops"] = c_ops
 
@@ -39,25 +39,25 @@ from lmcache_ascend.mindspore.v1.memory_management import NumpyAndTensorMemoryAl
 
 lmcache.v1.memory_management.TensorMemoryAllocator = NumpyAndTensorMemoryAllocator
 
+# Third Party
+import lmcache.v1.storage_backend
+
 # First Party
 from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import (
     StorageBackendInterface___init__,
 )
 
-# Third Party
-import lmcache.v1.storage_backend
-
 lmcache.v1.storage_backend.StorageBackendInterface.__init__ = (
     StorageBackendInterface___init__
 )
+
+# Third Party
+import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
 
 # First Party
 from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
     MooncakeStoreConnector__register_cpu_buffer,
 )
-
-# Third Party
-import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
 
 mooncakestore_connector.MooncakestoreConnector._register_cpu_buffer = (
     MooncakeStoreConnector__register_cpu_buffer
@@ -81,19 +81,19 @@ mooncakestore_connector.MooncakestoreConnector._put_without_metadata = (
     MooncakeStoreConnector__put_without_metadata
 )
 
-# First Party
-from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2
-
 # Third Party
 import lmcache.v1.gpu_connector
 
-lmcache.v1.gpu_connector.VLLMPagedMemGPUConnectorV2 = VLLMPagedMemNPUConnectorV2
-
 # First Party
-from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
+from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2
+
+lmcache.v1.gpu_connector.VLLMPagedMemGPUConnectorV2 = VLLMPagedMemNPUConnectorV2
 
 # Third Party
 import lmcache.v1.system_detection
+
+# First Party
+from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
 
 lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 

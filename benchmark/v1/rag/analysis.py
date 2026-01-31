@@ -4,11 +4,10 @@ import matplotlib
 import pandas as pd
 
 matplotlib.use("Agg")
-import argparse
-import os
-
 # Standard
 from typing import Dict, List
+import argparse
+import os
 
 # Third Party
 import matplotlib.pyplot as plt

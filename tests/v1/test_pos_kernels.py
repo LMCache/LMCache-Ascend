@@ -3,15 +3,14 @@
 # Standard
 from typing import Callable, List
 
+# Third Party
+from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
 import numpy as np
 import pytest
 import torch
 
 # First Party
 from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
-
-# Third Party
-from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
 
 # ==============================================================================
 # 1. Dummy Rope Implementation (for comparison)

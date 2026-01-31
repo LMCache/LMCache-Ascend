@@ -1,16 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import asyncio
-import functools
-import threading
 from collections import OrderedDict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Generator, List, Optional
+import asyncio
+import functools
+import threading
 
 # Third Party
-import torch
-
-# First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
@@ -18,6 +15,7 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager, EventType
 from lmcache.v1.storage_backend import CreateStorageBackends
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
+import torch
 
 if TYPE_CHECKING:
     # First Party

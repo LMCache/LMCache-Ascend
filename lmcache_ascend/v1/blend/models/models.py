@@ -3,7 +3,10 @@
 from torch import nn
 
 # First Party
-from lmcache_ascend.v1.blend.attention.attention import LMCFlashAttnBackend,LMCAttnBackend,ZLMCFlashAttnBackend
+from lmcache_ascend.v1.blend.attention.attention import (
+    LMCAttnBackend,
+    ZLMCFlashAttnBackend,
+)
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope
 
 
@@ -19,7 +22,7 @@ class LMCModel(nn.Module):
         self.num_layers = len(vllm_model.model.layers)
 
         self.vllm_attn_layers = []
-        eager=False
+        eager = False
         if not eager:
             self.lmc_attn_layers: list[ZLMCFlashAttnBackend] = []
         else:

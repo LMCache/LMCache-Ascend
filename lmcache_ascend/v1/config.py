@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# First Party
+# Third Party
 from lmcache.logging import init_logger
 
 logger = init_logger(__name__)

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Third Party
-# First Party
-from lmcache_ascend import _build_info
+# Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.logger import init_logger
+
+# First Party
+from lmcache_ascend import _build_info
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party

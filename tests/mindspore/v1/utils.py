@@ -6,13 +6,12 @@ import random
 import string
 import threading
 
-import numpy as np
-import torch
-
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+import numpy as np
+import torch
 
 
 def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):

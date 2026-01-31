@@ -2,14 +2,14 @@
 # Standard
 import random
 
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
-import pytest
-import torch
-from lmcache_tests.v1.utils import check_mem_obj_equal
-
 # Third Party
 from lmcache.v1.memory_management import PinMemoryAllocator
+from lmcache_tests.v1.utils import check_mem_obj_equal
+import pytest
+import torch
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 
 # Local
 from .utils import (

@@ -3,10 +3,6 @@
 from enum import Enum, auto
 from typing import List, Optional, Tuple, Union
 
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
-import torch
-
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
@@ -18,6 +14,10 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
+import torch
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

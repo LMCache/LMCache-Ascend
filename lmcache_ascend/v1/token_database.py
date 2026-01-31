@@ -2,9 +2,8 @@
 from typing import Iterable, List, Optional, Tuple, Union
 
 # Third Party
-import torch
-
 from lmcache.utils import CacheEngineKey
+import torch
 
 # Type alias for process_tokens return value
 # (start_index, end_index, cache_engine_key｜hash)
