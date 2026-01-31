@@ -16,34 +16,34 @@ from vllm.engine.arg_utils import EngineArgs
 def build_llm_with_lmcache(model: str, max_model_len: int = 32000, blend: bool = True):
     lmcache_connector = "LMCacheAscendConnectorV1Dynamic"
     ktc = KVTransferConfig(
-            kv_connector=lmcache_connector,
-            kv_role="kv_both",
-            kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
-            )
+        kv_connector=lmcache_connector,
+        kv_role="kv_both",
+        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
+    )
 
     if blend:
         llm_args = EngineArgs(
-                model=model,
-                kv_transfer_config=ktc,
-                max_model_len=max_model_len,
-                gpu_memory_utilization=0.6,
-                enable_prefix_caching=False,
-                enforce_eager=True,
-                tensor_parallel_size=1,
-                max_num_seqs=1,
-                trust_remote_code=True,
-                )
+            model=model,
+            kv_transfer_config=ktc,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=0.6,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            tensor_parallel_size=1,
+            max_num_seqs=1,
+            trust_remote_code=True,
+        )
     else:
         llm_args = EngineArgs(
-                model=model,
-                max_model_len=max_model_len,
-                gpu_memory_utilization=0.6,
-                enable_prefix_caching=False,
-                enforce_eager=True,
-                tensor_parallel_size=1,
-                max_num_seqs=1,
-                trust_remote_code=True,
-                )
+            model=model,
+            max_model_len=max_model_len,
+            gpu_memory_utilization=0.6,
+            enable_prefix_caching=False,
+            enforce_eager=True,
+            tensor_parallel_size=1,
+            max_num_seqs=1,
+            trust_remote_code=True,
+        )
 
     llm = LLM(**asdict(llm_args))
     yield llm
@@ -55,7 +55,6 @@ def setup_environment_variables(recompute_ratio):
     # LMCache is set to use 256 tokens per chunk
     os.environ["LMCACHE_CHUNK_SIZE"] = "256"
     os.environ["VLLM_ENFORCE_EAGER"] = "True"
-    #os.environ["LMCACHE_BLEND_RECOMPUTE_RATIO"] = str(recompute_ratio)   #bug. ratios not ratio
 
     # Blending related config
     os.environ["LMCACHE_ENABLE_BLENDING"] = "True"
@@ -93,24 +92,24 @@ if __name__ == "__main__":
     chunk4_prompt = tokenizer.encode("By definition k=0;", add_special_tokens=False)
     chunk3_prompt = tokenizer.encode("Then x+y=", add_special_tokens=False)
     blend_special_str = tokenizer.encode(
-            os.getenv("LMCACHE_BLEND_SPECIAL_STR"), add_special_tokens=False
-            )
+        os.getenv("LMCACHE_BLEND_SPECIAL_STR"), add_special_tokens=False
+    )
     prompt = (
-            chunk1_prompt
-            + blend_special_str
-            + chunk2_prompt
-            + blend_special_str
-            + chunk3_prompt
-            )
+        chunk1_prompt
+        + blend_special_str
+        + chunk2_prompt
+        + blend_special_str
+        + chunk3_prompt
+    )
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
     with build_llm_with_lmcache(model, blend=not args.no_blend) as llm:
-        out=llm.generate(
-                {"prompt_token_ids": prompt},
-                sampling_params=sampling_params,
-                )
-        print(f"{out[0].outputs[0].text=}")
-        out=llm.generate(
-                {"prompt_token_ids": prompt},
-                sampling_params=sampling_params,
-                )
-        print(f"{out[0].outputs[0].text=}")
+        out = llm.generate(
+            {"prompt_token_ids": prompt},
+            sampling_params=sampling_params,
+        )
+        print(f"{out[0].outputs[0].text}")
+        out = llm.generate(
+            {"prompt_token_ids": prompt},
+            sampling_params=sampling_params,
+        )
+        print(f"{out[0].outputs[0].text}")

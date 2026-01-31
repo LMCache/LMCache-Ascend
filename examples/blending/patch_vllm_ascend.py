@@ -9,7 +9,7 @@ This script:
   - comments out ensure_kv_transfer_initialized in _init_worker_distributed_environment
   - creates a backup of the original file
 
-2. Patch vLLM-Ascend for Rotary Embedding 
+2. Patch vLLM-Ascend for Rotary Embedding
 """
 
 # Future
@@ -31,15 +31,21 @@ _IMPORTS_TO_ADD = [
 TARGET_MODULE = "vllm_ascend.ops.rotary_embedding"
 TARGET_FUNC = "_rope_forward_oot"
 REQUIRED_VERSIONS = [
-    "0.10.2rc1", "0.11.0rc0", "0.11.0rc1", 
-    "0.11.0rc2", "0.11.0rc3", "0.11.0"
+    "0.10.2rc1",
+    "0.11.0rc0",
+    "0.11.0rc1",
+    "0.11.0rc2",
+    "0.11.0rc3",
+    "0.11.0",
 ]
+
 
 def get_vllm_ascend_version():
     try:
         return importlib.metadata.version("vllm-ascend")
     except importlib.metadata.PackageNotFoundError:
         return None
+
 
 def _find_module_path(module_name: str) -> Path:
     """Find the file system path of a python module."""
@@ -200,7 +206,7 @@ def patch_rope_forward(path: Path) -> bool:
     Applies the 'self.cos = None' patch to _rope_forward_oot.
     """
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    
+
     start_idx = -1
     indent = ""
 
@@ -210,7 +216,7 @@ def patch_rope_forward(path: Path) -> bool:
             for j in range(i + 1, len(lines)):
                 stripped = lines[j].lstrip()
                 if stripped and not stripped.startswith('"""'):
-                    indent = lines[j][:len(lines[j]) - len(stripped)]
+                    indent = lines[j][: len(lines[j]) - len(stripped)]
                     break
             break
 
@@ -223,7 +229,7 @@ def patch_rope_forward(path: Path) -> bool:
         if i < len(lines) and "self.cos = None" in lines[i]:
             already_patched = True
             break
-    
+
     if already_patched:
         return False
 
@@ -263,6 +269,11 @@ def main() -> int:
 
     try:
         did_patch = patch_ascend_worker(target_path)
+
+        if did_patch:
+            print(f"Successfully patched ascend_worker: {target_path}")
+        else:
+            print(f"Ascend_worker already patched or no changes needed: {target_path}")
     except Exception as exc:
         print(f"Error patching {target_path}: {exc}", file=sys.stderr)
         # Standard
@@ -270,24 +281,29 @@ def main() -> int:
 
         traceback.print_exc()
         return 1
-    
+
     # --- 2. Patch Rotary Embedding ---
     try:
         current_version = get_vllm_ascend_version()
         if current_version not in REQUIRED_VERSIONS:
-            print(f"Skipping RoPE patch: vllm-ascend version {current_version} is not in the required list.")
+            print(
+                f"Skipping RoPE patch: vllm-ascend version {current_version} "
+                "is not in the required list."
+            )
         else:
             rope_path = _find_module_path(args.rope_module)
             did_patch_rope = patch_rope_forward(rope_path)
-            
+
             if did_patch_rope:
                 print(f"Successfully patched rope_forward: {rope_path}")
             else:
                 print(f"Rope forward already patched or no changes needed: {rope_path}")
-                
+
     except Exception as exc:
         print(f"Error patching rope module: {exc}", file=sys.stderr)
+        # Standard
         import traceback
+
         traceback.print_exc()
         return 1
 
