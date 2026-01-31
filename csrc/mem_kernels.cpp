@@ -263,6 +263,54 @@ void single_layer_kv_transfer(
   cmd.Run();
 }
 
+
+void single_layer_kv_transfer_v1(torch::Tensor& lmc_key_value_cache, // [num_tokens, 2, num_heads*head_size]
+                                                                  // or
+                                                                  // [2, num_tokens, num_heads*head_size]
+                              torch::Tensor& vllm_key_cache, // [num_blocks, block_size, num_heads, head_size]
+                              torch::Tensor& vllm_value_cache, // [....]
+                              torch::Tensor& slot_mapping, // [num_tokens]
+                              const bool direction, // false: LMCache to PagedBuffer, true: PagedBuffer to LMCache
+                              const bool token_major // true: lmc_key_value_cache is [num_tokens, 2, num_heads*head_size]
+                                                     // false: otherwise
+) {
+    uint8_t *lmc_key_value_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(lmc_key_value_cache);
+    uint8_t *vllm_key_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(vllm_key_cache);
+    uint8_t *vllm_value_cache_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(vllm_value_cache);
+    uint8_t *slot_mapping_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(slot_mapping);
+
+    int num_tokens = slot_mapping.size(0);
+    int hidden_dims = lmc_key_value_cache.size(-1);
+
+    const c10::OptionalDeviceGuard device_guard(device_of(vllm_key_cache));
+    const c10::OptionalDeviceGuard slot_device_guard(device_of(slot_mapping));
+    const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+
+    at::ScalarType scalar_type = vllm_key_cache.scalar_type();
+    at::ScalarType slot_type = slot_mapping.scalar_type();
+    
+    const char* socName = aclrtGetSocName();
+
+    at_npu::native::OpCommand cmd;
+    cmd.Name("single_layer_kv_transfer_kernel_v1");
+    cmd.SetCustomHandler([scalar_type, slot_type, socName, stream, lmc_key_value_cache_ptr,
+                          vllm_key_cache_ptr, vllm_value_cache_ptr, slot_mapping_ptr,
+                          hidden_dims, num_tokens, direction, token_major]() -> int {
+        auto slot_num = vllm_ascend::get_dtype_from_torch(slot_type);
+        auto dtype_num = vllm_ascend::get_dtype_from_torch(scalar_type);
+        auto ascendcPlatform = platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+        uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
+        // TODO: We will add the isMLA argument once the signature have support for the MLA.
+        kvcache_ops::single_layer_kv_transfer_kernel(dtype_num, slot_num, aiv_num, stream, lmc_key_value_cache_ptr,
+                                         vllm_key_cache_ptr, vllm_value_cache_ptr, slot_mapping_ptr,
+                                         hidden_dims, num_tokens, direction, token_major, false);
+        return 0;
+    });
+    cmd.Run();
+    return ;
+};
+
+
 void batched_fused_single_layer_kv_transfer(
     std::vector<torch::Tensor>
         &lmc_tensors, // N CPU pinned memory tensors
