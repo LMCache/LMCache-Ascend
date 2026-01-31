@@ -96,3 +96,15 @@ import lmcache.v1.system_detection
 from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
 
 lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
+
+# Third Party
+import lmcache.integration.vllm.vllm_v1_adapter
+
+# First Party
+from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+    init_lmcache_engine as ascend_init_lmcache_engine,
+)
+
+lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
+    ascend_init_lmcache_engine
+)
