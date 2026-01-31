@@ -577,7 +577,6 @@ class OfflineRAGManager(BaseRAGManager):
                 prompt_token_count = len(output.prompt_token_ids)
                 generation_token_count = len(output.outputs[0].token_ids)
 
-                print(f"generated_text:{generated_text}")
                 response = Response(
                     request_id=i,
                     body=generated_text,

@@ -301,10 +301,6 @@ def main() -> int:
 
     except Exception as exc:
         print(f"Error patching rope module: {exc}", file=sys.stderr)
-        # Standard
-        import traceback
-
-        traceback.print_exc()
         return 1
 
     print("\nAll patch operations completed.")

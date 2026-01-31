@@ -186,6 +186,69 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                 gpu_buffer_size, device=self.device
             )
 
+    def _prepare_transfer_context(self, kwargs) -> torch.Tensor:
+        """
+        Initialize context for KV cache transfer, validate required
+        parameters and lazy init buffer.
+        """
+        self.initialize_kvcaches_ptr(**kwargs)
+        if self.kvcaches is None:
+            raise ValueError("kvcaches should be provided in kwargs or initialized.")
+
+        if "slot_mapping" not in kwargs:
+            raise ValueError("'slot_mapping' should be provided in kwargs.")
+
+        self._lazy_initialize_buffer(self.kvcaches)
+        return kwargs["slot_mapping"]
+
+    def _get_full_slot_mapping(
+        self,
+        slot_mapping: torch.Tensor,
+        starts: List[int],
+        ends: List[int],
+        mode: str = "slice",
+    ) -> tuple[torch.Tensor, int]:
+        """
+        Generate full continuous slot mapping tensor and calculate total token count.
+        Supports two modes for different transfer directions (to/from GPU).
+        """
+        if mode == "slice":
+            slot_mapping_full = slot_mapping[starts[0] : ends[-1]]
+        elif mode == "concat":
+            slot_mapping_chunks = [
+                slot_mapping[s:e] for s, e in zip(starts, ends, strict=False)
+            ]
+            slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+        else:
+            raise ValueError(
+                f"Unsupported slot mapping mode: {mode}, only 'slice'/'concat' allowed"
+            )
+
+        num_tokens = len(slot_mapping_full)
+        return slot_mapping_full, num_tokens
+
+    def _allocate_gpu_buffers(
+        self, num_tokens: int, count: int = 1
+    ) -> Union[object, list[object]]:
+        """
+        Allocate specified number of GPU buffers for KV cache with shape
+        calculated by token count. Performs strict assertion checks for
+        valid buffer allocation.
+        """
+        buffer_shape = self.get_shape(num_tokens)
+        assert self.gpu_buffer_allocator is not None, (
+            "GPU buffer allocator not initialized"
+        )
+        buffers = []
+        for _ in range(count):
+            buf_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_2TD
+            )
+            assert buf_obj is not None, "Failed to allocate GPU buffer in GPUConnector"
+            assert buf_obj.tensor is not None, "GPU buffer object has no valid tensor"
+            buffers.append(buf_obj)
+        return buffers[0] if count == 1 else buffers
+
     @_lmcache_nvtx_annotate
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
         """
@@ -202,26 +265,16 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         :param ends: The ending indices of the KV cache in the corresponding
             token sequence.
         """
-
-        self.initialize_kvcaches_ptr(**kwargs)
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
-
-        if "slot_mapping" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
+        slot_mapping = self._prepare_transfer_context(kwargs)
 
         if self.fused_rotary_emb is None and self.cache_positions:
             # TODO(Jiayi): Make this more elegant
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-
-        self._lazy_initialize_buffer(self.kvcaches)
-
-        num_all_tokens = ends[-1] - starts[0]
-        slot_mapping_full = slot_mapping[starts[0] : ends[-1]]
+        slot_mapping_full, num_all_tokens = self._get_full_slot_mapping(
+            slot_mapping, starts, ends, mode="slice"
+        )
 
         # compute gap positions
         gap_mask = torch.ones(
@@ -234,32 +287,14 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
         self.current_gap_positions = torch.where(gap_mask)[0]
 
-        buf_offset = starts[0]
+        compute_gpu_buffer_obj, load_gpu_buffer_obj = self._allocate_gpu_buffers(
+            num_all_tokens, count=2
+        )
+
         if self.cache_positions:
             new_positions_full = torch.arange(
                 starts[0], ends[-1], dtype=torch.int64, device=self.kv_device
             )
-
-        buffer_shape = self.get_shape(num_all_tokens)
-        assert self.gpu_buffer_allocator is not None
-        compute_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-            buffer_shape, self.dtype, MemoryFormat.KV_2TD
-        )
-        load_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-            buffer_shape, self.dtype, MemoryFormat.KV_2TD
-        )
-        assert compute_gpu_buffer_obj is not None, (
-            "Failed to allocate GPU buffer in GPUConnector"
-        )
-        assert load_gpu_buffer_obj is not None, (
-            "Failed to allocate GPU buffer in GPUConnector"
-        )
-        assert compute_gpu_buffer_obj.tensor is not None
-        assert load_gpu_buffer_obj.tensor is not None
-
-        # current_stream = torch.cuda.current_stream()
-
-        if self.cache_positions:
             old_positions_full = torch.zeros(
                 (num_all_tokens,), dtype=torch.int64, device=self.kv_device
             )
@@ -378,45 +413,25 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-
-        self.initialize_kvcaches_ptr(**kwargs)
-        assert self.kvcaches is not None, (
-            "kvcaches should be provided in kwargs or initialized beforehand."
-        )
-
-        if "slot_mapping" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
-
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
-
-        self._lazy_initialize_buffer(self.kvcaches)
+        slot_mapping = self._prepare_transfer_context(kwargs)
 
         buf_start = 0
-        slot_mapping_chunks = []
         buf_starts_ends = []
         old_positions_chunks = []
         for start, end in zip(starts, ends, strict=False):
             buf_end = buf_start + end - start
             buf_starts_ends.append((buf_start, buf_end))
-            slot_mapping_chunks.append(slot_mapping[start:end])
             buf_start = buf_end
             if self.cache_positions:
                 old_positions_chunks.append(
                     torch.arange(start, end, device=self.kv_device, dtype=torch.int64)
                 )
 
-        slot_mapping_full = torch.cat(slot_mapping_chunks, dim=0)
+        slot_mapping_full, num_tokens = self._get_full_slot_mapping(
+            slot_mapping, starts, ends, mode="concat"
+        )
 
-        num_tokens = len(slot_mapping_full)
-        buffer_shape = self.get_shape(num_tokens)
-        assert self.gpu_buffer_allocator is not None
-        tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-            buffer_shape, self.dtype, MemoryFormat.KV_2TD
-        )
-        assert tmp_gpu_buffer_obj is not None, (
-            "Failed to allocate GPU buffer in GPUConnector"
-        )
-        assert tmp_gpu_buffer_obj.tensor is not None
+        tmp_gpu_buffer_obj = self._allocate_gpu_buffers(num_tokens, count=1)
 
         current_stream = torch.cuda.current_stream()
 
