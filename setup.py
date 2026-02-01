@@ -172,13 +172,6 @@ class custom_install(install):
     def run(self):
         self.run_command("build_ext")
         install.run(self)
-        run_vllm_patch()
-
-
-class custom_develop(develop):
-    def run(self):
-        develop.run(self)
-        run_vllm_patch()
 
 
 class CustomAscendCmakeBuildExt(build_ext):
@@ -334,6 +327,7 @@ class CustomAscendCmakeBuildExt(build_ext):
                     )
 
         logger.info("All files copied successfully")
+        run_vllm_patch()
 
 
 def ascend_extension():
@@ -341,8 +335,6 @@ def ascend_extension():
     return [CMakeExtension(name="lmcache_ascend.c_ops")], {
         "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt,
-        "install": custom_install,
-        "develop": custom_develop,
     }
 
 
