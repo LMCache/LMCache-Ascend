@@ -26,6 +26,23 @@ logger = logging.getLogger(__name__)
 USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 
+def run_vllm_patch():
+    """Execute the vllm-ascend patch script after installation."""
+    patch_script = os.path.join(ROOT_DIR, "examples", "blending", "patch_vllm_ascend.py")
+    if os.path.exists(patch_script):
+        logger.info(f"Applying vLLM-Ascend patch from: {patch_script}")
+        try:
+            # Use the same python interpreter to ensure environment consistency
+            subprocess.check_call([sys.executable, patch_script])
+            logger.info("vLLM-Ascend patch applied successfully.")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"vLLM-Ascend patch failed with error: {e}")
+            # We don't necessarily want to crash the whole install if the patch fails, 
+            # but you can raise an error here if the patch is mandatory.
+    else:
+        logger.warning(f"Patch script NOT found at {patch_script}. Skipping patch.")
+
+
 def _get_ascend_home_path():
     # NOTE: standard Ascend CANN toolkit path
     return os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
@@ -155,6 +172,13 @@ class custom_install(install):
     def run(self):
         self.run_command("build_ext")
         install.run(self)
+        run_vllm_patch()
+
+
+class custom_develop(develop):
+    def run(self):
+        develop.run(self)
+        run_vllm_patch()
 
 
 class CustomAscendCmakeBuildExt(build_ext):
@@ -317,6 +341,8 @@ def ascend_extension():
     return [CMakeExtension(name="lmcache_ascend.c_ops")], {
         "build_py": custom_build_info,
         "build_ext": CustomAscendCmakeBuildExt,
+        "install": custom_install,
+        "develop": custom_develop,
     }
 
 
