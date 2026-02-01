@@ -28,7 +28,8 @@ USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 def run_vllm_patch():
     """Execute the vllm-ascend patch script after installation."""
-    patch_script = os.path.join(ROOT_DIR, "examples", "blending", "patch_vllm_ascend.py")
+    patch_rel_path = ("examples", "blending", "patch_vllm_ascend.py")
+    patch_script = os.path.join(ROOT_DIR, *patch_rel_path)
     if os.path.exists(patch_script):
         logger.info(f"Applying vLLM-Ascend patch from: {patch_script}")
         try:
@@ -37,7 +38,7 @@ def run_vllm_patch():
             logger.info("vLLM-Ascend patch applied successfully.")
         except subprocess.CalledProcessError as e:
             logger.error(f"vLLM-Ascend patch failed with error: {e}")
-            # We don't necessarily want to crash the whole install if the patch fails, 
+            # We don't necessarily want to crash the whole install if the patch fails,
             # but you can raise an error here if the patch is mandatory.
     else:
         logger.warning(f"Patch script NOT found at {patch_script}. Skipping patch.")
