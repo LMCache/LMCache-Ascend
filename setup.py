@@ -30,7 +30,9 @@ def run_patches():
     """Execute the patch script after installation."""
     try:
         sys.path.append(str(ROOT_DIR))
+        # First Party
         from lmcache_ascend.integration.patch.apply_patch import run_integration_patches
+
         run_integration_patches()
     except Exception as e:
         logger.error(f"Post-install patch system encountered an error: {e}")
