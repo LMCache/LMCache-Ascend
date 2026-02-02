@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import Enum, auto
-from typing import List, Optional, Tuple, Union
+from typing import List, Optional, Tuple, Union, Any
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -114,6 +114,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         )
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
         self.use_mla = bool(kwargs.get("use_mla", False))
+        self.fused_rotary_emb: Any = None
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
