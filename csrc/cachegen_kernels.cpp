@@ -12,6 +12,8 @@
 
 namespace py = pybind11;
 
+static constexpr uint32_t AIV_MAX = 20;
+
 void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
                        at::Tensor &output_buffer, at::Tensor &output_lengths) {
 
@@ -45,8 +47,8 @@ void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
   auto _custom_handler = [=]() -> int {
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = ascendcPlatform->GetCoreNumAiv();
-    kvcache_ops::cachegen::encode(cdf_data_ptr, input_data_ptr, output_data_ptr,
+    uint32_t n_aiv = AIV_MAX;
+    kvcache_ops::cachegen::encode_v2(cdf_data_ptr, input_data_ptr, output_data_ptr,
                                   output_lengths_data_ptr, stream, n_aiv, nbins,
                                   ntokens, nlayers, nchannels, chunk_size);
     return 0;
@@ -103,10 +105,10 @@ void decode_ascend_prefsum(const at::Tensor &cdf, const at::Tensor &bytestreams,
   const char *socName = aclrtGetSocName();
   auto ascendcPlatform =
       platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-  uint32_t n_aiv = ascendcPlatform->GetCoreNumAiv();
+  uint32_t n_aiv = AIV_MAX;
 
   auto _custom_handler = [=]() -> int {
-    kvcache_ops::cachegen::decode(cdf_data_ptr, bytestreams_data_ptr,
+    kvcache_ops::cachegen::decode_v2(cdf_data_ptr, bytestreams_data_ptr,
                                   lengths_data_ptr, output_data_ptr, stream,
                                   n_aiv, nbins, ntokens, nlayers, nchannels);
     return 0;
@@ -148,7 +150,7 @@ at::Tensor calculate_cdf(const at::Tensor &input, const int n_bins) {
   auto _custom_handler = [=]() -> int {
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = ascendcPlatform->GetCoreNumAiv();
+    uint32_t n_aiv = AIV_MAX;
     kvcache_ops::cachegen::calculate_cdf(input_data_ptr, output_data_ptr,
                                          stream, n_aiv, n_bins, ntokens,
                                          nlayers, nchannels);
