@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import importlib.util
-from .vllm.vllm_ascend_patch import VLLMAscendPatcher
+from .vllm.cacheblend_patch import CacheBlendPatcher
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,7 @@ def run_integration_patches():
 
     if is_installed("vllm_ascend"):
         logger.info("vLLM-Ascend environment confirmed. Applying patches...")
-        success = VLLMAscendPatcher.apply_all()
+        success = CacheBlendPatcher.apply_all()
         if success:
             logger.info("vLLM-Ascend patches applied successfully.")
         else:

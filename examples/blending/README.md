@@ -19,12 +19,14 @@ The following table defines the support level of CacheBlend across various compo
 
 These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
 
+Note: These patches are now automatically applied during the pip install process. No manual intervention is typically required. However, if you encounter issues when using CacheBlend, you can re-apply the patch using one of the methods below.
+
 #### Option 1: Automatic Patching (Recommended)
 
 You can apply these changes automatically without needing to reinstall vllm-ascend from source. Simply run the following command:
 
 ```
-python /LMCache-Ascend/examples/blending/patch_vllm_ascend.py
+python /LMCache-Ascend/lmcache_ascend/integration/patch/apply_patch.py
 ```
 
 #### Option 2: Manual Modification

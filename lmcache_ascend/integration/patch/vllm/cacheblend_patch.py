@@ -27,7 +27,7 @@ import time
 # Configure local logger
 logger = logging.getLogger(__name__)
 
-class VLLMAscendPatcher:
+class CacheBlendPatcher:
     # Version list where RoPE patch is mandatory
     REQUIRED_ROPE_VERSIONS = [
         "0.10.2rc1", "0.11.0rc0", "0.11.0rc1", 
