@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import logging
 import importlib.util
-from .vllm.cacheblend_patch import CacheBlendPatcher
+from vllm_patch.cacheblend_patch import CacheBlendPatcher
 
 logger = logging.getLogger(__name__)
 
