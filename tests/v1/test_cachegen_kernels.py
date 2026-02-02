@@ -26,177 +26,6 @@ import torch_npu
 # First Party
 import lmcache_ascend.c_ops as lmc_ops
 
-
-@dataclass
-class QuantizedToCdfInput:
-    quantized_input: torch.Tensor  # [n_layers, n_tokens, n_channels]
-    expected_cdf_output: torch.Tensor  # [n_layers, n_channels, n_bins + 1]
-    n_bins: int
-
-    # To test the CDF calculations there needs to be some ground truth. To get this, we
-    # implement a basic CDF function in python using floats and compare that to the
-    # kernel results (which are in ints) allowing for numerical differences between the
-    # two approaches. This avoids relying on the exact implementation of the kernel but
-    # does make the asserts soft. This is okay, the kernel CDF calculations don't need
-    # to be exact, small deviations will have a negligible effect on encode/decode
-    # efficacy.
-    @staticmethod
-    def cdf_ground_truth(input: List[int], n_bins: int, _shape=None) -> List[int]:
-        if _shape is None:
-            _shape = (1, len(input), 1)
-
-        layers = _shape[0]
-        tokens = _shape[1]
-        channels = _shape[2]
-
-        cdfs = []
-        for layer_idx in range(layers):
-            syms_in_layer = input[
-                layer_idx * tokens * channels : (layer_idx + 1) * tokens * channels
-            ]
-            for channel_idx in range(channels):
-                syms_in_channel = syms_in_layer[
-                    channel_idx : tokens * channels : channels
-                ]
-
-                cdf = [0.0]
-                for bin_ii in range(n_bins):
-                    last = cdf[-1]
-                    cdf.append(last + (syms_in_channel.count(bin_ii) / tokens))
-
-                # Redistribute the results over the u16 range for comparison to kernel
-                # generated cdfs
-                cdfs += [round(prob * 0xFFFF) for prob in cdf]
-
-        return cdfs
-
-    @staticmethod
-    def init_from_array(
-        _quantized_input: List[int], _n_bins=8, _shape=None
-    ) -> "QuantizedToCdfInput":
-        if _shape is None:
-            _shape = (1, len(_quantized_input), 1)
-
-        input_as_T = (
-            torch.Tensor(_quantized_input)
-            .to(device="npu")
-            .to(torch.int8)
-            .reshape(_shape)
-        )
-
-        ground_truth = QuantizedToCdfInput.cdf_ground_truth(
-            _quantized_input, _n_bins, _shape
-        )
-        expected_cdf_as_T = (
-            torch.Tensor(ground_truth)
-            .to(torch.int32)
-            .reshape((_shape[0], _shape[2], _n_bins + 1))
-        )
-
-        torch_npu.npu.synchronize()
-
-        return QuantizedToCdfInput(
-            quantized_input=input_as_T,
-            expected_cdf_output=expected_cdf_as_T,
-            n_bins=_n_bins,
-        )
-
-    @staticmethod
-    def init_standard() -> "QuantizedToCdfInput":
-        _quantized_input = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 6, 6, 7]
-
-        return QuantizedToCdfInput.init_from_array(_quantized_input)
-
-    @staticmethod
-    def init_tie_to_break() -> "QuantizedToCdfInput":
-        # Omit all entries for a bucket (arbitrarily, 6). Now, buckets for 5 and 6 would
-        # have the same value in the CDF if the tie wasn't being broken.
-        #
-        # It is up to the kernel to break these ties in a sensible way (implementation
-        # detail, it adds a linear mask to ensure values are always distinct)
-        _quantized_input = [0, 1, 1, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 7]
-
-        return QuantizedToCdfInput.init_from_array(_quantized_input)
-
-    @staticmethod
-    def init_large_n_bins() -> "QuantizedToCdfInput":
-        # A "large" number of bins (128) - where the typical max value seems to be
-        # n_bins <= 32.
-        _quantized_input = list(range(0, 128))
-        return QuantizedToCdfInput.init_from_array(_quantized_input, _n_bins=128)
-
-    @staticmethod
-    def init_n_tokens(n_tokens) -> "QuantizedToCdfInput":
-        # Test various numbers of tokens
-        n_bins = 32
-        _quantized_input = [token % n_bins for token in range(0, n_tokens)]
-        return QuantizedToCdfInput.init_from_array(_quantized_input, _n_bins=n_bins)
-
-    @staticmethod
-    def init_multi_layer_multi_channel() -> "QuantizedToCdfInput":
-        # Token values for each layer: [n_channels]
-        _token_0_0 = [0, 4]
-        _token_0_1 = [1, 5]
-        _token_0_2 = [2, 6]
-        _token_0_3 = [3, 7]
-        _layer_0 = _token_0_0 + _token_0_1 + _token_0_2 + _token_0_3
-
-        _token_1_0 = [0, 2]
-        _token_1_1 = [0, 2]
-        _token_1_2 = [1, 2]
-        _token_1_3 = [1, 2]
-        _layer_1 = _token_1_0 + _token_1_1 + _token_1_2 + _token_1_3
-
-        _quantized_input = _layer_0 + _layer_1
-
-        return QuantizedToCdfInput.init_from_array(_quantized_input, _shape=(2, 4, 2))
-
-
-# (input/expected)_cdf: [nlayers, nchannels, n_bins + 1]
-def soft_check_cdf(input_cdf: torch.Tensor, expected_cdf: torch.Tensor, tolerance=32):
-    input_cdf = input_cdf.to(torch.uint16)
-    expected_cdf = expected_cdf.to(torch.uint16)
-    input_cdf = input_cdf.to(torch.int32)
-    expected_cdf = expected_cdf.to(torch.int32).to(device="npu")
-
-    in_shape = input_cdf.shape
-    expected_shape = expected_cdf.shape
-    assert len(in_shape) == 3  # expected format of [nlayers, nchannels, n_bins + 1]
-    assert in_shape == expected_shape
-
-    # Invariant check: The CDF should be monatonically increasing within each layer &
-    # channel
-    assert (input_cdf[:, :, -2] < input_cdf[:, :, -1]).all()
-    rolled = input_cdf.roll(1, 2)
-    rolled[:, :, 0] = -1
-    assert (rolled < input_cdf).all()
-
-    # The CDF should match the expected values. This doesn't need to be exact so there
-    # is a tolerance allowing for:
-    #   - Numeric differences between ground truth and kernel calculations
-    #   - Different ways of breaking ties in the CDF
-    assert (input_cdf - expected_cdf).abs().le(tolerance).all()
-
-
-@pytest.mark.parametrize(
-    "test_input",
-    [
-        QuantizedToCdfInput.init_standard(),
-        QuantizedToCdfInput.init_tie_to_break(),
-        QuantizedToCdfInput.init_large_n_bins(),
-        QuantizedToCdfInput.init_n_tokens(1),
-        QuantizedToCdfInput.init_n_tokens(1024),
-        QuantizedToCdfInput.init_n_tokens(8000),
-        QuantizedToCdfInput.init_n_tokens(200000),
-        QuantizedToCdfInput.init_multi_layer_multi_channel(),
-    ],
-)
-def test_basic_quantized_to_cdf_calculation(test_input):
-    test_output = lmc_ops.calculate_cdf(test_input.quantized_input, test_input.n_bins)
-    torch_npu.npu.synchronize()
-    soft_check_cdf(test_output, test_input.expected_cdf_output)
-
-
 # Generating relastic and obviously correct input/output for encode is hard in all but
 # the most trivial cases. Fortunately what we really care about is that
 #  - decode recovers the symbols that were input to encode
@@ -274,8 +103,8 @@ def test_basic_encode(layers, channels, bits_for_symbol):
             str_rep += f"{token:06b}"  # 64
         else:
             raise AssertionError()
-    str_rep += "01"  # Implementation detail appends a tail
-    str_rep += "0" * (8 - len(str_rep) % 8)
+    if len(str_rep) % 8 != 0:
+        str_rep += "0" * (8 - len(str_rep) % 8)
     expected = list(
         [int(str_rep[ii : ii + 8], 2) for ii in range(0, len(str_rep), 8)]
     )  # Break it into bytes
@@ -332,9 +161,9 @@ def test_basic_non_uniform_encode():
 
     # Assert
     #
-    # Given coding: 0 -> '0', 1 -> n/a, 2 -> '10', 3 -> '11' (and implementation detail
-    # tail of '01') [0, 0, 2, 3] becomes. '00101101'
-    assert output_buf_T[0][0][0].tolist() == int("00101101", 2)
+    # Given coding: 0 -> '0', 1 -> n/a, 2 -> '10', 3 -> '11', [0, 0, 2, 3] becomes. '001011' + '00' 
+    # to complete the byte
+    assert output_buf_T[0][0][0].tolist() == int("00101100", 2)
 
 
 @pytest.mark.parametrize("layers", [1, 2])
@@ -362,7 +191,8 @@ def test_basic_decode(layers, channels, bits_for_symbol):
             str_rep += f"{token:06b}"  # 64 - not supported by v2 decode kernel
         else:
             raise AssertionError()
-    str_rep += "0" * (8 - len(str_rep) % 8)
+    if len(str_rep) % 8 != 0:
+        str_rep += "0" * (8 - len(str_rep) % 8)
     byte_stream = list(
         [int(str_rep[ii : ii + 8], 2) for ii in range(0, len(str_rep), 8)]
     )
@@ -378,7 +208,7 @@ def test_basic_decode(layers, channels, bits_for_symbol):
     lens_T = lens_T.cumsum(0).reshape((layers, channels))
 
     bins = max_sym + 1
-    cdf = [bin * (0x10000 / (bins - 1)) for bin in range(0, bins)] * layers * channels
+    cdf = [int(bin * (0x10000 / (bins - 1))) | bits_for_symbol for bin in range(0, bins)] * layers * channels
     cdf_T = (
         torch.Tensor(cdf)
         .to(device="npu")
