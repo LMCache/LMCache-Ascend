@@ -12,10 +12,13 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
-from lmcache.v1.storage_backend.storage_manager import AsyncSingleSerializer, AsyncSerializer
 from lmcache.v1.storage_backend.abstract_backend import (
     AllocatorBackendInterface,
     StorageBackendInterface,
+)
+from lmcache.v1.storage_backend.storage_manager import (
+    AsyncSerializer,
+    AsyncSingleSerializer,
 )
 import torch
 
@@ -136,9 +139,7 @@ def StorageManager__init__(
 
     self.event_manager = event_manager
 
-    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = (
-        async_lookup_server
-    )
+    self.async_lookup_server: Optional["LMCacheAsyncLookupServer"] = async_lookup_server
     self.async_serializer: Optional[AsyncSerializer] = None
 
     # The cuda stream for internal copies during put

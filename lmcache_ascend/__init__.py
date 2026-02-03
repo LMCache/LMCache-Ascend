@@ -8,9 +8,13 @@ from lmcache_ascend import _build_info
 LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
 
+
 def _patch_ops():
+    # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
+
     sys.modules["lmcache.c_ops"] = ascend_c_ops
+
 
 def _patch_transfer_channel():
     # First Party
@@ -31,15 +35,16 @@ def _patch_transfer_channel():
         "lmcache.v1.transfer_channel.transfer_utils"
     ].get_correct_device = ascend_get_correct_device
 
+
 def _patch_cacheblend():
     # Third Party
     from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 
+    # First Party
     from lmcache_ascend.v1.blend.utils import get_or_create_blender
 
-    LMCBlenderBuilder.get_or_create = partial(
-        get_or_create_blender, LMCBlenderBuilder
-    )
+    LMCBlenderBuilder.get_or_create = partial(get_or_create_blender, LMCBlenderBuilder)
+
 
 def _patch_multi_process():
     # Third Party
@@ -49,6 +54,7 @@ def _patch_multi_process():
     from lmcache_ascend.v1.multiprocess.custom_types import AscendIPCWrapper
 
     lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
+
 
 def _patch_kv_layer_group():
     # Third Party
@@ -63,6 +69,7 @@ def _patch_kv_layer_group():
     KVLayerGroupInfo.hidden_dim_size = property(
         ascend_kv_layer_groups.patched_hidden_dim_size
     )
+
 
 def _patch_mooncake_store_connector():
     # Third Party
@@ -85,14 +92,15 @@ def _patch_mooncake_store_connector():
         _batched_put_with_metadata
     )
 
+
 def _patch_init_engine():
+    # Third Party
+    import lmcache.integration.vllm.vllm_v1_adapter
+
     # First Party
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         init_lmcache_engine as ascend_init_lmcache_engine,
     )
-
-    # Third Party
-    import lmcache.integration.vllm.vllm_v1_adapter
 
     # NOTE (gingfung): this is the main entry point of LMCache, and since we are
     # patching this, every time we upgrade, we should re-evaluate the function, as
@@ -101,6 +109,7 @@ def _patch_init_engine():
     lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
         ascend_init_lmcache_engine
     )
+
 
 def _patch_hash_token():
     # On OpenEuler and python3.10,
@@ -113,6 +122,7 @@ def _patch_hash_token():
     from lmcache_ascend.v1.tokens_hash import _hash_tokens
 
     lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
+
 
 def _patch_sys_detection():
     # Patching this as on some Ascend machines
@@ -127,6 +137,7 @@ def _patch_sys_detection():
     from lmcache_ascend.v1.system_detection import _read_from_sys
 
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
+
 
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
@@ -156,8 +167,9 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_sys_detection()
-    
+
     if _build_info.__framework_name__ == "mindspore":
+        # First Party
         import lmcache_ascend.mindspore  # noqa: F401
 
     LMCACHE_ASCEND_PATCHED = True
