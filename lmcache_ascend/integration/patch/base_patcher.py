@@ -19,10 +19,37 @@ class BasePatcher:
     def get_version(package_name: str) -> str | None:
         """Retrieve version from installed package metadata."""
         try:
-            return importlib.metadata.version(package_name)
+            ver= importlib.metadata.version(package_name)
+            return ver.lstrip('v') if ver else None
         except importlib.metadata.PackageNotFoundError:
             logger.debug(f"Package {package_name} metadata not found.")
             return None
+    
+    @staticmethod
+    def is_version_in_range(current_ver: str, version_list: list[str]) -> bool:
+        """Verify is verison in range"""
+        if not current_ver: return False
+        return current_ver in version_list
+
+    @classmethod
+    def run_patch_tasks(cls, current_ver: str | None, tasks: list[dict]):
+        """
+        tasks format: {"name": str, "module": str, "func": callable, "required_versions": list | None}
+        """
+        success_count = 0
+        enabled_tasks = [t for t in tasks if t.get("required_versions") is None 
+                         or cls.is_version_in_range(current_ver, t["required_versions"])]
+
+        for task in enabled_tasks:
+            try:
+                path = cls._find_module_path(task["module"])
+                task["func"](path)
+                logger.info(f"Successfully applied: {task['name']}")
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Failed to apply {task['name']}: {e}")
+        
+        return success_count == len(enabled_tasks)
 
     @staticmethod
     def _find_module_path(module_name: str) -> Path:

@@ -10,10 +10,11 @@ from lmcache_ascend import _build_info
 LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
 
+if os.environ.get("SKIP_LMCACHE_PATCH"):
+    LMCACHE_ASCEND_PATCHED = True
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
-    if os.environ.get("SKIP_LMCACHE_PATCH"):
-        LMCACHE_ASCEND_PATCHED = True
     if _build_info.__framework_name__ == "pytorch":
         # Standard
         from functools import partial
