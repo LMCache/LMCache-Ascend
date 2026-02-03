@@ -17,17 +17,11 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
-import importlib
-import importlib.metadata
-import logging
-import shutil
-import time
 
-# Configure local logger
-logger = logging.getLogger(__name__)
+# First Party
+from lmcache_ascend.integration.patch.base_patcher import BasePatcher, logger
 
-
-class CacheBlendPatcher:
+class CacheBlendPatcher(BasePatcher):
     # Version list where RoPE patch is mandatory
     REQUIRED_ROPE_VERSIONS = [
         "0.10.2rc1",
@@ -47,7 +41,7 @@ class CacheBlendPatcher:
     def apply_all(cls) -> bool:
         """Main entry point: apply all vLLM-Ascend specific patches."""
         try:
-            version = cls.get_version()
+            version = cls.get_version("vllm-ascend")
             if version:
                 logger.info(f"Detected vllm-ascend version: {version}")
             else:
@@ -83,82 +77,6 @@ class CacheBlendPatcher:
                 f"Unexpected error during patching process: {e}", exc_info=True
             )
             return False
-
-    @staticmethod
-    def get_version() -> str | None:
-        """Retrieve vllm-ascend version from installed package metadata."""
-        try:
-            return importlib.metadata.version("vllm-ascend")
-        except importlib.metadata.PackageNotFoundError:
-            logger.debug("vllm-ascend package metadata not found.")
-            return None
-
-    @staticmethod
-    def _find_module_path(module_name: str) -> Path:
-        """Locate the physical file path of a python module."""
-        try:
-            spec = importlib.util.find_spec(module_name)
-            if spec is None or spec.origin is None:
-                raise RuntimeError(f"Spec origin not found for {module_name}")
-
-            path = Path(spec.origin).resolve()
-            if not path.exists():
-                raise FileNotFoundError(f"Resolved path does not exist: {path}")
-
-            logger.debug(f"Located {module_name} at {path}")
-            return path
-        except Exception as e:
-            raise RuntimeError(f"Locating module {module_name} failed: {e}") from e
-
-    @staticmethod
-    def _backup_file(path: Path):
-        """Create a timestamped backup of the target file before modification."""
-        backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
-        try:
-            shutil.copy2(path, backup)
-            logger.info(f"Backup created: {backup}")
-        except Exception as e:
-            raise RuntimeError(f"Failed to create backup for {path}: {e}") from e
-
-    @staticmethod
-    def _find_function_block(
-        lines: list[str], func_name: str
-    ) -> tuple[int, int] | None:
-        """Find the start and end line indices of a function definition."""
-        start = None
-        indent = 0
-        search_pattern = f"def {func_name}("
-
-        for idx, line in enumerate(lines):
-            stripped = line.lstrip()
-            if stripped.startswith(search_pattern):
-                start = idx
-                indent = len(line) - len(stripped)
-                logger.debug(
-                    f"Found function '{func_name}' at line {idx + 1} "
-                    f"with indent {indent}"
-                )
-                break
-
-        if start is None:
-            logger.warning(f"Function '{func_name}' not found in the provided lines.")
-            return None
-
-        # Determine the end of the block based on indentation
-        end = len(lines)
-        for idx in range(start + 1, len(lines)):
-            stripped = lines[idx].lstrip()
-            if not stripped:  # Skip empty lines
-                continue
-
-            curr_indent = len(lines[idx]) - len(stripped)
-            # End block if line starts with def/class/@ and indent <= start indent
-            if stripped.startswith(("def ", "class ", "@")) and curr_indent <= indent:
-                end = idx
-                break
-
-        logger.debug(f"Function '{func_name}' block: lines {start + 1} to {end}")
-        return start, end
 
     @classmethod
     def _patch_worker_file(cls, path: Path):

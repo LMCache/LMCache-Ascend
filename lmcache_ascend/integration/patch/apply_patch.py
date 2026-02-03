@@ -3,14 +3,10 @@
 # Standard
 import importlib.util
 import logging
-
-# First Party
-from lmcache_ascend.integration.patch.vllm.cacheblend_patch import (
-    CacheBlendPatcher,
-)
-
+import os
 logger = logging.getLogger(__name__)
 
+os.environ["SKIP_LMCACHE_PATCH"] = "1"
 
 def is_installed(package_name: str) -> bool:
     return importlib.util.find_spec(package_name) is not None
@@ -25,12 +21,15 @@ def run_integration_patches():
         return
 
     if is_installed("sglang"):
-        logger.info("SGLang environment confirmed. Applying patches...")
         # TODO: apply_sglang_patches()
         return
 
     if is_installed("vllm_ascend"):
         logger.info("vLLM-Ascend environment confirmed. Applying patches...")
+
+        from lmcache_ascend.integration.patch.vllm.cacheblend_patch import (
+            CacheBlendPatcher,
+        )
         success = CacheBlendPatcher.apply_all()
         if success:
             logger.info("vLLM-Ascend patches applied successfully.")
