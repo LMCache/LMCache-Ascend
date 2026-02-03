@@ -6,39 +6,50 @@ from __future__ import annotations
 
 # Standard
 from pathlib import Path
-import importlib.util
 import importlib.metadata
+import importlib.util
 import logging
 import shutil
 import time
 
 logger = logging.getLogger(__name__)
 
+
 class BasePatcher:
     @staticmethod
     def get_version(package_name: str) -> str | None:
         """Retrieve version from installed package metadata."""
         try:
-            ver= importlib.metadata.version(package_name)
-            return ver.lstrip('v') if ver else None
+            ver = importlib.metadata.version(package_name)
+            return ver.lstrip("v") if ver else None
         except importlib.metadata.PackageNotFoundError:
             logger.debug(f"Package {package_name} metadata not found.")
             return None
-    
+
     @staticmethod
     def is_version_in_range(current_ver: str, version_list: list[str]) -> bool:
         """Verify is verison in range"""
-        if not current_ver: return False
+        if not current_ver:
+            return False
         return current_ver in version_list
 
     @classmethod
     def run_patch_tasks(cls, current_ver: str | None, tasks: list[dict]):
         """
-        tasks format: {"name": str, "module": str, "func": callable, "required_versions": list | None}
+        tasks format: {
+            "name": str,
+            "module": str,
+            "func": callable,
+            "required_versions": list | None
+        }
         """
         success_count = 0
-        enabled_tasks = [t for t in tasks if t.get("required_versions") is None 
-                         or cls.is_version_in_range(current_ver, t["required_versions"])]
+        enabled_tasks = [
+            t
+            for t in tasks
+            if t.get("required_versions") is None
+            or cls.is_version_in_range(current_ver, t["required_versions"])
+        ]
 
         for task in enabled_tasks:
             try:
@@ -48,7 +59,7 @@ class BasePatcher:
                 success_count += 1
             except Exception as e:
                 logger.error(f"Failed to apply {task['name']}: {e}")
-        
+
         return success_count == len(enabled_tasks)
 
     @staticmethod
@@ -79,7 +90,9 @@ class BasePatcher:
             raise RuntimeError(f"Failed to create backup for {path}: {e}") from e
 
     @staticmethod
-    def _find_function_block(lines: list[str], func_name: str) -> tuple[int, int] | None:
+    def _find_function_block(
+        lines: list[str], func_name: str
+    ) -> tuple[int, int] | None:
         """Find the start and end line indices of a function definition."""
         start = None
         indent = 0
@@ -110,6 +123,6 @@ class BasePatcher:
             if stripped.startswith(("def ", "class ", "@")) and curr_indent <= indent:
                 end = idx
                 break
-        
+
         logger.debug(f"Function '{func_name}' block: lines {start + 1} to {end}")
         return start, end

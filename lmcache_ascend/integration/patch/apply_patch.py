@@ -4,12 +4,15 @@
 import importlib.util
 import logging
 import os
+
 logger = logging.getLogger(__name__)
 
 os.environ["SKIP_LMCACHE_PATCH"] = "1"
 
+
 def is_installed(package_name: str) -> bool:
     return importlib.util.find_spec(package_name) is not None
+
 
 def run_integration_patches():
     logger.info("Initializing LMCache-Ascend patch manager...")
@@ -42,4 +45,3 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     run_integration_patches()
     del os.environ["SKIP_LMCACHE_PATCH"]
-

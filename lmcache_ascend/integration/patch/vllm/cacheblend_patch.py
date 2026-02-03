@@ -10,6 +10,8 @@ This script:
   - creates a backup of the original file
 
 2. Patch vLLM-Ascend for Rotary Embedding
+Redirecting logic to _npu_rotary_embedding as per the 0.9.2rc1 stable implementation.
+This ensures we avoid the issues identified in the newer version.
 """
 
 # Future
@@ -21,11 +23,19 @@ from pathlib import Path
 # First Party
 from lmcache_ascend.integration.patch.base_patcher import BasePatcher, logger
 
+
 class CacheBlendPatcher(BasePatcher):
     # Version list where RoPE patch is mandatory
     VERSION_SERIES = [
-        "0.9.2rc1", "0.10.0.rc1", "v0.10.1rc1", "0.10.2rc1",
-        "0.11.0rc0", "0.11.0rc1", "0.11.0rc2", "0.11.0rc3", "0.11.0"
+        "0.9.2rc1",
+        "0.10.0.rc1",
+        "v0.10.1rc1",
+        "0.10.2rc1",
+        "0.11.0rc0",
+        "0.11.0rc1",
+        "0.11.0rc2",
+        "0.11.0rc3",
+        "0.11.0",
     ]
 
     ROPE_PATCH_VERSIONS = VERSION_SERIES[3:]
@@ -45,21 +55,20 @@ class CacheBlendPatcher(BasePatcher):
                     "name": "Worker Model Tracking Patch",
                     "module": "vllm_ascend.worker.worker_v1",
                     "func": cls._patch_worker_file,
-                    "required_versions": cls.VERSION_SERIES
+                    "required_versions": cls.VERSION_SERIES,
                 },
                 {
                     "name": "RoPE Fallback Patch",
                     "module": "vllm_ascend.ops.rotary_embedding",
                     "func": cls._patch_rope_file,
-                    "required_versions": cls.ROPE_PATCH_VERSIONS
-                }
+                    "required_versions": cls.ROPE_PATCH_VERSIONS,
+                },
             ]
 
             return cls.run_patch_tasks(version, tasks)
         except Exception as e:
             logger.error(
-                f"Unexpected error during patching process: {e}",
-                exc_info=True
+                f"Unexpected error during patching process: {e}", exc_info=True
             )
             return False
 
@@ -93,8 +102,9 @@ class CacheBlendPatcher(BasePatcher):
         if block_dist:
             for i in range(block_dist[0], block_dist[1]):
                 line_stripped = lines[i].lstrip()
-                if ("ensure_kv_transfer_initialized(" in lines[i]
-                        and not line_stripped.startswith("#")):
+                if "ensure_kv_transfer_initialized(" in lines[
+                    i
+                ] and not line_stripped.startswith("#"):
                     target = "ensure_kv_transfer_initialized("
                     lines[i] = lines[i].replace(target, f"# {target}")
                     changed = True
@@ -129,13 +139,9 @@ class CacheBlendPatcher(BasePatcher):
                 for i, s in enumerate(snippet):
                     lines.insert(last_idx + 1 + i, s)
                 changed = True
-                logger.debug(
-                    f"Injected VLLMModelTracker at line {last_idx + 2}"
-                )
+                logger.debug(f"Injected VLLMModelTracker at line {last_idx + 2}")
             else:
-                logger.error(
-                    "Critical: Could not find 'load_model' in worker."
-                )
+                logger.error("Critical: Could not find 'load_model' in worker.")
 
         if changed:
             cls._backup_file(path)
