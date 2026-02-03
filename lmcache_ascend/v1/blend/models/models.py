@@ -4,7 +4,6 @@ from torch import nn
 
 # First Party
 from lmcache_ascend.v1.blend.attention.attention import (
-    LMCAttnBackend,
     ZLMCFlashAttnBackend,
 )
 from lmcache_ascend.v1.blend.positional_encoding import get_fused_rope

@@ -19,11 +19,6 @@ import torch
 
 # First Party
 from lmcache_ascend import _build_info
-from lmcache_ascend.v1.npu_connector import (
-    VLLMBufferLayerwiseNPUConnector,
-    VLLMPagedMemLayerwiseNPUConnector,
-    VLLMPagedMemNPUConnectorV2,
-)
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party
