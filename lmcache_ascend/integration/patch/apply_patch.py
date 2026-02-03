@@ -5,7 +5,7 @@ import importlib.util
 import logging
 
 # First Party
-from lmcache_ascend.integration.patch.vllm_patch.cacheblend_patch import (
+from lmcache_ascend.integration.patch.vllm.cacheblend_patch import (
     CacheBlendPatcher,
 )
 
