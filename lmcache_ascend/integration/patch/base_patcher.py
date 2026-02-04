@@ -12,7 +12,25 @@ import logging
 import shutil
 import time
 
+# Third Party
+from packaging import version
+
 logger = logging.getLogger(__name__)
+
+
+class VersionRange:
+    def __init__(self, start: str, end: str | None = None):
+        self.start = version.parse(start.lstrip("v"))
+        self.end = version.parse(end.lstrip("v")) if end else self.start
+
+    def __contains__(self, ver_str: str) -> bool:
+        if not ver_str:
+            return False
+        try:
+            current_v = version.parse(ver_str)
+            return self.start <= current_v <= self.end
+        except Exception:
+            return False
 
 
 class BasePatcher:
@@ -27,11 +45,20 @@ class BasePatcher:
             return None
 
     @staticmethod
-    def is_version_in_range(current_ver: str, version_list: list[str]) -> bool:
+    def is_version_in_range(
+        current_ver: str, version_ranges: list[VersionRange | str]
+    ) -> bool:
         """Verify is verison in range"""
         if not current_ver:
             return False
-        return current_ver in version_list
+        for r in version_ranges:
+            if isinstance(r, VersionRange):
+                if current_ver in r:
+                    return True
+            else:
+                if current_ver == r:
+                    return True
+        return False
 
     @classmethod
     def run_patch_tasks(cls, current_ver: str | None, tasks: list[dict]):

@@ -11,7 +11,7 @@ import zmq
 logger = init_logger(__name__)
 
 
-def lookup(
+def LMCacheLookupClient_lookup(
     self,
     token_ids: Union[torch.Tensor, list[int]],
     lookup_id: str,

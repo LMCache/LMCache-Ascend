@@ -21,23 +21,17 @@ from __future__ import annotations
 from pathlib import Path
 
 # First Party
-from lmcache_ascend.integration.patch.base_patcher import BasePatcher, logger
+from lmcache_ascend.integration.patch.base_patcher import (
+    BasePatcher,
+    VersionRange,
+    logger,
+)
 
 
 class CacheBlendPatcher(BasePatcher):
-    VERSION_SERIES = [
-        "0.9.2rc1",
-        "0.10.0.rc1",
-        "v0.10.1rc1",
-        "0.10.2rc1",
-        "0.11.0rc0",
-        "0.11.0rc1",
-        "0.11.0rc2",
-        "0.11.0rc3",
-        "0.11.0",
-    ]
+    VERSION_SERIES = [VersionRange("0.9.2rc1", "0.11.0")]
 
-    ROPE_PATCH_VERSIONS = VERSION_SERIES[3:]
+    ROPE_PATCH_VERSIONS = [VersionRange("0.10.2rc1", "0.11.0")]
 
     @classmethod
     def apply_all(cls) -> bool:
@@ -79,6 +73,28 @@ class CacheBlendPatcher(BasePatcher):
         This patch registers the model tracker during initialization and
         realigns the KV cache connector setup to ensure metadata is
         available for CacheBlend queries.
+
+        --- a/vllm_ascend/worker/worker_v1.py
+        +++ b/vllm_ascend/worker/worker_v1.py
+        @@ -17,6 +17,8 @@
+        +from lmcache.integration.vllm.utils import ENGINE_NAME
+        +from lmcache.v1.compute.models.utils import VLLMModelTracker
+
+        @@ -312,6 +314,9 @@ class NPUWorker(WorkerBase):
+            def load_model():
+                ...
+                with context:
+                    self.model_runner.load_model()
+
+        +        VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)
+        +        ensure_kv_transfer_initialized(self.vllm_config)
+        +
+        @@ -391,7 +396,7 @@ class NPUWorker(WorkerBase):
+            def _init_worker_distributed_environment():
+                ...
+                init_ascend_model_parallel(self.parallel_config)
+        -        ensure_kv_transfer_initialized(self.vllm_config)
+        +        # ensure_kv_transfer_initialized(self.vllm_config)
         """
         _IMPORTS_TO_ADD = [
             "from lmcache.integration.vllm.utils import ENGINE_NAME\n",
@@ -163,6 +179,17 @@ class CacheBlendPatcher(BasePatcher):
         Precomputing cos/sin can lead to dimension mismatches with query (q)
         tensors. Setting this to None ensures the model retrieves data from
         cos_sin_cache dynamically instead.
+
+        --- a/vllm_ascend/ops/rotary_embedding.py
+        +++ b/vllm_ascend/ops/rotary_embedding.py
+        @@ -42,6 +42,7 @@ def _rope_forward_oot(
+             is_neox_style: bool,
+             offsets: Optional[torch.Tensor] = None
+         ) -> Tuple[torch.Tensor, torch.Tensor]:
+        +     self.cos = None  # Force fallback - Added by LMCache
+             query_shape, key_shape = query.shape, key.shape
+             if self.cos_sin_cache.device != query.device:
+                 self.cos_sin_cache = self.cos_sin_cache.to(query.device)
         """
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         func_name = "_rope_forward_oot"

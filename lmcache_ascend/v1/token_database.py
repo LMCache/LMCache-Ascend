@@ -11,7 +11,7 @@ import torch
 ProcessTokensResult = Tuple[int, int, Union[CacheEngineKey, int]]
 
 
-def process_tokens(
+def TokenDatabase_process_tokens(
     self,
     tokens: Optional[Union[torch.Tensor, List[int]]] = None,
     hashes: Optional[List[int]] = None,
