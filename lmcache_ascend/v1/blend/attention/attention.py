@@ -191,6 +191,7 @@ class LMCAttnBackend(AttentionInterface):
 
         return output
 
+    # Abstract method that must be implemented by subclasses
     def init_attn_metadata(
         self,
         input_ids: torch.tensor,

@@ -25,7 +25,6 @@ from lmcache_ascend.integration.patch.base_patcher import BasePatcher, logger
 
 
 class CacheBlendPatcher(BasePatcher):
-    # Version list where RoPE patch is mandatory
     VERSION_SERIES = [
         "0.9.2rc1",
         "0.10.0.rc1",
@@ -74,7 +73,13 @@ class CacheBlendPatcher(BasePatcher):
 
     @classmethod
     def _patch_worker_file(cls, path: Path):
-        """Inject LMCache tracking into vLLM-Ascend worker."""
+        """
+        Injects LMCache tracking into the vLLM-Ascend worker.
+
+        This patch registers the model tracker during initialization and
+        realigns the KV cache connector setup to ensure metadata is
+        available for CacheBlend queries.
+        """
         _IMPORTS_TO_ADD = [
             "from lmcache.integration.vllm.utils import ENGINE_NAME\n",
             "from lmcache.v1.compute.models.utils import VLLMModelTracker\n",
@@ -152,7 +157,13 @@ class CacheBlendPatcher(BasePatcher):
 
     @classmethod
     def _patch_rope_file(cls, path: Path):
-        """Force RoPE fallback by setting self.cos to None."""
+        """
+        Forces RoPE fallback to _npu_rotary_embedding by setting self.cos to None.
+
+        Precomputing cos/sin can lead to dimension mismatches with query (q)
+        tensors. Setting this to None ensures the model retrieves data from
+        cos_sin_cache dynamically instead.
+        """
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
         func_name = "_rope_forward_oot"
 

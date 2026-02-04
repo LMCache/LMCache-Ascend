@@ -1,7 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-import os
-
 # First Party
 from lmcache_ascend import _build_info
 
@@ -9,9 +6,6 @@ from lmcache_ascend import _build_info
 # is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
-
-if os.environ.get("SKIP_LMCACHE_PATCH"):
-    LMCACHE_ASCEND_PATCHED = True
 
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:

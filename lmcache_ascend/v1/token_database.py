@@ -58,7 +58,7 @@ def process_tokens(
             num_falses = 0
 
         if num_falses >= len(tokens):
-            # All tokens are masked out, so nothing to process.
+            # NOTE: num_false == len(tokens), or len(tokens) == 0
             return
 
         token_chunks = self._fast_split_by_subtensor(tokens)

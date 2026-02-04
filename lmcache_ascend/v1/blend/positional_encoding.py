@@ -181,11 +181,16 @@ def get_fused_rope(
     reverse_rope = BasicReverseRope(rope, rotary_dim, is_neox_style)
     fused_rope = FusedRope(rope, is_neox_style)
 
+    # NOTE: AscendRotaryEmbedding in vllm-ascend calls
+    # get_forward_context().is_first_layer to cache cos/sin values.
+    # During initialization-time accuracy validation,
+    # this context is missing, which triggers an exception.
+    # We mock a dummy context here to bypass this requirement.
     dummy_vllm_config = MagicMock()
     dummy_vllm_config.parallel_config.data_parallel_size = 1
     dummy_vllm_config.compilation_config.static_forward_context = False
     dummy_attn_metadata = MagicMock()
-    # correct = False
+
     with set_forward_context(dummy_attn_metadata, dummy_vllm_config):
         forward_context = get_forward_context()
         forward_context.is_first_layer = False

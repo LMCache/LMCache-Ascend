@@ -7,8 +7,8 @@ The following table defines the support level of CacheBlend across various compo
 | vLLM Version | LMCache Version | Status | Stability Level | CacheBlend Support | Note |
 | :--- | :--- | :--- | :--- | :---: | :--- |
 | **0.9.2** | **0.3.3 / 0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
-| **0.10.0** | **0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
-| **0.11.0** | **0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.10.0** | **0.3.7** | 🔴 Unsupport | **N/A** | **None** | - |
+| **0.11.0** | **0.3.7** | 🔴 Unsupport | **N/A** | **None** | - |
 | **0.9.2** | **0.3.12** | 🔴 Conflict | **N/A** | **None** | Version mismatch; usage not advised. |
 | **0.10.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
 | **0.11.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
