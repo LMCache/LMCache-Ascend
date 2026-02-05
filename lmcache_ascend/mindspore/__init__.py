@@ -1,110 +1,95 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402, E501
 
-# Standard
-import sys
 
-# Third Party
-import lmcache
+def _patch_storage_manager():
+    # Third Party
+    import lmcache.v1.storage_backend.storage_manager as sm_module
 
-# First Party
-from lmcache_ascend import c_ops
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
+        StorageManager__init__,
+        allocate_and_copy_objects_310p,
+    )
 
-sys.modules["lmcache.c_ops"] = c_ops
+    sm_module.StorageManager.__init__ = StorageManager__init__
+    sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
 
-# Third Party
-import lmcache.v1.storage_backend.storage_manager as sm_module
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
-    StorageManager__init__,
-    allocate_and_copy_objects_310p,
-)
+def _patch_memory_management():
+    # Patch memory management due to MindSpore's incomplete Tensor support,
+    # which forces a switch to NumPy for some operations. This requires
+    # managing CPU memory with NumPy arrays.
 
-sm_module.StorageManager.__init__ = StorageManager__init__
-sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
+    # Third Party
+    import lmcache.v1.memory_management
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import _allocate_cpu_memory
+    # First Party
+    from lmcache_ascend.mindspore.v1.memory_management import (
+        NumpyAndTensorMemoryAllocator,
+        NumpyAndTensorMemoryObj,
+        _allocate_cpu_memory,
+    )
 
-lmcache.v1.memory_management._allocate_cpu_memory = _allocate_cpu_memory
+    lmcache.v1.memory_management._allocate_cpu_memory = _allocate_cpu_memory
+    lmcache.v1.memory_management.TensorMemoryObj = NumpyAndTensorMemoryObj
+    lmcache.v1.memory_management.TensorMemoryAllocator = NumpyAndTensorMemoryAllocator
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import NumpyAndTensorMemoryObj
 
-lmcache.v1.memory_management.TensorMemoryObj = NumpyAndTensorMemoryObj
+def _patch_storage_backend_interface():
+    # Patch to disable multi-stream on 310P machines because MindSpore's
+    # implementation causes event resource exhaustion. This can be removed
+    # once MindSpore fixes the issue.
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import NumpyAndTensorMemoryAllocator
+    # Third Party
+    import lmcache.v1.storage_backend
 
-lmcache.v1.memory_management.TensorMemoryAllocator = NumpyAndTensorMemoryAllocator
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import (
+        StorageBackendInterface___init__,
+    )
 
-# Third Party
-import lmcache.v1.storage_backend
+    lmcache.v1.storage_backend.StorageBackendInterface.__init__ = (
+        StorageBackendInterface___init__
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import (
-    StorageBackendInterface___init__,
-)
 
-lmcache.v1.storage_backend.StorageBackendInterface.__init__ = (
-    StorageBackendInterface___init__
-)
+def _patch_mooncake_store_connector():
+    # Third Party
+    import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
 
-# Third Party
-import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
+        MooncakeStoreConnector__batch_get_into,
+        MooncakeStoreConnector__put_without_metadata,
+        MooncakeStoreConnector__register_cpu_buffer,
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__register_cpu_buffer,
-)
+    mooncakestore_connector.MooncakestoreConnector._register_cpu_buffer = (
+        MooncakeStoreConnector__register_cpu_buffer
+    )
 
-mooncakestore_connector.MooncakestoreConnector._register_cpu_buffer = (
-    MooncakeStoreConnector__register_cpu_buffer
-)
+    mooncakestore_connector.MooncakestoreConnector._batch_get_into = (
+        MooncakeStoreConnector__batch_get_into
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__batch_get_into,
-)
+    mooncakestore_connector.MooncakestoreConnector._put_without_metadata = (
+        MooncakeStoreConnector__put_without_metadata
+    )
 
-mooncakestore_connector.MooncakestoreConnector._batch_get_into = (
-    MooncakeStoreConnector__batch_get_into
-)
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__put_without_metadata,
-)
+def _patch_sys_detection():
+    # Third Party
+    import lmcache.v1.system_detection
 
-mooncakestore_connector.MooncakestoreConnector._put_without_metadata = (
-    MooncakeStoreConnector__put_without_metadata
-)
+    # First Party
+    from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
 
-# Third Party
-import lmcache.v1.gpu_connector
+    lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
-# First Party
-from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2
 
-lmcache.v1.gpu_connector.VLLMPagedMemGPUConnectorV2 = VLLMPagedMemNPUConnectorV2
-
-# Third Party
-import lmcache.v1.system_detection
-
-# First Party
-from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
-
-lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
-
-# Third Party
-import lmcache.integration.vllm.vllm_v1_adapter
-
-# First Party
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-    init_lmcache_engine as ascend_init_lmcache_engine,
-)
-
-lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
-    ascend_init_lmcache_engine
-)
+_patch_storage_manager()
+_patch_memory_management()
+_patch_storage_backend_interface()
+_patch_mooncake_store_connector()
+_patch_sys_detection()
