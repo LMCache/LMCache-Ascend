@@ -48,7 +48,7 @@ class BasePatcher:
     def is_version_in_range(
         current_ver: str, version_ranges: list[VersionRange | str]
     ) -> bool:
-        """Verify is verison in range"""
+        """Verify is version in range"""
         if not current_ver:
             return False
         for r in version_ranges:

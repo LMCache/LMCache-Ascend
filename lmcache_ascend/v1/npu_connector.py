@@ -287,7 +287,8 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             gap_mask[start - buf_offset : end - buf_offset] = False
 
         self.current_gap_positions = torch.where(gap_mask)[0]
-
+        load_gpu_buffer_obj: Any = None
+        compute_gpu_buffer_obj: Any = None
         compute_gpu_buffer_obj, load_gpu_buffer_obj = self._allocate_gpu_buffers(
             num_all_tokens, count=2
         )
