@@ -37,7 +37,6 @@ elif _build_info.__framework_name__ == "mindspore":
         VLLMPagedMemNPUConnectorV2,
     )
 
-
 logger = init_logger(__name__)
 
 

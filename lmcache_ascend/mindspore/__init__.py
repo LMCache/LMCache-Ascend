@@ -1,110 +1,87 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402, E501
 
-# Standard
-import sys
 
-# Third Party
-import lmcache
+def _patch_storage_manager():
+    # Third Party
+    import lmcache.v1.storage_backend.storage_manager as sm_module
 
-# First Party
-from lmcache_ascend import c_ops
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
+        StorageManager__init__,
+        allocate_and_copy_objects_310p,
+    )
 
-sys.modules["lmcache.c_ops"] = c_ops
+    sm_module.StorageManager.__init__ = StorageManager__init__
+    sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
 
-# Third Party
-import lmcache.v1.storage_backend.storage_manager as sm_module
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.storage_manager import (
-    StorageManager__init__,
-    allocate_and_copy_objects_310p,
-)
+def _patch_memory_management():
+    # Third Party
+    import lmcache.v1.memory_management
 
-sm_module.StorageManager.__init__ = StorageManager__init__
-sm_module.StorageManager.allocate_and_copy_objects = allocate_and_copy_objects_310p
+    # First Party
+    from lmcache_ascend.mindspore.v1.memory_management import (
+        NumpyAndTensorMemoryAllocator,
+        NumpyAndTensorMemoryObj,
+        _allocate_cpu_memory,
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import _allocate_cpu_memory
+    lmcache.v1.memory_management._allocate_cpu_memory = _allocate_cpu_memory
+    lmcache.v1.memory_management.TensorMemoryObj = NumpyAndTensorMemoryObj
+    lmcache.v1.memory_management.TensorMemoryAllocator = NumpyAndTensorMemoryAllocator
 
-lmcache.v1.memory_management._allocate_cpu_memory = _allocate_cpu_memory
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import NumpyAndTensorMemoryObj
+def _patch_storage_backend_interface():
+    # Third Party
+    import lmcache.v1.storage_backend
 
-lmcache.v1.memory_management.TensorMemoryObj = NumpyAndTensorMemoryObj
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import (
+        StorageBackendInterface___init__,
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.memory_management import NumpyAndTensorMemoryAllocator
+    lmcache.v1.storage_backend.StorageBackendInterface.__init__ = (
+        StorageBackendInterface___init__
+    )
 
-lmcache.v1.memory_management.TensorMemoryAllocator = NumpyAndTensorMemoryAllocator
 
-# Third Party
-import lmcache.v1.storage_backend
+def _patch_mooncake_store_connector():
+    # Third Party
+    import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.abstract_backend import (
-    StorageBackendInterface___init__,
-)
+    # First Party
+    from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
+        MooncakeStoreConnector__batch_get_into,
+        MooncakeStoreConnector__put_without_metadata,
+        MooncakeStoreConnector__register_cpu_buffer,
+    )
 
-lmcache.v1.storage_backend.StorageBackendInterface.__init__ = (
-    StorageBackendInterface___init__
-)
+    mooncakestore_connector.MooncakestoreConnector._register_cpu_buffer = (
+        MooncakeStoreConnector__register_cpu_buffer
+    )
 
-# Third Party
-import lmcache.v1.storage_backend.connector.mooncakestore_connector as mooncakestore_connector
+    mooncakestore_connector.MooncakestoreConnector._batch_get_into = (
+        MooncakeStoreConnector__batch_get_into
+    )
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__register_cpu_buffer,
-)
+    mooncakestore_connector.MooncakestoreConnector._put_without_metadata = (
+        MooncakeStoreConnector__put_without_metadata
+    )
 
-mooncakestore_connector.MooncakestoreConnector._register_cpu_buffer = (
-    MooncakeStoreConnector__register_cpu_buffer
-)
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__batch_get_into,
-)
+def _patch_sys_detection():
+    # Third Party
+    import lmcache.v1.system_detection
 
-mooncakestore_connector.MooncakestoreConnector._batch_get_into = (
-    MooncakeStoreConnector__batch_get_into
-)
+    # First Party
+    from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
 
-# First Party
-from lmcache_ascend.mindspore.v1.storage_backend.connector.mooncakestore_connector import (
-    MooncakeStoreConnector__put_without_metadata,
-)
+    lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
-mooncakestore_connector.MooncakestoreConnector._put_without_metadata = (
-    MooncakeStoreConnector__put_without_metadata
-)
 
-# Third Party
-import lmcache.v1.gpu_connector
-
-# First Party
-from lmcache_ascend.mindspore.v1.npu_connector import VLLMPagedMemNPUConnectorV2
-
-lmcache.v1.gpu_connector.VLLMPagedMemGPUConnectorV2 = VLLMPagedMemNPUConnectorV2
-
-# Third Party
-import lmcache.v1.system_detection
-
-# First Party
-from lmcache_ascend.mindspore.v1.system_detection import _read_from_sys
-
-lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
-
-# Third Party
-import lmcache.integration.vllm.vllm_v1_adapter
-
-# First Party
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-    init_lmcache_engine as ascend_init_lmcache_engine,
-)
-
-lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
-    ascend_init_lmcache_engine
-)
+_patch_storage_manager()
+_patch_memory_management()
+_patch_storage_backend_interface()
+_patch_mooncake_store_connector()
+_patch_sys_detection()
