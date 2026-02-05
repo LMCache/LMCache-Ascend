@@ -17,7 +17,7 @@ def LMCacheLookupClient_lookup(
     lookup_id: str,
     request_configs: Optional[dict] = None,
 ) -> Optional[int]:
-    # NOTE:Ensure token_ids is a list; vLLM may pass
+    # NOTE(niming):Ensure token_ids is a list; vLLM may pass
     # custom types like ConstantList
     if not isinstance(token_ids, list):
         if isinstance(token_ids, torch.Tensor):

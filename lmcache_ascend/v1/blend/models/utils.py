@@ -19,7 +19,7 @@ def infer_model_from_vllm(vllm_model, blender):
         from lmcache_ascend.v1.blend.models.llama import LMCLlamaModel
 
         return LMCLlamaModel(vllm_model, blender)
-    # NOTE: Matches model classes like 'CustomQwen3ForCausalLM' or variants
+    # NOTE(niming): Matches model classes like 'CustomQwen3ForCausalLM' or variants
     elif "Qwen3ForCausalLM" in model_name:
         # First Party
         from lmcache_ascend.v1.blend.models.qwen3 import LMCQwen3Model

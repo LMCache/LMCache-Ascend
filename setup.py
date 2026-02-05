@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 
+# NOTE: Apply platform-specific patches during installation to resolve environment issues
 def run_patches():
     """Execute the patch script after installation."""
     try:
