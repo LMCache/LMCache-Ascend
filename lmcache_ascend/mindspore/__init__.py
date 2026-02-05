@@ -17,6 +17,10 @@ def _patch_storage_manager():
 
 
 def _patch_memory_management():
+    # Patch memory management due to MindSpore's incomplete Tensor support,
+    # which forces a switch to NumPy for some operations. This requires
+    # managing CPU memory with NumPy arrays.
+
     # Third Party
     import lmcache.v1.memory_management
 
@@ -33,6 +37,10 @@ def _patch_memory_management():
 
 
 def _patch_storage_backend_interface():
+    # Patch to disable multi-stream on 310P machines because MindSpore's
+    # implementation causes event resource exhaustion. This can be removed
+    # once MindSpore fixes the issue.
+
     # Third Party
     import lmcache.v1.storage_backend
 
