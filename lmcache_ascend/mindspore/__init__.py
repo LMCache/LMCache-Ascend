@@ -37,9 +37,9 @@ def _patch_memory_management():
 
 
 def _patch_storage_backend_interface():
-    # This change was made because MindSpore's multi-stream implementation on the 310P machine
-    # would cause event resource exhaustion. Therefore, multi-stream is temporarily disabled.
-    # If MindSpore later fixes its multi-stream implementation, this restriction can be removed.
+    # Patch to disable multi-stream on 310P machines because MindSpore's
+    # implementation causes event resource exhaustion. This can be removed
+    # once MindSpore fixes the issue.
 
     # Third Party
     import lmcache.v1.storage_backend
