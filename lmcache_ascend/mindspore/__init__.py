@@ -17,9 +17,9 @@ def _patch_storage_manager():
 
 
 def _patch_memory_management():
-    # This modification was primarily made due to MindSpore's incomplete support 
-    # for certain Tensor operations, which necessitated a switch to NumPy implementation. 
-    # The changes stem from the need to manage CPU memory using NumPy arrays.
+    # Patch memory management due to MindSpore's incomplete Tensor support,
+    # which forces a switch to NumPy for some operations. This requires
+    # managing CPU memory with NumPy arrays.
 
     # Third Party
     import lmcache.v1.memory_management
