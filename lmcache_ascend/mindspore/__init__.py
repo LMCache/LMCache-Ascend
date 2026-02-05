@@ -20,7 +20,7 @@ def _patch_memory_management():
     # This modification was primarily made due to MindSpore's incomplete support 
     # for certain Tensor operations, which necessitated a switch to NumPy implementation. 
     # The changes stem from the need to manage CPU memory using NumPy arrays.
-    
+
     # Third Party
     import lmcache.v1.memory_management
 
@@ -40,7 +40,7 @@ def _patch_storage_backend_interface():
     # This change was made because MindSpore's multi-stream implementation on the 310P machine
     # would cause event resource exhaustion. Therefore, multi-stream is temporarily disabled.
     # If MindSpore later fixes its multi-stream implementation, this restriction can be removed.
-    
+
     # Third Party
     import lmcache.v1.storage_backend
 
