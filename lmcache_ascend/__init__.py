@@ -142,8 +142,6 @@ def _patch_lookup_client():
     lmc_lookup_client.LMCacheLookupClient.lookup = LMCacheLookupClient_lookup
 
 
-
-
 def _patch_sys_detection():
     # Patching this as on some Ascend machines
     # as the kernel can set the NUMA node to -1.

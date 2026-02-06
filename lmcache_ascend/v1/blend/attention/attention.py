@@ -7,16 +7,13 @@ from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
 from torch import nn
-
-from vllm.attention import Attention
-from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-import torch
-
-# Third Party
 from torch_npu import npu_fused_infer_attention_score
 from transformers.integrations.npu_flash_attention import (
     npu_flash_attn_varlen_func as flash_attn_varlen_func,
 )
+from vllm.attention import Attention
+from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+import torch
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -191,7 +188,7 @@ class LMCAttnBackend(AttentionInterface):
         input_ids: torch.tensor,
         **kwargs,
     ) -> LMCFlashAttnMetadata:
-        # NOTE(niming): Required AttentionInterface abstract method. 
+        # NOTE(niming): Required AttentionInterface abstract method.
         # Typically instantiated manually as LMCFlashAttnMetadata in compute_layer.
         pass
 
@@ -309,6 +306,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         """
         Initialize attention metadata.
         """
-        # NOTE(niming): Required AttentionInterface abstract method. 
+        # NOTE(niming): Required AttentionInterface abstract method.
         # Typically instantiated manually as LMCFlashAttnMetadata in compute_layer.
         pass

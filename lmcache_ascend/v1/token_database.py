@@ -3,8 +3,8 @@
 from typing import Iterable, List, Optional, Tuple, Union
 
 # Third Party
-from lmcache.utils import CacheEngineKey
 from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
 import torch
 
 logger = init_logger(__name__)
@@ -62,9 +62,11 @@ def TokenDatabase_process_tokens(
 
         # NOTE(niming): Boundary case - return gracefully without raising exceptions
         if len(tokens) == 0:
-            logger.warning(f"Process aborted: 'tokens' is empty. (num_falses={num_falses})")
+            logger.warning(
+                f"Process aborted: 'tokens' is empty. (num_falses={num_falses})"
+            )
             return
-        
+
         if num_falses == len(tokens):
             logger.warning(
                 f"Full mask detected: All {len(tokens)} tokens are masked as False. "
