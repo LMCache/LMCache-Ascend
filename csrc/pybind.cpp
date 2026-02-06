@@ -73,9 +73,9 @@ PYBIND11_MODULE(c_ops, m) {
         &multi_layer_kv_transfer_unilateral);
   m.def("load_and_reshape_flash", &load_and_reshape_flash);
   m.def("reshape_and_cache_back_flash", &reshape_and_cache_back_flash);
-  m.def("encode_fast_new", &encode_cuda_new);
-  m.def("decode_fast_new", &decode_cuda_new);
-  m.def("decode_fast_prefsum", &decode_cuda_prefsum);
+  m.def("encode_fast_new", &encode_ascend_new);
+  m.def("decode_fast_new", &decode_ascend_new);
+  m.def("decode_fast_prefsum", &decode_ascend_prefsum);
   m.def("calculate_cdf", &calculate_cdf);
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
   m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
