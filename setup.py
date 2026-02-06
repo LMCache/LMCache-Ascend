@@ -26,6 +26,21 @@ logger = logging.getLogger(__name__)
 USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
 
 
+# NOTE: Apply platform-specific patches during installation
+# to resolve environment issues
+def run_patches():
+    """Execute the patch script after installation."""
+    try:
+        sys.path.append(str(ROOT_DIR))
+        # First Party
+        from lmcache_ascend.integration.patch.apply_patch import run_integration_patches
+
+        run_integration_patches()
+    except Exception as e:
+        logger.error(f"Post-install patch system encountered an error: {e}")
+        return
+
+
 def _get_ascend_home_path():
     # NOTE: standard Ascend CANN toolkit path
     return os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
@@ -310,6 +325,7 @@ class CustomAscendCmakeBuildExt(build_ext):
                     )
 
         logger.info("All files copied successfully")
+        run_patches()
 
 
 def ascend_extension():

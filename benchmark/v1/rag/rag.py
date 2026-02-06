@@ -2,7 +2,7 @@
 # Standard
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass
-from typing import List, Optional, Union, no_type_check
+from typing import List, Optional, no_type_check
 import argparse
 import contextlib
 import logging
@@ -10,7 +10,6 @@ import random
 import time
 
 # Third Party
-from lmcache.config import LMCacheEngineConfig as Config
 from lmcache.integration.vllm.utils import lmcache_get_or_create_config
 from lmcache.v1.config import LMCacheEngineConfig as V1Config
 from transformers import AutoConfig, AutoTokenizer
@@ -115,7 +114,7 @@ class WorkloadConfig:
     # KV chunk size
     kv_chunk_size: int
     # LMCache config
-    lmconfig: Union[Config, V1Config]
+    lmconfig: V1Config
     # Online specific configs
     openai_api_base: Optional[str] = None
     openai_api_key: Optional[str] = None
@@ -418,9 +417,6 @@ class OfflineRAGManager(BaseRAGManager):
         """Prepare all prompts and documents into token lists."""
         config = self.workload_config
         system_prompt_tokens = self._encode_prompt(config.system_prompt)
-        query_prompt_tokens = self._encode_prompt(
-            config.query_prompt, add_special_tokens=False
-        )
         separator_tokens = self._encode_prompt(
             config.separator, add_special_tokens=False
         )
@@ -460,7 +456,6 @@ class OfflineRAGManager(BaseRAGManager):
                         + separator_tokens
                         + doc_tokens
                         + separator_tokens
-                        + query_prompt_tokens
                     )
 
             self._document_tokens.append(fix_doc_tokens_list)
@@ -535,7 +530,8 @@ class OfflineRAGManager(BaseRAGManager):
                 sampling_params = SamplingParams(temperature=0, max_tokens=1)
                 try:
                     llm.generate(
-                        prompt_token_ids=doc_tokens, sampling_params=sampling_params
+                        prompts={"prompt_token_ids": doc_tokens},
+                        sampling_params=sampling_params,
                     )
                 except Exception as e:
                     logger.warning(f"Precompute failed for document chunk: {e}")
@@ -635,7 +631,8 @@ class OfflineRAGManager(BaseRAGManager):
             request_start_time = time.perf_counter()
             try:
                 output = llm.generate(
-                    prompt_token_ids=[prompt_tokens], sampling_params=sampling_params
+                    prompts={"prompt_token_ids": prompt_tokens},
+                    sampling_params=sampling_params,
                 )
                 request_end_time = time.perf_counter()
 

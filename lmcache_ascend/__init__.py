@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
 # First Party
 from lmcache_ascend import _build_info
 
@@ -123,6 +122,25 @@ def _patch_hash_token():
 
     lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
 
+    # First Party
+    from lmcache_ascend.v1.token_database import TokenDatabase_process_tokens
+
+    lmcache.v1.token_database.SegmentTokenDatabase.process_tokens = (
+        TokenDatabase_process_tokens
+    )
+
+
+def _patch_lookup_client():
+    # Third Party
+    import lmcache.v1.lookup_client.lmcache_lookup_client as lmc_lookup_client
+
+    # First Party
+    from lmcache_ascend.v1.lookup_client.lmcache_lookup_client import (
+        LMCacheLookupClient_lookup,
+    )
+
+    lmc_lookup_client.LMCacheLookupClient.lookup = LMCacheLookupClient_lookup
+
 
 def _patch_sys_detection():
     # Patching this as on some Ascend machines
@@ -159,6 +177,7 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_transfer_channel()
         _patch_cacheblend()
         _patch_multi_process()
+        _patch_lookup_client()
 
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
