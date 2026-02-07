@@ -157,6 +157,36 @@ def _patch_sys_detection():
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
 
+def _patch_sgl_init_engine():
+    # Third Party
+    import lmcache.integration.sglang.sglang_adapter as lmc_sglang_adapter
+
+    # First Party
+    from lmcache_ascend.integration.sglang.sglang_adapter import (
+        sglang_init_lmcache_engine,
+        LMCacheConnector__init__,
+        LMCacheLayerwiseConnector_start_load_kv,
+    )
+
+    lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
+
+    lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
+
+    lmc_sglang_adapter.LMCacheLayerwiseConnector.start_load_kv = (
+        LMCacheLayerwiseConnector_start_load_kv
+    )
+
+    # Third Party
+    import lmcache.v1.memory_management as lmc_memory_management
+
+    # First Party
+    from lmcache_ascend.v1.memory_management import (
+        GPUMemoryAllocator__init__,
+    )
+
+    lmc_memory_management.GPUMemoryAllocator.__init__ = GPUMemoryAllocator__init__
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
@@ -181,11 +211,13 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
-    _patch_init_engine()
+    # _patch_init_engine()
     _patch_hash_token()
 
-    if _build_info.__framework_name__ == "pytorch":
-        _patch_sys_detection()
+    _patch_sgl_init_engine()
+
+    # if _build_info.__framework_name__ == "pytorch":
+    #     _patch_sys_detection()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
