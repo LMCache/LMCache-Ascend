@@ -21,7 +21,7 @@ from lmcache.v1.storage_backend.p2p_backend import P2PBackend, PeerInfo
 import zmq.asyncio
 
 # First Party
-from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
+from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 if TYPE_CHECKING:
     # Third Party
@@ -82,7 +82,7 @@ class AscendP2PBackend(P2PBackend):
         # TODO(chunxiaozheng): location is not used for now
         self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
 
-        # TODO(Jiayi): support gpu and local storage p2p as well.
+        # NOTE (gingfung): adding support using npu memory.
         self.local_cpu_backend = local_cpu_backend
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
@@ -92,19 +92,48 @@ class AscendP2PBackend(P2PBackend):
         self.fmt: MemoryFormat = (
             MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         )
+
+        buffer_ptrs = [self.memory_allocator.cpu_allocator.buffer_ptr]
+        buffer_sizes = [self.memory_allocator.cpu_allocator.buffer_size]
+        buffer_types = ["cpu"]
+        align_bytes = [self.memory_allocator.cpu_allocator.align_bytes]
+
+        if config.p2p_use_npu:
+            if (
+                hasattr(self.memory_allocator, "gpu_buffer")
+                and self.memory_allocator.gpu_buffer is not None
+            ):
+                logger.warning("NPU buffer already initialize.")
+            else:
+                logger.info(
+                    "Initializing NPU memory allocator with "
+                    f"size {config.p2p_npu_buffer_size} bytes"
+                )
+                self.memory_allocator.init_gpu_memory_allocator(
+                    config.p2p_npu_buffer_size,
+                    self.full_size_shapes,
+                    self.dtypes,
+                    self.fmt,
+                    get_correct_device("npu", metadata.worker_id),
+                )
+            buffer_ptrs.append(self.memory_allocator.gpu_allocator.buffer_ptr)
+            buffer_sizes.append(self.memory_allocator.gpu_allocator.buffer_size)
+            buffer_types.append("npu")
+            align_bytes.append(self.memory_allocator.gpu_allocator.align_bytes)
+
         self.chunk_size = config.chunk_size
 
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
             role="both",
-            buffer_ptr=self.memory_allocator.cpu_allocator.buffer_ptr,
-            buffer_size=self.memory_allocator.cpu_allocator.buffer_size,
-            align_bytes=self.memory_allocator.cpu_allocator.align_bytes,
+            buffer_ptr=buffer_ptrs,
+            buffer_size=buffer_sizes,
+            buffer_type=buffer_types,
+            align_bytes=align_bytes,
             tp_rank=self.tp_rank,
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,
-            backends=config.nixl_backends,
             event_loop=loop,
         )
 

@@ -52,7 +52,7 @@ def CreateTransferChannel(
     buffer_size: Union[
         int, List[int]
     ],  # accept both single buffer and multiple buffers for hccl
-    align_bytes: int,
+    align_bytes: Union[int, List[int]],
     tp_rank: int,
     peer_init_url: str,
     **kwargs,
@@ -90,6 +90,7 @@ def CreateTransferChannel(
     else:
         assert isinstance(buffer_ptr, list), "buffer_ptr must be int or list of int"
         assert isinstance(buffer_size, list), "buffer_size must be int or list of int"
+        assert isinstance(align_bytes, list), "align_bytes must be int or list of int"
         assert len(buffer_ptr) == len(buffer_size), (
             "buffer_ptr and buffer_size must have the same length"
         )
@@ -102,18 +103,18 @@ def CreateTransferChannel(
             "buffer_type must have the same length as buffer_ptr"
         )
 
-    for ptr, size, b_type in zip(buffer_ptr, buffer_size, buffer_type, strict=False):
+    for ptr, size, b_type, align in zip(
+        buffer_ptr, buffer_size, buffer_type, align_bytes, strict=False
+    ):
         device_type = get_device_buffer_type(b_type)
-        device_id = (
-            -1 if device_type == BufferType.CPU else torch.npu.get_current_device()
-        )
+        device_id = -1 if device_type == BufferType.CPU else torch.npu.current_device()
         buffer_configs.append(
             BufferConfig(
                 ptr=ptr,
                 size=size,
                 device_id=device_id,
                 device_type=device_type,
-                align_bytes=align_bytes,
+                align_bytes=align,
             )
         )
 

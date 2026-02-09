@@ -8,6 +8,55 @@ LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
 
 
+def _patch_config():
+    # Third Party
+    from lmcache.v1.config_base import _to_bool, create_config_class
+    import lmcache.v1.config
+
+    # Add new config item for p2p npu usage
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_use_npu"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    }
+
+    # Add new p2p_npu_buffer_size config
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_npu_buffer_size"] = {
+        "type": int,
+        "default": 1 * 1024 * 1024 * 1024,
+        "description": "The total buffer size in bytes for P2P transfers. "
+        "This config is only used when p2p_use_npu is set to True.",
+    }
+
+    # Add new p2p_npu_pull_mode config
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_npu_pull_mode"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to use pull mode for P2P transfers "
+        "when using NPU memory. If False, push mode will be used. "
+        "This config is only used when p2p_use_npu is set to True.",
+    }
+
+    namespace_extras = {
+        "validate": lmcache.v1.config._validate_config,
+        "log_config": lmcache.v1.config._log_config,
+        "get_extra_config_value": lmcache.v1.config._get_extra_config_value,
+        "get_lmcache_worker_ids": lmcache.v1.config._get_lmcache_worker_ids,
+        "from_legacy": classmethod(lmcache.v1.config._from_legacy),
+        "get_lookup_server_worker_ids": lmcache.v1.config._get_lookup_server_worker_ids,
+    }
+
+    # Re-create the configuration class with the updated definitions
+    lmcache.v1.config.LMCacheEngineConfig = create_config_class(
+        config_name="LMCacheEngineConfig",
+        config_definitions=lmcache.v1.config._CONFIG_DEFINITIONS,
+        config_aliases=lmcache.v1.config._CONFIG_ALIASES,
+        deprecated_configs=lmcache.v1.config._DEPRECATED_CONFIGS,
+        namespace_extras=namespace_extras,
+    )
+
+
 def _patch_ops():
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
@@ -174,6 +223,7 @@ if not LMCACHE_ASCEND_PATCHED:
         # to avoid falling into non_cuda_equivalent
         from torch_npu.contrib import transfer_to_npu  # noqa: F401
 
+    _patch_config()
     _patch_ops()
 
     if _build_info.__framework_name__ == "pytorch":
