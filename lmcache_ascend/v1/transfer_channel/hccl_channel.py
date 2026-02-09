@@ -25,6 +25,8 @@ import zmq
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
 
+from .hccl_agent import BufferConfig, BufferType, HcclAgentWrapper
+
 logger = init_logger(__name__)
 
 
@@ -65,22 +67,36 @@ class HcclChannel(BaseTransferChannel):
     def __init__(
         self,
         async_mode: bool = False,
+        buffers: Optional[list[BufferConfig]] = None,
         **kwargs,
     ):
         assert "role" in kwargs
-        assert "buffer_ptr" in kwargs
-        assert "buffer_size" in kwargs
-        assert "peer_init_url" in kwargs
-        assert "align_bytes" in kwargs
 
         self.role = kwargs["role"]
 
+        if buffers is None:
+            logger.warning("Buffers not provided, using legacy initialization with buffer_ptr, buffer_size, and align_bytes")
+            # Legacy initialization support
+            assert "buffer_ptr" in kwargs
+            assert "buffer_size" in kwargs
+            assert "align_bytes" in kwargs
+            
+            buffers = [
+                BufferConfig(
+                    ptr=kwargs["buffer_ptr"],
+                    size=kwargs["buffer_size"],
+                    device_id=-1,  # Deprecated, not used in CPU implementation
+                    device_type=BufferType.CPU,
+                    align_bytes=kwargs["align_bytes"],
+                )
+            ]
+        
+        # Take the page size from the first buffer (assuming uniform for now)
+        self.page_size = buffers[0].align_bytes
+
         self.hccl_wrapper = HcclAgentWrapper(
-            buffer_ptr=kwargs["buffer_ptr"],
-            buffer_size=kwargs["buffer_size"],
-            page_size=kwargs["align_bytes"],
+            buffers=buffers,
         )
-        self.page_size = kwargs["align_bytes"]
         self.hccl_agent = self.hccl_wrapper.agent
 
         # Used for P2P
@@ -148,31 +164,40 @@ class HcclChannel(BaseTransferChannel):
         logger.info("Connected to remote")
 
         # Exchange and register memory with peer
-        mem_handle = self.hccl_wrapper.mem_handles[
-            0
-        ]  # TODO: make this work for multiple mem_handles, for now there's only one
+        # TODO: support multiple memory handles
+        mem_handles = self.hccl_wrapper.mem_handles
+        # Backward compatibility: wrap single handle if needed or send list
+        # For now, we assume protocol upgrade to send list of handles
         hccl_mem_reg_req = HcclMemRegRequest(
             local_id=local_id,
-            client_mem_handle_bytes=pickle.dumps(mem_handle),
+            client_mem_handle_bytes=pickle.dumps(mem_handles),
         )
         init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
         hccl_mem_reg_resp_bytes = init_tmp_socket.recv()
         hccl_mem_reg_resp = msgspec.msgpack.decode(
             hccl_mem_reg_resp_bytes, type=HcclMsg
         )
-        server_mem_handle = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-        self.hccl_agent.import_mem(conn_handle, server_mem_handle.mem_handle)
+        server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
+        
+        # Handle both single item (legacy) and list (new)
+        if not isinstance(server_mem_handles, list):
+            server_mem_handles = [server_mem_handles]
+            
+        for handle in server_mem_handles:
+            self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         addr_list = []
         with self._state_lock:
             self.remote_index_addr_dict[peer_id] = addr_list
 
-        for base_addr in range(
-            server_mem_handle.buffer_ptr,
-            server_mem_handle.buffer_ptr + server_mem_handle.buffer_size,
-            server_mem_handle.page_size,
-        ):
-            addr_list.append(base_addr)
+        # Map addresses for all registered buffers
+        for handle in server_mem_handles:
+            for base_addr in range(
+                handle.buffer_ptr,
+                handle.buffer_ptr + handle.buffer_size,
+                handle.page_size,
+            ):
+                addr_list.append(base_addr)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -218,31 +243,36 @@ class HcclChannel(BaseTransferChannel):
             self.conn_handles_dict[peer_id] = conn_handle
 
         # Exchange and register memory with peer
-        mem_handle = self.hccl_wrapper.mem_handles[
-            0
-        ]  # TODO: make this work for multiple mem_handles, for now there's only one
+        mem_handles = self.hccl_wrapper.mem_handles
+        
         hccl_mem_reg_req = HcclMemRegRequest(
             local_id=local_id,
-            client_mem_handle_bytes=pickle.dumps(mem_handle),
+            client_mem_handle_bytes=pickle.dumps(mem_handles),
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
         hccl_mem_reg_resp_bytes = await init_tmp_socket.recv()
         hccl_mem_reg_resp = msgspec.msgpack.decode(
             hccl_mem_reg_resp_bytes, type=HcclMsg
         )
-        server_mem_handle = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-        self.hccl_agent.import_mem(conn_handle, server_mem_handle.mem_handle)
+        server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
+        
+        if not isinstance(server_mem_handles, list):
+            server_mem_handles = [server_mem_handles]
+
+        for handle in server_mem_handles:
+            self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         addr_list = []
         with self._state_lock:
             self.remote_index_addr_dict[peer_id] = addr_list
 
-        for base_addr in range(
-            server_mem_handle.buffer_ptr,
-            server_mem_handle.buffer_ptr + server_mem_handle.buffer_size,
-            server_mem_handle.page_size,
-        ):
-            addr_list.append(base_addr)
+        for handle in server_mem_handles:
+            for base_addr in range(
+                handle.buffer_ptr,
+                handle.buffer_ptr + handle.buffer_size,
+                handle.page_size,
+            ):
+                addr_list.append(base_addr)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -330,19 +360,23 @@ class HcclChannel(BaseTransferChannel):
                 ]  # TODO: check if exists
                 self.remote_index_addr_dict[req.local_id] = addr_list
 
-            client_mem_handle = pickle.loads(req.client_mem_handle_bytes)
-            self.hccl_agent.import_mem(conn_handle, client_mem_handle.mem_handle)
+            client_mem_handles = pickle.loads(req.client_mem_handle_bytes)
+            if not isinstance(client_mem_handles, list):
+                client_mem_handles = [client_mem_handles]
+                
+            for handle in client_mem_handles:
+                self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
-            for base_addr in range(
-                client_mem_handle.buffer_ptr,
-                client_mem_handle.buffer_ptr + client_mem_handle.buffer_size,
-                client_mem_handle.page_size,
-            ):
-                addr_list.append(base_addr)
+                for base_addr in range(
+                    handle.buffer_ptr,
+                    handle.buffer_ptr + handle.buffer_size,
+                    handle.page_size,
+                ):
+                    addr_list.append(base_addr)
 
-            # TODO: make work for multiple mem_handles, for now there's only one
+            # Send back our handles (all of them)
             resp = HcclMemRegResponse(
-                server_mem_handle_bytes=pickle.dumps(self.hccl_wrapper.mem_handles[0]),
+                server_mem_handle_bytes=pickle.dumps(self.hccl_wrapper.mem_handles),
             )
 
             logger.info("Replying mem register response")
@@ -660,73 +694,3 @@ class HcclChannel(BaseTransferChannel):
             thread.join()
         self.zmq_context.term()
         self.hccl_wrapper.close()
-
-
-@dataclass
-class HcclMemHandleMeta:
-    mem_handle: hcomm.RmaMemDesc
-    buffer_ptr: int
-    buffer_size: int
-    page_size: int
-
-
-@dataclass
-class HcclAgentWrapper:
-    agent: "hcomm.HcclAgent"
-    mem_handles: Any
-    conn_handle: Any
-    buffer_ptrs: Any
-    # xfer_handler is removed
-
-    def __init__(
-        self,
-        buffer_ptr: int,
-        buffer_size: int,
-        page_size: int,
-    ):
-        """
-        Initialize the hccl agent.
-
-        Args:
-            buffer_size (int): The size of the buffer.
-            buffer_ptr (int): The pointer to the buffer.
-        """
-
-        device_id = torch.npu.current_device()
-        hccl_agent = hcomm.HcclAgent.get_instance(device_id)
-        hccl_agent.init()
-
-        already_registered = lmc_ops.get_device_ptr(buffer_ptr) is not None
-        # HCCL Doesn't allow the host registering a host pointer twice. We could
-        # register the corresponding device pointer, however this limits the
-        # registereable memory to the device capacity.
-        if already_registered:
-            lmc_ops.unregister_ptr(buffer_ptr)
-
-        mem_handle = hccl_agent.register_mem(buffer_ptr, buffer_size)
-        device_ptr = hccl_agent.get_registered_dev_addr(buffer_ptr)
-
-        if (
-            already_registered
-        ):  # Re register memory to make it accessible by lmc_ops kernels
-            lmc_ops.register_mapping(buffer_ptr, device_ptr, buffer_size)
-
-        # Register the memory
-        mem_handle_meta = HcclMemHandleMeta(
-            mem_handle=mem_handle,
-            buffer_ptr=buffer_ptr,
-            buffer_size=buffer_size,
-            page_size=page_size,
-        )
-
-        self.local_index_addr = []
-        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            self.local_index_addr.append(base_addr)
-
-        self.agent = hccl_agent
-        self.mem_handles = [mem_handle_meta]
-        self.buffer_ptrs = [buffer_ptr]
-
-    def close(self):
-        for buffer_ptr in self.buffer_ptrs:
-            self.agent.deregister_mem(buffer_ptr)
