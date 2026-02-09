@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-from dataclasses import dataclass
-from typing import List
-
-# Third Party
 # Module under test
+# Third Party
 from lmcache.storage_backend.serde.cachegen_basics import (
     CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK,
     CacheGenConfig,
@@ -25,6 +21,7 @@ import torch_npu
 
 # First Party
 import lmcache_ascend.c_ops as lmc_ops
+
 
 # Generating relastic and obviously correct input/output for encode is hard in all but
 # the most trivial cases. Fortunately what we really care about is that
@@ -161,8 +158,8 @@ def test_basic_non_uniform_encode():
 
     # Assert
     #
-    # Given coding: 0 -> '0', 1 -> n/a, 2 -> '10', 3 -> '11', [0, 0, 2, 3] becomes. '001011' + '00' 
-    # to complete the byte
+    # Given coding: 0 -> '0', 1 -> n/a, 2 -> '10', 3 -> '11', [0, 0, 2, 3] becomes.
+    # '001011' + '00' to complete the byte
     assert output_buf_T[0][0][0].tolist() == int("00101100", 2)
 
 
@@ -208,7 +205,9 @@ def test_basic_decode(layers, channels, bits_for_symbol):
     lens_T = lens_T.cumsum(0).reshape((layers, channels))
 
     bins = max_sym + 1
-    cdf = [int(bin * (0x10000 / (bins - 1))) | bits_for_symbol for bin in range(0, bins)] * layers * channels
+    factor = 0x10000 / (bins - 1)
+    cdf = [int(b * factor) | bits_for_symbol for b in range(0, bins)]
+    cdf = cdf * layers * channels
     cdf_T = (
         torch.Tensor(cdf)
         .to(device="npu")

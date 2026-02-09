@@ -48,9 +48,9 @@ void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendCManager::GetInstance(socName);
     uint32_t n_aiv = AIV_MAX;
-    kvcache_ops::cachegen::encode_v2(cdf_data_ptr, input_data_ptr, output_data_ptr,
-                                  output_lengths_data_ptr, stream, n_aiv, nbins,
-                                  ntokens, nlayers, nchannels, chunk_size);
+    kvcache_ops::cachegen::encode_v2(
+        cdf_data_ptr, input_data_ptr, output_data_ptr, output_lengths_data_ptr,
+        stream, n_aiv, nbins, ntokens, nlayers, nchannels, chunk_size);
     return 0;
   };
 
@@ -109,8 +109,8 @@ void decode_ascend_prefsum(const at::Tensor &cdf, const at::Tensor &bytestreams,
 
   auto _custom_handler = [=]() -> int {
     kvcache_ops::cachegen::decode_v2(cdf_data_ptr, bytestreams_data_ptr,
-                                  lengths_data_ptr, output_data_ptr, stream,
-                                  n_aiv, nbins, ntokens, nlayers, nchannels);
+                                     lengths_data_ptr, output_data_ptr, stream,
+                                     n_aiv, nbins, ntokens, nlayers, nchannels);
     return 0;
   };
 
