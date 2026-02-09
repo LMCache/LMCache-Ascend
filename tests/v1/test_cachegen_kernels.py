@@ -51,7 +51,7 @@ def test_basic_encode(layers, channels, bits_for_symbol):
     )
     n_syms = int(len(symbols) / (layers * channels))
     shape = (layers, n_syms, channels)
-    symbols_T = torch.Tensor(symbols).to(device="npu").to(torch.int8).reshape(shape)
+    symbols_T = torch.tensor(symbols).to(device="npu").to(torch.int8).reshape(shape)
 
     # Arrange - perfectly even CDF
     bins = max_sym + 1
@@ -200,7 +200,7 @@ def test_basic_decode(layers, channels, bits_for_symbol):
     lens_T = (
         torch.Tensor([len(byte_stream)] * layers * channels)
         .to(device="npu")
-        .to(torch.int64)
+        .to(torch.int32)
     )
     lens_T = lens_T.cumsum(0).reshape((layers, channels))
 
@@ -339,7 +339,7 @@ def test_encode_into_decode(n_tokens, n_layers, chunk_size, num_heads, head_size
         torch_npu.npu.synchronize()
 
     for expected_chunk, decoded_chunk in zip(
-        expected_chunks, decoded_chunks, strict=False
+        expected_chunks, decoded_chunks
     ):
         decoded_key, decoded_value = decoded_chunk
         expected_key, expected_value = expected_chunk

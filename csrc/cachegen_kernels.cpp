@@ -23,7 +23,6 @@ void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
   const int nchannels = input_shape[2];
   const int nbins = cdf.sizes()[2] - 1;
 
-  const auto cdf_sizes = cdf.sizes();
   const auto output_buffer_shape = output_buffer.sizes();
   const int chunk_size = output_buffer_shape[2];
 
@@ -47,7 +46,7 @@ void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
   auto _custom_handler = [=]() -> int {
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = AIV_MAX;
+    uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
     kvcache_ops::cachegen::encode_v2(
         cdf_data_ptr, input_data_ptr, output_data_ptr, output_lengths_data_ptr,
         stream, n_aiv, nbins, ntokens, nlayers, nchannels, chunk_size);
@@ -56,8 +55,6 @@ void encode_ascend_new(const at::Tensor &cdf, const at::Tensor &input_sym,
 
   at_npu::native::OpCommand cmd;
   cmd.Name("encode").SetCustomHandler(_custom_handler).Run();
-
-  return;
 };
 
 void decode_ascend_new(const at::Tensor &cdf, const at::Tensor &bytestreams,
@@ -75,10 +72,6 @@ void decode_ascend_prefsum(const at::Tensor &cdf, const at::Tensor &bytestreams,
   const int nchannels = cdf_shape[1];
   const int nbins = cdf_shape[2] - 1; // To match calculate cdf
   const int ntokens = output.sizes()[1];
-
-  const auto bytestreams_shape = bytestreams.sizes();
-  const auto cdf_sizes = cdf.sizes();
-  const auto output_buffer_shape = output.sizes();
 
   TORCH_CHECK(cdf.device().is_privateuseone(),
               "CDFs tensor should be on the NPU");
@@ -105,7 +98,7 @@ void decode_ascend_prefsum(const at::Tensor &cdf, const at::Tensor &bytestreams,
   const char *socName = aclrtGetSocName();
   auto ascendcPlatform =
       platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-  uint32_t n_aiv = AIV_MAX;
+  uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
 
   auto _custom_handler = [=]() -> int {
     kvcache_ops::cachegen::decode_v2(cdf_data_ptr, bytestreams_data_ptr,
@@ -116,8 +109,6 @@ void decode_ascend_prefsum(const at::Tensor &cdf, const at::Tensor &bytestreams,
 
   at_npu::native::OpCommand cmd;
   cmd.Name("decode").SetCustomHandler(_custom_handler).Run();
-
-  return;
 };
 
 // Calculate the CDF of the input which is a NPU resident tensor of values
@@ -150,7 +141,7 @@ at::Tensor calculate_cdf(const at::Tensor &input, const int n_bins) {
   auto _custom_handler = [=]() -> int {
     auto ascendcPlatform =
         platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = AIV_MAX;
+    uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
     kvcache_ops::cachegen::calculate_cdf(input_data_ptr, output_data_ptr,
                                          stream, n_aiv, n_bins, ntokens,
                                          nlayers, nchannels);
