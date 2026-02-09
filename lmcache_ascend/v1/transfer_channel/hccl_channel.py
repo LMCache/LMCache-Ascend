@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Optional, Union
 import asyncio
 import pickle
 import threading
@@ -22,9 +21,9 @@ import torch
 import zmq
 
 # First Party
-import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
 
+# Local
 from .hccl_agent import BufferConfig, BufferType, HcclAgentWrapper
 
 logger = init_logger(__name__)
@@ -75,12 +74,16 @@ class HcclChannel(BaseTransferChannel):
         self.role = kwargs["role"]
 
         if buffers is None:
-            logger.warning("Buffers not provided, using legacy initialization with buffer_ptr, buffer_size, and align_bytes")
+            logger.warning(
+                "Buffers not provided, "
+                "using legacy initialization with buffer_ptr, "
+                "buffer_size, and align_bytes"
+            )
             # Legacy initialization support
             assert "buffer_ptr" in kwargs
             assert "buffer_size" in kwargs
             assert "align_bytes" in kwargs
-            
+
             buffers = [
                 BufferConfig(
                     ptr=kwargs["buffer_ptr"],
@@ -90,7 +93,7 @@ class HcclChannel(BaseTransferChannel):
                     align_bytes=kwargs["align_bytes"],
                 )
             ]
-        
+
         # Take the page size from the first buffer (assuming uniform for now)
         self.page_size = buffers[0].align_bytes
 
@@ -178,11 +181,11 @@ class HcclChannel(BaseTransferChannel):
             hccl_mem_reg_resp_bytes, type=HcclMsg
         )
         server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-        
+
         # Handle both single item (legacy) and list (new)
         if not isinstance(server_mem_handles, list):
             server_mem_handles = [server_mem_handles]
-            
+
         for handle in server_mem_handles:
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
@@ -244,7 +247,7 @@ class HcclChannel(BaseTransferChannel):
 
         # Exchange and register memory with peer
         mem_handles = self.hccl_wrapper.mem_handles
-        
+
         hccl_mem_reg_req = HcclMemRegRequest(
             local_id=local_id,
             client_mem_handle_bytes=pickle.dumps(mem_handles),
@@ -255,7 +258,7 @@ class HcclChannel(BaseTransferChannel):
             hccl_mem_reg_resp_bytes, type=HcclMsg
         )
         server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-        
+
         if not isinstance(server_mem_handles, list):
             server_mem_handles = [server_mem_handles]
 
@@ -363,7 +366,7 @@ class HcclChannel(BaseTransferChannel):
             client_mem_handles = pickle.loads(req.client_mem_handle_bytes)
             if not isinstance(client_mem_handles, list):
                 client_mem_handles = [client_mem_handles]
-                
+
             for handle in client_mem_handles:
                 self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 

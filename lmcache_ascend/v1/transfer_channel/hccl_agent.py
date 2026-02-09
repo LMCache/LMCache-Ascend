@@ -1,14 +1,21 @@
-from enum import Enum, auto
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 from dataclasses import dataclass
+from enum import Enum, auto
 from typing import List, Tuple
+
+# Third Party
 import torch
-import torch_npu
+
+# First Party
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
+
 
 class BufferType(Enum):
     CPU = auto()
     NPU = auto()
+
 
 @dataclass
 class BufferConfig:
@@ -35,7 +42,7 @@ class HcclAgentWrapper:
     mem_handles: List[HcclMemHandleMeta]
 
     # (start, end)
-    _mem_regions: List[Tuple[int, int]] = None 
+    _mem_regions: List[Tuple[int, int]] = None
 
     def __init__(
         self,

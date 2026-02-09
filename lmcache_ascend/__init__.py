@@ -15,21 +15,24 @@ def _patch_ops():
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
 
+def _patch_storage_backend_init():
+    # Third Party
+    import lmcache.v1.storage_backend as lm_storage_backend
+
+    # First Party
+    from lmcache_ascend.v1.storage_backend import (
+        CreateStorageBackends as ascend_create_storage_backends,
+    )
+
+    lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
+
+
 def _patch_transfer_channel():
     # First Party
-    from lmcache_ascend.v1.transfer_channel import (
-        CreateTransferChannel as AscendCreateTransferChannel,
-    )
     from lmcache_ascend.v1.transfer_channel import (
         get_correct_device as ascend_get_correct_device,
     )
 
-    # Make sure to import before importing init_lmcache_engine, otherwise
-    # CreateTransferChannel gets patched after the original version is
-    # already imported.
-    sys.modules[
-        "lmcache.v1.transfer_channel"
-    ].CreateTransferChannel = AscendCreateTransferChannel
     sys.modules[
         "lmcache.v1.transfer_channel.transfer_utils"
     ].get_correct_device = ascend_get_correct_device
@@ -174,6 +177,7 @@ if not LMCACHE_ASCEND_PATCHED:
     _patch_ops()
 
     if _build_info.__framework_name__ == "pytorch":
+        _patch_storage_backend_init()
         _patch_transfer_channel()
         _patch_cacheblend()
         _patch_multi_process()

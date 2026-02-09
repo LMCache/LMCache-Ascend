@@ -3,26 +3,28 @@
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
 import asyncio
-import importlib  # Added for dynamic import
 
 # Third Party
-import torch
-import torch_npu
-
-# First Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.storage_backend import storage_plugin_launcher
+from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
-from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
-from lmcache.v1.storage_backend import storage_plugin_launcher
-from lmcache_ascend.v1.storage_backend.p2p_backend import (
-    AscendP2PBackend
-)
+import torch
+import torch_npu  # noqa: F401
+
+# First Party
+from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+if TYPE_CHECKING:
+    # Third Party
+    from lmcache.v1.cache_controller.worker import LMCacheWorker
 
 logger = init_logger(__name__)
+
 
 def is_npu_worker(metadata: LMCacheEngineMetadata) -> bool:
     """
@@ -36,12 +38,20 @@ def is_npu_worker(metadata: LMCacheEngineMetadata) -> bool:
     """
     return metadata.role != "scheduler" and torch.npu.is_available()
 
+
+"""
+NOTE (gingfung): Patching the CreateStorageBackends function 
+to replace with AscendP2PBackend when p2p is enabled on Ascend. 
+Also remove NIXL as it is not supported.
+"""
+
+
 def CreateStorageBackends(
     config: LMCacheEngineConfig,
     metadata: LMCacheEngineMetadata,
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
-    lmcache_worker: Optional["LMCacheWorker"] = None,
+    lmcache_worker: Optional["LMCacheWorker"] = None,  # noqa: F821
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_npu_worker(metadata):
         dst_device = f"npu:{torch.npu.current_device()}"
@@ -49,9 +59,8 @@ def CreateStorageBackends(
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
 
-    extra_config = config.extra_config
     if config.enable_pd:
-        # First Party
+        # Third Party
         from lmcache.v1.storage_backend.pd_backend import PDBackend
 
         storage_backends["PDBackend"] = PDBackend(config, metadata)
@@ -124,7 +133,7 @@ def CreateStorageBackends(
     if config.extra_config is not None and config.extra_config.get(
         "audit_backend_enabled", False
     ):
-        # First Party
+        # Third Party
         from lmcache.v1.storage_backend.audit_backend import AuditBackend
 
         # Conditionally wrap backends with audit logging if enabled in config

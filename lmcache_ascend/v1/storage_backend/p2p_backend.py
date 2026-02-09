@@ -1,42 +1,43 @@
+# SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import TYPE_CHECKING, Optional
 import asyncio
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 
-import zmq.asyncio
+# Third Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.v1.storage_backend.p2p_backend import (
-    P2PBackend,
-    PeerInfo
-)
-from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.memory_management import (
     MemoryFormat,
-    MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,
-    get_zmq_context,
-    get_zmq_socket_with_timeout,
 )
+from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+from lmcache.v1.storage_backend.p2p_backend import P2PBackend, PeerInfo
+import zmq.asyncio
+
+# First Party
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
 
 if TYPE_CHECKING:
-    # First Party
+    # Third Party
     from lmcache.v1.cache_controller import LMCacheWorker
 
 logger = init_logger(__name__)
 
+
 class AscendP2PBackend(P2PBackend):
-    def __init__(self, 
-                 config: LMCacheEngineConfig,
-                 metadata: LMCacheEngineMetadata,
-                 loop: asyncio.AbstractEventLoop,
-                 local_cpu_backend: LocalCPUBackend,
-                 lmcache_worker: "LMCacheWorker"
+    def __init__(
+        self,
+        config: LMCacheEngineConfig,
+        metadata: LMCacheEngineMetadata,
+        loop: asyncio.AbstractEventLoop,
+        local_cpu_backend: LocalCPUBackend,
+        lmcache_worker: "LMCacheWorker",
     ):
         self.config = config
         self.loop = loop
