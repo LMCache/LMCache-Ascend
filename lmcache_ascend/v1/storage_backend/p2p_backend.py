@@ -61,6 +61,7 @@ class AscendBatchedLookupAndGetDoneMsg(msgspec.Struct, tag=True):
 class AscendBatchedLookupAndGetDoneRetMsg(msgspec.Struct, tag=True):
     pass
 
+
 class AscendBatchedLookupAndPutMsg(BatchedLookupAndPutMsg):
     mem_addrs: list[int] = []
 
@@ -202,7 +203,6 @@ class AscendP2PBackend(P2PBackend):
         asyncio.run_coroutine_threadsafe(
             self._run_peer_request_handler_with_recovery(), loop
         )
-        logger.info(f"Initializing AscendP2PBackend with tp_rank={self.tp_rank}, peer_init_port={self.peer_init_port}")
 
     async def _handle_peer_requests(self):
         """
@@ -226,7 +226,7 @@ class AscendP2PBackend(P2PBackend):
         while self.running.is_set():
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=AscendP2PMsg)
-            
+
             num_tokens = len(msg.mem_addrs) * self.chunk_size
             monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
 
@@ -282,7 +282,6 @@ class AscendP2PBackend(P2PBackend):
             )
 
             if msg.pull_mode:
-                logger.info("Pull mode enabled for lookup_id %s, receiver_id %s", lookup_id, receiver_id)
                 # actual data transfer will be triggered
                 # by the receiver's pull request.
                 remote_mem_addrs = []
@@ -290,8 +289,7 @@ class AscendP2PBackend(P2PBackend):
                     remote_mem_addrs = self.transfer_channel.get_local_mem_addrs(
                         mem_objs
                     )
-                    logger.info("returning remote_mem_addrs %s for lookup_id %s, receiver_id %s", remote_mem_addrs, lookup_id, receiver_id)
-                    
+
                     # Store mem_objs to prevent premature release
                     self.pending_pull_resources[lookup_id] = mem_objs
                     should_release = False
@@ -347,22 +345,15 @@ class AscendP2PBackend(P2PBackend):
             logger.info("Released resources for lookup_id %s", lookup_id)
         else:
             logger.warning("No pending resources found for lookup_id %s", lookup_id)
-        
+
         return AscendBatchedLookupAndGetDoneRetMsg()
 
-    async def batched_get_non_blocking(
+    def _allocate_memory_for_keys(
         self,
-        lookup_id: str,
         keys: list[CacheEngineKey],
-        transfer_spec: Any = None,
-    ) -> list[MemoryObj]:
-        target_peer_init_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
-
-        assert isinstance(transfer_spec, dict)
-        cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
-        assert cum_chunk_lengths is not None, "cum_chunk_lengths must be provided"
-        assert isinstance(cum_chunk_lengths, list), "cum_chunk_lengths must be a list"
-
+        cum_chunk_lengths: list[int],
+    ) -> tuple[list[MemoryObj], list[str]]:
+        """Allocate memory objects for each key and return (mem_objs, str_keys)."""
         mem_objs = []
         str_keys = []
         keys_len = len(keys)
@@ -373,38 +364,36 @@ class AscendP2PBackend(P2PBackend):
                 shapes = self._get_unfull_chunk_shapes(
                     cum_chunk_lengths[idx + 1] - cum_chunk_lengths[idx]
                 )
-            
+
             if self.use_npu:
-                mem_obj = self.memory_allocator.gpu_allocator.allocate(shapes, self.dtypes, self.fmt)
+                mem_obj = self.memory_allocator.gpu_allocator.allocate(
+                    shapes, self.dtypes, self.fmt
+                )
             else:
                 mem_obj = self.local_cpu_backend.allocate(shapes, self.dtypes, self.fmt)
 
             mem_objs.append(mem_obj)
             str_keys.append(key.to_string())
+        return mem_objs, str_keys
 
-        local_addrs = self.transfer_channel.get_local_mem_addrs(mem_objs)
+    async def _send_lookup_request_with_retry(
+        self,
+        lookup_id: str,
+        target_peer_init_url: str,
+        msg: AscendBatchedLookupAndGetMsg,
+    ) -> Optional[AscendP2PMsg]:
+        """Send lookup request to peer with retry logic.
 
-        # NOTE(Jiayi): Tier 3 lookup is batched with retrieval.
-        # NOTE(gingfung): adding pull mode support for tier 3 lookup.
-        msg = AscendBatchedLookupAndGetMsg(
-            lookup_id=lookup_id,
-            receiver_id=self.peer_init_url,
-            keys=str_keys,
-            mem_indexes = [], # we don't use the mem_indexes
-            mem_addrs=local_addrs,
-            pull_mode=self.pull_mode,
-        )
-
+        Returns the decoded response message, or None on unrecoverable failure.
+        """
         retry_count = 0
         while retry_count < self.max_retry_count:
             peer_info = self.target_peer_info_mapping[target_peer_init_url]
-            lookup_lock = peer_info.lookup_lock
-            async with lookup_lock:
-                lookup_socket = peer_info.lookup_socket
+            async with peer_info.lookup_lock:
                 try:
                     retry_count += 1
-                    await lookup_socket.send(msgspec.msgpack.encode(msg))
-                    ret_msg_bytes = await lookup_socket.recv()
+                    await peer_info.lookup_socket.send(msgspec.msgpack.encode(msg))
+                    ret_msg_bytes = await peer_info.lookup_socket.recv()
                     ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=AscendP2PMsg)
                     if (
                         isinstance(ret_msg, P2PErrorMsg)
@@ -419,7 +408,7 @@ class AscendP2PBackend(P2PBackend):
                         )
                         await self._ensure_peer_connection(target_peer_init_url, True)
                     else:
-                        break
+                        return ret_msg
                 except zmq.ZMQError as e:
                     logger.error(
                         "ZMQ error occurred for lookup_id %s. Error: %s",
@@ -432,8 +421,7 @@ class AscendP2PBackend(P2PBackend):
                             "Max retry count reached for lookup_id %s",
                             lookup_id,
                         )
-                        self._cleanup_memory_objects(mem_objs)
-                        return []
+                        return None
                 except Exception as e:
                     logger.error(
                         "Error during P2P get operation for lookup_id %s: %s",
@@ -441,70 +429,127 @@ class AscendP2PBackend(P2PBackend):
                         e,
                         exc_info=True,
                     )
-                    self._cleanup_memory_objects(mem_objs)
-                    return []
+                    return None
+        return None
 
-        if isinstance(ret_msg, P2PErrorMsg):
-            logger.error(
-                "P2P error for lookup_id %s, error code: %s",
-                lookup_id,
-                ret_msg.error_code,
+    async def _send_done_signal(
+        self,
+        lookup_id: str,
+        target_peer_init_url: str,
+        remote_mem_addrs: list[int],
+    ) -> None:
+        """Send Done signal to peer so it can release pinned resources.
+
+        This is critical to prevent memory leaks on the server side.
+        """
+        try:
+            done_msg = AscendBatchedLookupAndGetDoneMsg(
+                lookup_id=lookup_id, mem_addrs=remote_mem_addrs
             )
-            num_hit_chunks = 0
-        else:
-            num_hit_chunks = ret_msg.num_hit_chunks
+            peer_info = self.target_peer_info_mapping[target_peer_init_url]
+            async with peer_info.lookup_lock:
+                await peer_info.lookup_socket.send(msgspec.msgpack.encode(done_msg))
+                # Wait for Ack (required for ZMQ REQ/REP state machine)
+                await peer_info.lookup_socket.recv()
+        except Exception as e:
+            logger.error(
+                "Error sending P2P Done signal for lookup_id %s: %s",
+                lookup_id,
+                e,
+                exc_info=True,
+            )
 
+    async def _handle_pull_mode_transfer(
+        self,
+        lookup_id: str,
+        target_peer_init_url: str,
+        hit_mem_objs: list[MemoryObj],
+        remote_mem_addrs: list[int],
+    ) -> bool:
+        """Execute pull-mode: read data from remote, then send Done signal.
+
+        Returns True on success, False on failure.
+        The Done signal is always sent regardless of read outcome.
+        """
+        if not remote_mem_addrs:
+            logger.error(
+                "Pull mode enabled but remote_mem_addrs is empty for lookup_id %s",
+                lookup_id,
+            )
+            return False
+
+        read_success = False
+        try:
+            channel_transfer_spec = {
+                "receiver_id": target_peer_init_url,
+                "remote_addrs": remote_mem_addrs,
+            }
+            await self.transfer_channel.async_batched_read(
+                buffers=hit_mem_objs,
+                transfer_spec=channel_transfer_spec,
+            )
+            read_success = True
+        except Exception as e:
+            logger.error(
+                "Error during P2P batched read operation for lookup_id %s: %s",
+                lookup_id,
+                e,
+                exc_info=True,
+            )
+            # Do not return yet — must send Done signal to server
+
+        await self._send_done_signal(lookup_id, target_peer_init_url, remote_mem_addrs)
+        return read_success
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        target_peer_init_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
+
+        assert isinstance(transfer_spec, dict)
+        cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
+        assert cum_chunk_lengths is not None, "cum_chunk_lengths must be provided"
+        assert isinstance(cum_chunk_lengths, list), "cum_chunk_lengths must be a list"
+
+        mem_objs, str_keys = self._allocate_memory_for_keys(keys, cum_chunk_lengths)
+        local_addrs = self.transfer_channel.get_local_mem_addrs(mem_objs)
+
+        msg = AscendBatchedLookupAndGetMsg(
+            lookup_id=lookup_id,
+            receiver_id=self.peer_init_url,
+            keys=str_keys,
+            mem_indexes=[],  # we don't use mem_indexes
+            mem_addrs=local_addrs,
+            pull_mode=self.pull_mode,
+        )
+
+        ret_msg = await self._send_lookup_request_with_retry(
+            lookup_id, target_peer_init_url, msg
+        )
+        if ret_msg is None or isinstance(ret_msg, P2PErrorMsg):
+            if isinstance(ret_msg, P2PErrorMsg):
+                logger.error(
+                    "P2P error for lookup_id %s, error code: %s",
+                    lookup_id,
+                    ret_msg.error_code,
+                )
+            self._cleanup_memory_objects(mem_objs)
+            return []
+
+        num_hit_chunks = ret_msg.num_hit_chunks
         hit_mem_objs = mem_objs[:num_hit_chunks]
 
         if num_hit_chunks > 0 and self.pull_mode:
-            if ret_msg.remote_mem_addrs:
-                read_success = False
-                try:
-                    channel_transfer_spec = {
-                        "receiver_id": target_peer_init_url,
-                        "remote_addrs": ret_msg.remote_mem_addrs,
-                    }
-                    await self.transfer_channel.async_batched_read(
-                        buffers=hit_mem_objs,
-                        transfer_spec=channel_transfer_spec,
-                    )
-                    read_success = True
-                except Exception as e:
-                    logger.error(
-                        "Error during P2P batched read operation for lookup_id %s: %s",
-                        lookup_id,
-                        e,
-                        exc_info=True,
-                    )
-                    # Do not return yet, must send Done signal to server
-
-                # Notify peer that reading is done (or failed) so it can release resources
-                # This is critical to prevent memory leaks on the server side
-                try:
-                    done_msg = AscendBatchedLookupAndGetDoneMsg(lookup_id=lookup_id, mem_addrs=ret_msg.remote_mem_addrs)
-                    peer_info = self.target_peer_info_mapping[target_peer_init_url]
-                    lookup_lock = peer_info.lookup_lock
-                    async with lookup_lock:
-                        lookup_socket = peer_info.lookup_socket
-                        await lookup_socket.send(msgspec.msgpack.encode(done_msg))
-                        await lookup_socket.recv() # Wait for Ack (Required for ZMQ REQ/REP state)
-                except Exception as e:
-                    logger.error(
-                        "Error sending P2P Done signal for lookup_id %s: %s",
-                        lookup_id,
-                        e,
-                        exc_info=True,
-                    )
-                
-                if not read_success:
-                    self._cleanup_memory_objects(mem_objs)
-                    return []
-            else:
-                logger.error(
-                    "Pull mode enabled but "
-                    "remote_mem_addrs is empty for lookup_id %s",
-                    lookup_id,
-                )
+            success = await self._handle_pull_mode_transfer(
+                lookup_id,
+                target_peer_init_url,
+                hit_mem_objs,
+                ret_msg.remote_mem_addrs,
+            )
+            if not success:
                 self._cleanup_memory_objects(mem_objs)
                 return []
 

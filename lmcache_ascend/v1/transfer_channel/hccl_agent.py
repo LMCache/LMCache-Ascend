@@ -2,16 +2,18 @@
 # Standard
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List, Tuple
+from typing import List
+
 # Third Party
+from lmcache.logging import init_logger
 import torch
 
 # First Party
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
-from lmcache.logging import init_logger
 
 logger = init_logger(__name__)
+
 
 class BufferType(Enum):
     CPU = auto()
