@@ -339,7 +339,7 @@ def test_encode_into_decode(n_tokens, n_layers, chunk_size, num_heads, head_size
         torch_npu.npu.synchronize()
 
     for expected_chunk, decoded_chunk in zip(
-        expected_chunks, decoded_chunks
+        expected_chunks, decoded_chunks, strict=False
     ):
         decoded_key, decoded_value = decoded_chunk
         expected_key, expected_value = expected_chunk
