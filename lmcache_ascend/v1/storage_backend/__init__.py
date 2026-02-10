@@ -61,9 +61,9 @@ def CreateStorageBackends(
 
     if config.enable_pd:
         # Third Party
-        from lmcache.v1.storage_backend.pd_backend import PDBackend
-
-        storage_backends["PDBackend"] = PDBackend(config, metadata)
+        raise NotImplementedError("PD backend is not supported on Ascend yet.")
+        # from lmcache.v1.storage_backend.pd_backend import PDBackend
+        # storage_backends["PDBackend"] = PDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because

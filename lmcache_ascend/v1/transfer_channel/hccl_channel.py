@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import Optional, Union, Dict, List
 import asyncio
 import pickle
 import threading
@@ -24,7 +24,7 @@ import zmq
 import lmcache_ascend.hccl_npu_comms as hcomm
 
 # Local
-from .hccl_agent import BufferConfig, BufferType, HcclAgentWrapper
+from .hccl_agent import BufferConfig, BufferType, HcclAgentWrapper, HcclMemHandleMeta
 
 logger = init_logger(__name__)
 
@@ -56,6 +56,40 @@ class HcclMemRegResponse(HcclMsgBase):
         bytes  # Handle of server (receiver) memory to register to client
     )
 
+class PeerMemHandle:
+    def __init__(self, mem_handle: HcclMemHandleMeta):
+        self.mem_handle = mem_handle
+        self.buffer_ptr = mem_handle.buffer_ptr
+        self.buffer_size = mem_handle.buffer_size
+        self.page_size = mem_handle.page_size
+
+class PeerMemHandleList:
+    def __init__(self, mem_handles: List[HcclMemHandleMeta]):
+        self.peer_mem_handles = [PeerMemHandle(handle) for handle in mem_handles]
+    
+    def extend_handles(self, mem_handles: List[HcclMemHandleMeta]):
+        for handle in mem_handles:
+            self.peer_mem_handles.append(PeerMemHandle(handle))
+
+    def get_buffer_addr(self, ptr: int):
+        """
+            return the remote buffer address that corresponds to the given pointer
+        """
+        for handle in self.peer_mem_handles:
+            if handle.buffer_ptr <= ptr < handle.buffer_ptr + handle.buffer_size:
+                offset = ptr - handle.buffer_ptr
+                aligned_offset = (offset // handle.page_size) * handle.page_size
+                return handle.buffer_ptr + aligned_offset
+        raise ValueError(f"Pointer {ptr} not found in any registered memory handle.")
+
+    def get_buffer_base_ptr(self, ptr: int):
+        """
+            return the base pointer of the buffer that contains the given pointer
+        """
+        for handle in self.peer_mem_handles:
+            if handle.buffer_ptr <= ptr < handle.buffer_ptr + handle.buffer_size:
+                return handle.buffer_ptr
+        raise ValueError(f"Pointer {ptr} not found in any registered memory handle.")
 
 HcclMsg = Union[
     HcclInitRequest, HcclInitResponse, HcclMemRegRequest, HcclMemRegResponse
@@ -109,7 +143,7 @@ class HcclChannel(BaseTransferChannel):
         self.conn_handles_dict = {}
 
         self._state_lock = threading.Lock()
-        self.remote_index_addr_dict = {}
+        self.remote_index_addr_dict: Dict[str, PeerMemHandleList] = {}
 
         self.side_channels: list[zmq.Socket] = []
         self.running_threads: list[threading.Thread] = []
@@ -189,18 +223,8 @@ class HcclChannel(BaseTransferChannel):
         for handle in server_mem_handles:
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
-        addr_list = []
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = addr_list
-
-        # Map addresses for all registered buffers
-        for handle in server_mem_handles:
-            for base_addr in range(
-                handle.buffer_ptr,
-                handle.buffer_ptr + handle.buffer_size,
-                handle.page_size,
-            ):
-                addr_list.append(base_addr)
+            self.remote_index_addr_dict[peer_id] = PeerMemHandleList(server_mem_handles)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -265,17 +289,8 @@ class HcclChannel(BaseTransferChannel):
         for handle in server_mem_handles:
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
-        addr_list = []
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = addr_list
-
-        for handle in server_mem_handles:
-            for base_addr in range(
-                handle.buffer_ptr,
-                handle.buffer_ptr + handle.buffer_size,
-                handle.page_size,
-            ):
-                addr_list.append(base_addr)
+            self.remote_index_addr_dict[peer_id] = PeerMemHandleList(server_mem_handles)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -356,26 +371,26 @@ class HcclChannel(BaseTransferChannel):
         elif isinstance(req, HcclMemRegRequest):
             logger.info("Processing HcclMemRegRequest")
             conn_handle = None
-            addr_list = []
+            
+            # FIXME (gingfung): Seems to have race condition 
+            # if I move to the next lock position...
             with self._state_lock:
                 conn_handle = self.conn_handles_dict[
                     req.local_id
-                ]  # TODO: check if exists
-                self.remote_index_addr_dict[req.local_id] = addr_list
-
+                ]
+            
             client_mem_handles = pickle.loads(req.client_mem_handle_bytes)
             if not isinstance(client_mem_handles, list):
                 client_mem_handles = [client_mem_handles]
 
             for handle in client_mem_handles:
                 self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
-
-                for base_addr in range(
-                    handle.buffer_ptr,
-                    handle.buffer_ptr + handle.buffer_size,
-                    handle.page_size,
-                ):
-                    addr_list.append(base_addr)
+            
+            with self._state_lock:
+                if req.local_id not in self.remote_index_addr_dict:
+                    self.remote_index_addr_dict[req.local_id] = PeerMemHandleList(client_mem_handles)
+                else:
+                    self.remote_index_addr_dict[req.local_id].extend_handles(client_mem_handles)
 
             # Send back our handles (all of them)
             resp = HcclMemRegResponse(
@@ -491,6 +506,20 @@ class HcclChannel(BaseTransferChannel):
             )
         return local_indices
 
+    def get_local_mem_addrs(
+        self, objects: Union[list[bytes], list[MemoryObj]]
+    ) -> list[int]:
+        local_addrs = []
+        if isinstance(objects[0], MemoryObj):
+            for mem_obj in objects:
+                assert isinstance(mem_obj, MemoryObj)
+                local_addrs.append(mem_obj.data_ptr)
+        elif isinstance(objects[0], bytes):
+            raise NotImplementedError(
+                "Sending raw bytes is not supported in hccl channel"
+            )
+        return local_addrs
+
     ############################################################
     # Send/Recv functions
     ############################################################
@@ -545,16 +574,16 @@ class HcclChannel(BaseTransferChannel):
         assert transfer_spec is not None
 
         conn_handle = None
-        remote_index_addr = []
+        remote_mem_handles: PeerMemHandleList = None
         with self._state_lock:
             conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
+            remote_mem_handles = self.remote_index_addr_dict[
                 transfer_spec["receiver_id"]
             ]
 
         write_ops = []
-        for mem_obj, remote_index in zip(
-            objects, transfer_spec["remote_indexes"], strict=False
+        for mem_obj, remote_addr in zip(
+            objects, transfer_spec["remote_addrs"], strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
@@ -563,8 +592,8 @@ class HcclChannel(BaseTransferChannel):
 
             write_ops.append(
                 hcomm.HcclWriteOp(
-                    src=self.hccl_wrapper.local_index_addr[mem_obj.meta.address],
-                    dst=remote_index_addr[remote_index],
+                    src=self.hccl_wrapper.get_local_addr(mem_obj.data_ptr, mem_obj.meta.address),
+                    dst=remote_mem_handles.get_buffer_addr(remote_addr),
                     s=self.page_size,
                 )
             )
@@ -600,7 +629,7 @@ class HcclChannel(BaseTransferChannel):
         assert transfer_spec is not None
 
         conn_handle = None
-        remote_index_addr = []
+        remote_index_addr: PeerMemHandleList = None
         with self._state_lock:
             conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
             remote_index_addr = self.remote_index_addr_dict[
@@ -608,8 +637,8 @@ class HcclChannel(BaseTransferChannel):
             ]
 
         write_ops = []
-        for mem_obj, remote_index in zip(
-            objects, transfer_spec["remote_indexes"], strict=False
+        for mem_obj, remote_addr in zip(
+            objects, transfer_spec["remote_addrs"], strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
@@ -618,8 +647,8 @@ class HcclChannel(BaseTransferChannel):
 
             write_ops.append(
                 hcomm.HcclWriteOp(
-                    src=self.hccl_wrapper.local_index_addr[mem_obj.meta.address],
-                    dst=remote_index_addr[remote_index],
+                    src=self.hccl_wrapper.get_local_addr(mem_obj.data_ptr, mem_obj.meta.address),
+                    dst=remote_index_addr.get_buffer_addr(remote_addr),
                     s=self.page_size,
                 )
             )
@@ -652,7 +681,7 @@ class HcclChannel(BaseTransferChannel):
         assert transfer_spec is not None
 
         conn_handle = None
-        remote_index_addr = []
+        remote_index_addr: PeerMemHandleList = None
         with self._state_lock:
             conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
             remote_index_addr = self.remote_index_addr_dict[
@@ -660,8 +689,8 @@ class HcclChannel(BaseTransferChannel):
             ]
 
         write_ops = []
-        for mem_obj, remote_index in zip(
-            buffers, transfer_spec["remote_indexes"], strict=False
+        for mem_obj, remote_addr in zip(
+            buffers, transfer_spec["remote_addrs"], strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
@@ -670,8 +699,8 @@ class HcclChannel(BaseTransferChannel):
 
             write_ops.append(
                 hcomm.HcclReadOp(
-                    src=remote_index_addr[remote_index],
-                    dst=self.hccl_wrapper.local_index_addr[mem_obj.meta.address],
+                    src=remote_index_addr.get_buffer_addr(remote_addr),
+                    dst=self.hccl_wrapper.get_local_addr(mem_obj.data_ptr, mem_obj.meta.address),
                     s=self.page_size,
                 )
             )

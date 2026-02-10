@@ -28,8 +28,8 @@ def _patch_config():
         "This config is only used when p2p_use_npu is set to True.",
     }
 
-    # Add new p2p_npu_pull_mode config
-    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_npu_pull_mode"] = {
+    # Add new p2p_pull_mode config
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_pull_mode"] = {
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
@@ -225,6 +225,7 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_config()
     _patch_ops()
+    _patch_hash_token()
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_storage_backend_init()
@@ -236,7 +237,6 @@ if not LMCACHE_ASCEND_PATCHED:
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
     _patch_init_engine()
-    _patch_hash_token()
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_sys_detection()
