@@ -1,23 +1,37 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 import asyncio
 
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
+    MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
 from lmcache.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,
+    get_zmq_context,
+    get_zmq_socket_with_timeout,
 )
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
-from lmcache.v1.storage_backend.p2p_backend import P2PBackend, PeerInfo
+from lmcache.v1.storage_backend.p2p_backend import (
+    BatchedLookupAndGetMsg,
+    BatchedLookupAndGetRetMsg,
+    BatchedLookupAndPutMsg,
+    BatchedLookupAndPutRetMsg,
+    P2PBackend,
+    P2PErrorCode,
+    P2PErrorMsg,
+    PeerInfo,
+)
+import msgspec
 import zmq.asyncio
 
 # First Party
@@ -28,6 +42,23 @@ if TYPE_CHECKING:
     from lmcache.v1.cache_controller import LMCacheWorker
 
 logger = init_logger(__name__)
+
+
+class AscendBatchedLookupAndGetMsg(BatchedLookupAndGetMsg):
+    pull_mode: bool = False
+
+
+class AscendBatchedLookupAndGetRetMsg(BatchedLookupAndGetRetMsg):
+    remote_mem_indexes: list[int] = []
+
+
+AscendP2PMsg = Union[
+    AscendBatchedLookupAndGetMsg,
+    AscendBatchedLookupAndGetRetMsg,
+    BatchedLookupAndPutMsg,
+    BatchedLookupAndPutRetMsg,
+    P2PErrorMsg,
+]
 
 
 class AscendP2PBackend(P2PBackend):
@@ -87,6 +118,13 @@ class AscendP2PBackend(P2PBackend):
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
+        # NOTE (gingfung): enable using pull mode
+        if config.p2p_pull_mode:
+            logger.info("P2P pull mode enabled. ")
+            self.pull_mode = True
+        else:
+            self.pull_mode = False
+
         self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
         self.dtypes = self.memory_allocator.cpu_allocator.dtypes
         self.fmt: MemoryFormat = (
@@ -144,3 +182,248 @@ class AscendP2PBackend(P2PBackend):
         asyncio.run_coroutine_threadsafe(
             self._run_peer_request_handler_with_recovery(), loop
         )
+
+    async def _handle_peer_requests(self):
+        """
+        Handle `BatchedLookupAndGetMsg` issued by peers in `batched_get_non_blocking`.
+        """
+
+        logger.info(
+            "Starting P2P backend batched get handler at %s", self.peer_lookup_url
+        )
+        self.async_context = get_zmq_context()
+        self.async_peer_socket = get_zmq_socket_with_timeout(
+            self.async_context,
+            self.peer_lookup_url,
+            "tcp",
+            zmq.REP,
+            "bind",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
+        )
+
+        while self.running.is_set():
+            msg_bytes = await self.async_peer_socket.recv()
+            msg = msgspec.msgpack.decode(msg_bytes, type=AscendP2PMsg)
+
+            num_tokens = len(msg.mem_indexes) * self.chunk_size
+            monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
+
+            if isinstance(msg, AscendBatchedLookupAndGetMsg):
+                ret_msg = await self._handle_batched_lookup_and_get(msg)
+            elif isinstance(msg, BatchedLookupAndPutMsg):
+                ret_msg = await self._handle_batched_lookup_and_put(msg)
+            else:
+                logger.error("Unknown message type: %s", type(msg))
+                ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
+
+            logger.info(f"P2P transfer finished for request {monitor_req_id}")
+            self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
+
+            await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
+
+    async def _handle_batched_lookup_and_get(
+        self, msg: AscendBatchedLookupAndGetMsg
+    ) -> Union[AscendBatchedLookupAndGetRetMsg, P2PErrorMsg]:
+        lookup_id = msg.lookup_id
+        mem_objs = None
+        try:
+            logger.info(
+                "Received P2P batched lookup and get msg, lookup_id: %s", lookup_id
+            )
+            receiver_id = msg.receiver_id
+            if not self.transfer_channel.remote_xfer_handler_exists(receiver_id):
+                logger.error(
+                    "Receiver %s does not exist in transfer channel",
+                    receiver_id,
+                )
+                return P2PErrorMsg(
+                    error_code=P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
+                )
+
+            keys = [CacheEngineKey.from_string(key) for key in msg.keys]
+
+            # TODO(Jiayi): Optimally, there's no need to use async call
+            # for some backends (e.g., local cpu) as there's overhead for
+            # async function call.
+            num_hit_chunks = await self.local_cpu_backend.batched_async_contains(
+                lookup_id=lookup_id,
+                keys=keys,
+                pin=True,
+            )
+
+            mem_objs = await self.local_cpu_backend.batched_get_non_blocking(
+                lookup_id=lookup_id,
+                keys=keys[:num_hit_chunks],
+            )
+
+            if msg.pull_mode:
+                # actual data transfer will be triggered
+                # by the receiver's pull request.
+                remote_mem_indexes = self.transfer_channel.get_local_mem_indices(
+                    mem_objs
+                )
+                return AscendBatchedLookupAndGetRetMsg(
+                    num_hit_chunks=num_hit_chunks,
+                    remote_mem_indexes=remote_mem_indexes,
+                )
+            else:
+                remote_mem_indexes = msg.mem_indexes
+
+            channel_transfer_spec = {
+                "receiver_id": receiver_id,
+                "remote_indexes": remote_mem_indexes[:num_hit_chunks],
+            }
+            await self.transfer_channel.async_batched_write(
+                objects=mem_objs,
+                transfer_spec=channel_transfer_spec,
+            )
+
+            return AscendBatchedLookupAndGetRetMsg(num_hit_chunks=num_hit_chunks)
+        except Exception as e:
+            logger.error(
+                "Error during P2P batched lookup and get operation "
+                "for lookup_id %s: %s",
+                lookup_id,
+                e,
+                exc_info=True,
+            )
+            return P2PErrorMsg(error_code=P2PErrorCode.P2P_SERVER_ERROR)
+        finally:
+            if mem_objs is not None:
+                for mem_obj in mem_objs:
+                    mem_obj.ref_count_down()
+                    mem_obj.unpin()
+
+    async def batched_get_non_blocking(
+        self,
+        lookup_id: str,
+        keys: list[CacheEngineKey],
+        transfer_spec: Any = None,
+    ) -> list[MemoryObj]:
+        target_peer_init_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
+
+        assert isinstance(transfer_spec, dict)
+        cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
+        assert cum_chunk_lengths is not None, "cum_chunk_lengths must be provided"
+        assert isinstance(cum_chunk_lengths, list), "cum_chunk_lengths must be a list"
+
+        mem_objs = []
+        str_keys = []
+        keys_len = len(keys)
+        for idx, key in enumerate(keys):
+            if not self.config.save_unfull_chunk or idx < keys_len - 1:
+                shapes = self.full_size_shapes
+            else:
+                shapes = self._get_unfull_chunk_shapes(
+                    cum_chunk_lengths[idx + 1] - cum_chunk_lengths[idx]
+                )
+            mem_obj = self.local_cpu_backend.allocate(shapes, self.dtypes, self.fmt)
+            mem_objs.append(mem_obj)
+            str_keys.append(key.to_string())
+
+        local_indexes = self.transfer_channel.get_local_mem_indices(mem_objs)
+
+        # NOTE(Jiayi): Tier 3 lookup is batched with retrieval.
+        # NOTE(gingfung): adding pull mode support for tier 3 lookup.
+        msg = AscendBatchedLookupAndGetMsg(
+            lookup_id=lookup_id,
+            receiver_id=self.peer_init_url,
+            keys=str_keys,
+            mem_indexes=local_indexes,
+            pull_mode=self.pull_mode,
+        )
+
+        retry_count = 0
+        while retry_count < self.max_retry_count:
+            peer_info = self.target_peer_info_mapping[target_peer_init_url]
+            lookup_lock = peer_info.lookup_lock
+            async with lookup_lock:
+                lookup_socket = peer_info.lookup_socket
+                try:
+                    retry_count += 1
+                    await lookup_socket.send(msgspec.msgpack.encode(msg))
+                    ret_msg_bytes = await lookup_socket.recv()
+                    ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=AscendP2PMsg)
+                    if (
+                        isinstance(ret_msg, P2PErrorMsg)
+                        and ret_msg.error_code
+                        == P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
+                    ):
+                        logger.warning(
+                            "Peer connection not initialized for lookup_id %s, "
+                            "ensure peer connection first, retry count: %s",
+                            lookup_id,
+                            retry_count,
+                        )
+                        await self._ensure_peer_connection(target_peer_init_url, True)
+                    else:
+                        break
+                except zmq.ZMQError as e:
+                    logger.error(
+                        "ZMQ error occurred for lookup_id %s. Error: %s",
+                        lookup_id,
+                        e,
+                    )
+                    await self._ensure_peer_connection(target_peer_init_url, True)
+                    if retry_count == self.max_retry_count:
+                        logger.error(
+                            "Max retry count reached for lookup_id %s",
+                            lookup_id,
+                        )
+                        self._cleanup_memory_objects(mem_objs)
+                        return []
+                except Exception as e:
+                    logger.error(
+                        "Error during P2P get operation for lookup_id %s: %s",
+                        lookup_id,
+                        e,
+                        exc_info=True,
+                    )
+                    self._cleanup_memory_objects(mem_objs)
+                    return []
+
+        if isinstance(ret_msg, P2PErrorMsg):
+            logger.error(
+                "P2P error for lookup_id %s, error code: %s",
+                lookup_id,
+                ret_msg.error_code,
+            )
+            num_hit_chunks = 0
+        else:
+            num_hit_chunks = ret_msg.num_hit_chunks
+
+        hit_mem_objs = mem_objs[:num_hit_chunks]
+
+        if num_hit_chunks > 0 and self.pull_mode:
+            if ret_msg.remote_mem_indexes:
+                try:
+                    channel_transfer_spec = {
+                        "receiver_id": target_peer_init_url,
+                        "remote_indexes": ret_msg.remote_mem_indexes,
+                    }
+                    await self.transfer_channel.async_batched_read(
+                        objects=hit_mem_objs,
+                        transfer_spec=channel_transfer_spec,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Error during P2P batched read operation for lookup_id %s: %s",
+                        lookup_id,
+                        e,
+                        exc_info=True,
+                    )
+                    self._cleanup_memory_objects(mem_objs)
+                    return []
+            else:
+                logger.error(
+                    "Pull mode enabled but "
+                    "remote_mem_indexes is empty for lookup_id %s",
+                    lookup_id,
+                )
+                self._cleanup_memory_objects(mem_objs)
+                return []
+
+        for missed_mem_obj in mem_objs[num_hit_chunks:]:
+            missed_mem_obj.ref_count_down()
+        return hit_mem_objs
