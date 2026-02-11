@@ -636,12 +636,8 @@ class HcclChannel(BaseTransferChannel):
         assert transfer_spec is not None
 
         conn_handle = None
-        remote_index_addr: PeerMemHandleList = None
         with self._state_lock:
             conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
 
         write_ops = []
         for mem_obj, remote_addr in zip(
@@ -657,7 +653,7 @@ class HcclChannel(BaseTransferChannel):
                     src=self.hccl_wrapper.get_local_addr(
                         mem_obj.data_ptr, mem_obj.meta.address
                     ),
-                    dst=remote_index_addr.get_buffer_addr(remote_addr),
+                    dst=remote_addr,
                     s=self.page_size,
                 )
             )
@@ -673,6 +669,72 @@ class HcclChannel(BaseTransferChannel):
 
         return len(objects)
 
+    def _build_read_ops(
+        self,
+        buffers: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: dict,
+    ) -> tuple:
+        """Build read operations and resolve connection handle.
+
+        Returns (conn_handle, read_ops) for use by read methods.
+        """
+        conn_handle = None
+        with self._state_lock:
+            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
+
+        read_ops = []
+        for mem_obj, remote_addr in zip(
+            buffers, transfer_spec["remote_addrs"], strict=False
+        ):
+            if not isinstance(mem_obj, MemoryObj):
+                raise NotImplementedError(
+                    "Sending raw bytes is not supported in HCCL channel"
+                )
+
+            read_ops.append(
+                hcomm.HcclReadOp(
+                    src=remote_addr,
+                    dst=self.hccl_wrapper.get_local_addr(
+                        mem_obj.data_ptr, mem_obj.meta.address
+                    ),
+                    s=self.page_size,
+                )
+            )
+        return conn_handle, read_ops
+
+    def submit_batched_read(
+        self,
+        buffers: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: Optional[dict] = None,
+    ) -> torch.npu.Event:
+        """Submit a batched read to the transport stream without waiting.
+
+        Unlike async_batched_read, this returns immediately after submitting
+        the read operations and recording an event. The caller can use
+        the returned event for cross-stream synchronization, e.g.:
+
+            event = channel.submit_batched_read(buffers, spec)
+            load_stream.wait_event(event)  # load_stream waits for read
+
+        This enables pipelining: submit reads on transport_stream while
+        processing previously fetched data on load_stream.
+
+        :param buffers: A list of MemoryObj to store the read data.
+        :param transfer_spec: Must contain 'receiver_id' and 'remote_addrs'.
+
+        :return: An NPU event recorded on transport_stream after submission.
+        """
+        assert transfer_spec is not None
+        conn_handle, read_ops = self._build_read_ops(buffers, transfer_spec)
+
+        self.hccl_agent.read_batch(
+            conn_handle, read_ops, self.transport_stream.npu_stream
+        )
+
+        event = torch.npu.Event()
+        event.record(self.transport_stream)
+        return event
+
     async def async_batched_read(
         self,
         buffers: Union[list[bytes], list[MemoryObj]],
@@ -684,40 +746,13 @@ class HcclChannel(BaseTransferChannel):
         :param buffers: A list of bytes or MemoryObj to store the read data.
         :param transfer_spec: Additional specifications for the transfer.
 
-        :return: True if the send operation is successful.
+        :return: Number of successfully transferred objects.
         """
-
         assert transfer_spec is not None
-
-        conn_handle = None
-        remote_index_addr: PeerMemHandleList = None
-        with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
-
-        write_ops = []
-        for mem_obj, remote_addr in zip(
-            buffers, transfer_spec["remote_addrs"], strict=False
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported in HCCL channel"
-                )
-
-            write_ops.append(
-                hcomm.HcclReadOp(
-                    src=remote_index_addr.get_buffer_addr(remote_addr),
-                    dst=self.hccl_wrapper.get_local_addr(
-                        mem_obj.data_ptr, mem_obj.meta.address
-                    ),
-                    s=self.page_size,
-                )
-            )
+        conn_handle, read_ops = self._build_read_ops(buffers, transfer_spec)
 
         self.hccl_agent.read_batch(
-            conn_handle, write_ops, self.transport_stream.npu_stream
+            conn_handle, read_ops, self.transport_stream.npu_stream
         )
 
         event = torch.npu.Event()

@@ -35,6 +35,7 @@ import msgspec
 import zmq.asyncio
 
 # First Party
+from lmcache_ascend.v1.proxy_memory_obj import P2PTransferContext, ProxyMemoryObj
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 if TYPE_CHECKING:
@@ -139,11 +140,13 @@ class AscendP2PBackend(P2PBackend):
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
 
         # NOTE (gingfung): enable using pull mode
-        if config.p2p_pull_mode:
+        self.pull_mode = config.p2p_pull_mode
+        if self.pull_mode:
             logger.info("P2P pull mode enabled. ")
-            self.pull_mode = True
-        else:
-            self.pull_mode = False
+
+        self.delay_pull = config.p2p_delay_pull
+        if self.delay_pull:
+            logger.info("P2P delay pull enabled. ")
 
         self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
         self.dtypes = self.memory_allocator.cpu_allocator.dtypes
@@ -168,8 +171,11 @@ class AscendP2PBackend(P2PBackend):
                     "Initializing NPU memory allocator with "
                     f"size {config.p2p_npu_buffer_size} bytes"
                 )
+                # get align bytes
+                _align_bytes = self.memory_allocator.cpu_allocator.align_bytes
+                align_allocator_bytes = (config.p2p_npu_buffer_size + _align_bytes - 1) // _align_bytes * _align_bytes
                 self.memory_allocator.init_gpu_memory_allocator(
-                    config.p2p_npu_buffer_size,
+                    align_allocator_bytes,
                     self.full_size_shapes,
                     self.dtypes,
                     self.fmt,
@@ -514,8 +520,18 @@ class AscendP2PBackend(P2PBackend):
         assert cum_chunk_lengths is not None, "cum_chunk_lengths must be provided"
         assert isinstance(cum_chunk_lengths, list), "cum_chunk_lengths must be a list"
 
-        mem_objs, str_keys = self._allocate_memory_for_keys(keys, cum_chunk_lengths)
-        local_addrs = self.transfer_channel.get_local_mem_addrs(mem_objs)
+        # For delay_pull, skip pre-allocation of backing memory.
+        # Buffers will be allocated on-the-fly in the NPU connector's
+        # ping-pong pipeline.
+        if self.pull_mode and self.delay_pull:
+            str_keys = [key.to_string() for key in keys]
+            mem_objs = None
+            local_addrs = []
+        else:
+            mem_objs, str_keys = self._allocate_memory_for_keys(
+                keys, cum_chunk_lengths
+            )
+            local_addrs = self.transfer_channel.get_local_mem_addrs(mem_objs)
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id=lookup_id,
@@ -536,22 +552,66 @@ class AscendP2PBackend(P2PBackend):
                     lookup_id,
                     ret_msg.error_code,
                 )
-            self._cleanup_memory_objects(mem_objs)
+            if mem_objs is not None:
+                self._cleanup_memory_objects(mem_objs)
             return []
 
         num_hit_chunks = ret_msg.num_hit_chunks
+
+        if num_hit_chunks > 0 and self.pull_mode and self.delay_pull:
+            # Create lightweight ProxyMemoryObjs (no backing memory).
+            # The NPU connector will allocate ping-pong buffers on-the-fly.
+            remote_mem_addrs = ret_msg.remote_mem_addrs
+            transfer_context = P2PTransferContext(
+                p2p_backend=self,
+                target_peer_init_url=target_peer_init_url,
+                lookup_id=lookup_id,
+                remote_mem_addrs=remote_mem_addrs,
+                loop=self.loop,
+                num_proxies=num_hit_chunks,
+                memory_allocator=self.memory_allocator,
+                shapes=self.full_size_shapes,
+                dtypes=self.dtypes,
+                fmt=self.fmt,
+                use_npu=self.use_npu,
+            )
+
+            proxy_objs: list[MemoryObj] = []
+            for idx in range(num_hit_chunks):
+                proxy = ProxyMemoryObj(
+                    backing_obj=None,
+                    transfer_channel=self.transfer_channel,
+                    target_peer_init_url=target_peer_init_url,
+                    remote_mem_addr=remote_mem_addrs[idx],
+                    transfer_context=transfer_context,
+                    chunk_index=idx,
+                    shapes=self.full_size_shapes,
+                    dtypes=self.dtypes,
+                    fmt=self.fmt,
+                )
+                proxy_objs.append(proxy)
+
+            return proxy_objs
+
+        # NOTE (gingfung): mem_objs is only none 
+        # iff 1) num_hit_chunks is 0, or 2) delay_pull is enabled (so we skip pre-allocation).
+        # therefore if mem_objs is None, we can directly return without cleanup.
+        if mem_objs is None:
+            return []
+
         hit_mem_objs = mem_objs[:num_hit_chunks]
 
         if num_hit_chunks > 0 and self.pull_mode:
-            success = await self._handle_pull_mode_transfer(
+            if not self.delay_pull:
+                success = await self._handle_pull_mode_transfer(
                 lookup_id,
                 target_peer_init_url,
                 hit_mem_objs,
                 ret_msg.remote_mem_addrs,
             )
-            if not success:
-                self._cleanup_memory_objects(mem_objs)
-                return []
+                if not success:
+                    self._cleanup_memory_objects(mem_objs)
+                    return []
 
         for missed_mem_obj in mem_objs[num_hit_chunks:]:
             missed_mem_obj.ref_count_down()

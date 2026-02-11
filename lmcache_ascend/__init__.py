@@ -38,6 +38,18 @@ def _patch_config():
         "This config is only used when p2p_use_npu is set to True.",
     }
 
+    # Add new p2p_delay_pull config
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_delay_pull"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to delay the pull operation for P2P transfers "
+        "when using NPU memory. If True, the pull operation will be delayed "
+        "until the data is actually needed. This can help improve performance "
+        "in some cases. This config is only used when p2p_use_npu is set to True "
+        "and p2p_pull_mode is set to True.",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
