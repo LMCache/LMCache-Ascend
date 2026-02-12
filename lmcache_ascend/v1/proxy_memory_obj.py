@@ -286,8 +286,7 @@ class ProxyMemoryObj(MemoryObj):
         """Remove the backing buffer reference.
 
         Called after scatter completes to release the buffer back to the
-        ping-pong pool. Does NOT reset resolved since the data has already
-        been consumed.
+        ping-pong pool. Does NOT reset resolved.
         """
         self._backing_obj = None
 

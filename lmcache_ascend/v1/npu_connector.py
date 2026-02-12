@@ -835,7 +835,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         has_proxy = any(isinstance(m, ProxyMemoryObj) for m in memory_objs)
 
         if has_proxy:
-            self._proxy_batched_to_gpu(memory_objs, starts, ends, **kwargs)
+            assert not is_310p(), "Batched P2P transfer is not supported on 310P."
+
+            self._remote_batched_to_gpu(memory_objs, starts, ends, **kwargs)
         else:
             with torch.cuda.stream(self.load_stream):
                 for memory_obj, start, end in zip(
@@ -847,7 +849,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                         self.to_gpu(memory_obj, start, end, **kwargs)
             self.load_stream.synchronize()
 
-    def _proxy_batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+    def _scatter_proxy_batch(self, batch, event, **kwargs):
+        """Wait for a read event, scatter proxies to KV cache, clear backing refs."""
+        if event is not None:
+            self.load_stream.wait_event(event)
+        with torch.cuda.stream(self.load_stream):
+            for proxy, start, end in batch:
+                self.to_gpu(proxy.backing_obj, start, end, **kwargs)
+        for proxy, _, _ in batch:
+            proxy.clear_backing_obj()
+
+    def _remote_batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
         """Handle batched_to_gpu when ProxyMemoryObjs are present.
 
         Uses a ping-pong pipeline to overlap remote data fetching (on the
@@ -922,14 +934,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
                 # While current batch is being read, scatter previous batch
                 if prev_batch is not None:
-                    if prev_event is not None:
-                        self.load_stream.wait_event(prev_event)
-                    with torch.cuda.stream(self.load_stream):
-                        for proxy, start, end in prev_batch:
-                            self.to_gpu(proxy.backing_obj, start, end, **kwargs)
-                    # Clear backing refs (data has been scattered to KV cache)
-                    for proxy, _, _ in prev_batch:
-                        proxy.clear_backing_obj()
+                    self._scatter_proxy_batch(prev_batch, prev_event, **kwargs)
 
                 prev_event = cur_event
                 prev_batch = batch
@@ -937,13 +942,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
             # Drain: scatter the last micro-batch
             if prev_batch is not None:
-                if prev_event is not None:
-                    self.load_stream.wait_event(prev_event)
-                with torch.cuda.stream(self.load_stream):
-                    for proxy, start, end in prev_batch:
-                        self.to_gpu(proxy.backing_obj, start, end, **kwargs)
-                for proxy, _, _ in prev_batch:
-                    proxy.clear_backing_obj()
+                self._scatter_proxy_batch(prev_batch, prev_event, **kwargs)
 
             self.load_stream.synchronize()
 
