@@ -46,25 +46,33 @@ logger = init_logger(__name__)
 
 
 class AscendBatchedLookupAndGetMsg(BatchedLookupAndGetMsg):
-    mem_addrs: list[int] = []
+    # buffer uuids to lookup indiviudal mem handles
+    # as we extended the transfer channel to support multiple buffers 
+    # (e.g., CPU and NPU), we need a way to identify 
+    # which buffer the remote mem handle belongs to, 
+    # so we use buffer uuid as the identifier.
+    buffer_uuids: list[str] = []
     pull_mode: bool = False
 
 
 class AscendBatchedLookupAndGetRetMsg(BatchedLookupAndGetRetMsg):
-    remote_mem_addrs: list[int] = []
+    remote_buffer_uuids: list[str] = []
+    # remote mem indexes to accompany the pull mode,
+    # so that the server can identify which mem handle and buffer
+    # the client is referring to in the subsequent pull request.
+    remote_mem_indexes: list[int] = []
 
 
 class AscendBatchedLookupAndGetDoneMsg(msgspec.Struct, tag=True):
     lookup_id: str
-    mem_addrs: list[int] = []
-
 
 class AscendBatchedLookupAndGetDoneRetMsg(msgspec.Struct, tag=True):
     pass
 
 
 class AscendBatchedLookupAndPutMsg(BatchedLookupAndPutMsg):
-    mem_addrs: list[int] = []
+    # Opaque buffer references (UUID + mem_index) replacing raw mem_addrs
+    buffer_uuids: list[str] = []
 
 
 AscendP2PMsg = Union[
@@ -233,8 +241,13 @@ class AscendP2PBackend(P2PBackend):
             msg_bytes = await self.async_peer_socket.recv()
             msg = msgspec.msgpack.decode(msg_bytes, type=AscendP2PMsg)
 
-            num_tokens = len(msg.mem_addrs) * self.chunk_size
-            monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
+            # Done messages are control signals with no data transfer;
+            # Get/Put messages carry `keys` inherited from their base classes.
+            num_keys = len(getattr(msg, "keys", []))
+            num_tokens = num_keys * self.chunk_size
+            monitor_req_id = None
+            if num_tokens > 0:
+                monitor_req_id = self.stats_monitor.on_p2p_transfer_request(num_tokens)
 
             if isinstance(msg, AscendBatchedLookupAndGetMsg):
                 ret_msg = await self._handle_batched_lookup_and_get(msg)
@@ -246,8 +259,11 @@ class AscendP2PBackend(P2PBackend):
                 logger.error("Unknown message type: %s", type(msg))
                 ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
 
-            logger.info(f"P2P transfer finished for request {monitor_req_id}")
-            self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
+            if monitor_req_id is not None:
+                logger.info(f"P2P transfer finished for request {monitor_req_id}")
+                self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
+            else:
+                logger.info("P2P transfer finished for control signal with no tokens.")
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 
@@ -290,10 +306,11 @@ class AscendP2PBackend(P2PBackend):
             if msg.pull_mode:
                 # actual data transfer will be triggered
                 # by the receiver's pull request.
-                remote_mem_addrs = []
+                remote_buffer_uuids = []
+                remote_mem_indexes = []
                 if num_hit_chunks > 0 and mem_objs:
-                    remote_mem_addrs = self.transfer_channel.get_local_mem_addrs(
-                        mem_objs
+                    remote_buffer_uuids, remote_mem_indexes = (
+                        self.transfer_channel.get_local_buffer_refs(mem_objs)
                     )
 
                     # Store mem_objs to prevent premature release
@@ -307,14 +324,17 @@ class AscendP2PBackend(P2PBackend):
                     )
                 return AscendBatchedLookupAndGetRetMsg(
                     num_hit_chunks=num_hit_chunks,
-                    remote_mem_addrs=remote_mem_addrs,
+                    remote_buffer_uuids=remote_buffer_uuids,
+                    remote_mem_indexes=remote_mem_indexes,
                 )
             else:
-                remote_mem_addrs = msg.mem_addrs
+                remote_buffer_uuids = msg.buffer_uuids
+                remote_mem_indexes = msg.mem_indexes
 
             channel_transfer_spec = {
                 "receiver_id": receiver_id,
-                "remote_addrs": remote_mem_addrs[:num_hit_chunks],
+                "remote_buffer_uuids": remote_buffer_uuids[:num_hit_chunks],
+                "remote_mem_indexes": remote_mem_indexes[:num_hit_chunks],
             }
             await self.transfer_channel.async_batched_write(
                 objects=mem_objs,
@@ -442,7 +462,6 @@ class AscendP2PBackend(P2PBackend):
         self,
         lookup_id: str,
         target_peer_init_url: str,
-        remote_mem_addrs: list[int],
     ) -> None:
         """Send Done signal to peer so it can release pinned resources.
 
@@ -450,7 +469,7 @@ class AscendP2PBackend(P2PBackend):
         """
         try:
             done_msg = AscendBatchedLookupAndGetDoneMsg(
-                lookup_id=lookup_id, mem_addrs=remote_mem_addrs
+                lookup_id=lookup_id,
             )
             peer_info = self.target_peer_info_mapping[target_peer_init_url]
             async with peer_info.lookup_lock:
@@ -470,16 +489,17 @@ class AscendP2PBackend(P2PBackend):
         lookup_id: str,
         target_peer_init_url: str,
         hit_mem_objs: list[MemoryObj],
-        remote_mem_addrs: list[int],
+        remote_buffer_uuids: list[str],
+        remote_mem_indexes: list[int],
     ) -> bool:
         """Execute pull-mode: read data from remote, then send Done signal.
 
         Returns True on success, False on failure.
         The Done signal is always sent regardless of read outcome.
         """
-        if not remote_mem_addrs:
+        if not remote_buffer_uuids:
             logger.error(
-                "Pull mode enabled but remote_mem_addrs is empty for lookup_id %s",
+                "Pull mode enabled but remote_buffer_uuids is empty for lookup_id %s",
                 lookup_id,
             )
             return False
@@ -488,7 +508,8 @@ class AscendP2PBackend(P2PBackend):
         try:
             channel_transfer_spec = {
                 "receiver_id": target_peer_init_url,
-                "remote_addrs": remote_mem_addrs,
+                "remote_buffer_uuids": remote_buffer_uuids,
+                "remote_mem_indexes": remote_mem_indexes,
             }
             await self.transfer_channel.async_batched_read(
                 buffers=hit_mem_objs,
@@ -504,7 +525,7 @@ class AscendP2PBackend(P2PBackend):
             )
             # Do not return yet — must send Done signal to server
 
-        await self._send_done_signal(lookup_id, target_peer_init_url, remote_mem_addrs)
+        await self._send_done_signal(lookup_id, target_peer_init_url)
         return read_success
 
     async def batched_get_non_blocking(
@@ -526,19 +547,22 @@ class AscendP2PBackend(P2PBackend):
         if self.pull_mode and self.delay_pull:
             str_keys = [key.to_string() for key in keys]
             mem_objs = None
-            local_addrs = []
+            local_buffer_uuids = []
+            local_mem_indexes = []
         else:
             mem_objs, str_keys = self._allocate_memory_for_keys(
                 keys, cum_chunk_lengths
             )
-            local_addrs = self.transfer_channel.get_local_mem_addrs(mem_objs)
+            local_buffer_uuids, local_mem_indexes = (
+                self.transfer_channel.get_local_buffer_refs(mem_objs)
+            )
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id=lookup_id,
             receiver_id=self.peer_init_url,
             keys=str_keys,
-            mem_indexes=[],  # we don't use mem_indexes
-            mem_addrs=local_addrs,
+            buffer_uuids=local_buffer_uuids,
+            mem_indexes=local_mem_indexes,
             pull_mode=self.pull_mode,
         )
 
@@ -561,12 +585,14 @@ class AscendP2PBackend(P2PBackend):
         if num_hit_chunks > 0 and self.pull_mode and self.delay_pull:
             # Create lightweight ProxyMemoryObjs (no backing memory).
             # The NPU connector will allocate ping-pong buffers on-the-fly.
-            remote_mem_addrs = ret_msg.remote_mem_addrs
+            remote_buffer_uuids = ret_msg.remote_buffer_uuids
+            remote_mem_indexes = ret_msg.remote_mem_indexes
             transfer_context = P2PTransferContext(
                 p2p_backend=self,
                 target_peer_init_url=target_peer_init_url,
                 lookup_id=lookup_id,
-                remote_mem_addrs=remote_mem_addrs,
+                remote_buffer_uuids=remote_buffer_uuids,
+                remote_mem_indexes=remote_mem_indexes,
                 loop=self.loop,
                 num_proxies=num_hit_chunks,
                 memory_allocator=self.memory_allocator,
@@ -582,7 +608,8 @@ class AscendP2PBackend(P2PBackend):
                     backing_obj=None,
                     transfer_channel=self.transfer_channel,
                     target_peer_init_url=target_peer_init_url,
-                    remote_mem_addr=remote_mem_addrs[idx],
+                    remote_buffer_uuid=remote_buffer_uuids[idx],
+                    remote_mem_index=remote_mem_indexes[idx],
                     transfer_context=transfer_context,
                     chunk_index=idx,
                     shapes=self.full_size_shapes,
@@ -604,11 +631,12 @@ class AscendP2PBackend(P2PBackend):
         if num_hit_chunks > 0 and self.pull_mode:
             if not self.delay_pull:
                 success = await self._handle_pull_mode_transfer(
-                lookup_id,
-                target_peer_init_url,
-                hit_mem_objs,
-                ret_msg.remote_mem_addrs,
-            )
+                    lookup_id,
+                    target_peer_init_url,
+                    hit_mem_objs,
+                    ret_msg.remote_buffer_uuids,
+                    ret_msg.remote_mem_indexes,
+                )
                 if not success:
                     self._cleanup_memory_objects(mem_objs)
                     return []

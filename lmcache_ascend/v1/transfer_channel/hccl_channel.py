@@ -60,38 +60,51 @@ class HcclMemRegResponse(HcclMsgBase):
 class PeerMemHandle:
     def __init__(self, mem_handle: HcclMemHandleMeta):
         self.mem_handle = mem_handle
+        self.uuid = mem_handle.uuid
         self.buffer_ptr = mem_handle.buffer_ptr
         self.buffer_size = mem_handle.buffer_size
         self.page_size = mem_handle.page_size
+        self.num_pages = self.buffer_size // self.page_size
 
 
 class PeerMemHandleList:
     def __init__(self, mem_handles: List[HcclMemHandleMeta]):
         self.peer_mem_handles = [PeerMemHandle(handle) for handle in mem_handles]
+        self._uuid_to_handle = {
+            h.uuid: h for h in self.peer_mem_handles
+        }
 
     def extend_handles(self, mem_handles: List[HcclMemHandleMeta]):
         for handle in mem_handles:
-            self.peer_mem_handles.append(PeerMemHandle(handle))
+            peer_handle = PeerMemHandle(handle)
+            self.peer_mem_handles.append(peer_handle)
+            self._uuid_to_handle[peer_handle.uuid] = peer_handle
 
-    def get_buffer_addr(self, ptr: int):
-        """
-        return the remote buffer address that corresponds to the given pointer
-        """
-        for handle in self.peer_mem_handles:
-            if handle.buffer_ptr <= ptr < handle.buffer_ptr + handle.buffer_size:
-                offset = ptr - handle.buffer_ptr
-                aligned_offset = (offset // handle.page_size) * handle.page_size
-                return handle.buffer_ptr + aligned_offset
-        raise ValueError(f"Pointer {ptr} not found in any registered memory handle.")
+    def get_handle_by_uuid(self, buffer_uuid: str) -> PeerMemHandle:
+        """Look up a peer mem handle by its UUID.
 
-    def get_buffer_base_ptr(self, ptr: int):
+        Raises ValueError if UUID is not found.
         """
-        return the base pointer of the buffer that contains the given pointer
+        handle = self._uuid_to_handle.get(buffer_uuid)
+        if handle is None:
+            raise ValueError(
+                f"Buffer UUID {buffer_uuid} not found in peer mem handles"
+            )
+        return handle
+
+    def resolve_addr(self, buffer_uuid: str, page_index: int) -> int:
+        """Resolve a (buffer_uuid, page_index) to an actual remote memory address.
+
+        Performs bounds checking: page_index must be in [0, num_pages).
+        Raises ValueError for unknown UUID, IndexError for out-of-range page.
         """
-        for handle in self.peer_mem_handles:
-            if handle.buffer_ptr <= ptr < handle.buffer_ptr + handle.buffer_size:
-                return handle.buffer_ptr
-        raise ValueError(f"Pointer {ptr} not found in any registered memory handle.")
+        handle = self.get_handle_by_uuid(buffer_uuid)
+        if not (0 <= page_index < handle.num_pages):
+            raise IndexError(
+                f"page_index {page_index} out of range [0, {handle.num_pages}) "
+                f"for remote buffer {buffer_uuid}"
+            )
+        return handle.buffer_ptr + page_index * handle.page_size
 
 
 HcclMsg = Union[
@@ -500,30 +513,35 @@ class HcclChannel(BaseTransferChannel):
     def get_local_mem_indices(
         self, objects: Union[list[bytes], list[MemoryObj]]
     ) -> list[int]:
-        local_indices = []
-        if isinstance(objects[0], MemoryObj):
-            for mem_obj in objects:
-                assert isinstance(mem_obj, MemoryObj)
-                local_indices.append(mem_obj.meta.address)
-        elif isinstance(objects[0], bytes):
-            raise NotImplementedError(
-                "Sending raw bytes is not supported in hccl channel"
-            )
-        return local_indices
+        raise NotImplementedError("When using Ascend, this should not be used.")
 
-    def get_local_mem_addrs(
+
+    def get_local_buffer_refs(
         self, objects: Union[list[bytes], list[MemoryObj]]
-    ) -> list[int]:
-        local_addrs = []
+    ) -> tuple[list[str], list[int]]:
+        """Return (buffer_uuids, mem_indexes) for each object.
+
+        These references can be sent over the wire instead of mem indexes.
+        The remote peer resolves them.
+
+        Returns:
+            A tuple of (buffer_uuids, mem_indexes) parallel lists.
+        """
+        buffer_uuids: list[str] = []
+        mem_indexes: list[int] = []
         if isinstance(objects[0], MemoryObj):
             for mem_obj in objects:
                 assert isinstance(mem_obj, MemoryObj)
-                local_addrs.append(mem_obj.data_ptr)
+                buf_uuid, mem_idx = self.hccl_wrapper.get_buffer_ref(
+                    mem_obj.data_ptr, mem_obj.meta.address
+                )
+                buffer_uuids.append(buf_uuid)
+                mem_indexes.append(mem_idx)
         elif isinstance(objects[0], bytes):
             raise NotImplementedError(
                 "Sending raw bytes is not supported in hccl channel"
             )
-        return local_addrs
+        return buffer_uuids, mem_indexes
 
     ############################################################
     # Send/Recv functions
@@ -563,6 +581,74 @@ class HcclChannel(BaseTransferChannel):
     ############################################################
 
     ### Read and Write only need to be called on one side ###
+
+    def _resolve_remote_addrs(self, transfer_spec: dict) -> list[int]:
+        """Resolve remote memory addresses from transfer_spec.
+
+        Supports the format (remote_buffer_uuids + remote_mem_indexes)
+
+        The format avoids passing raw pointers or single indexes over the wire by using
+        buffer UUIDs and bounded mem indexes, which are resolved
+        locally against the peer's registered memory handles.
+
+        Returns:
+            List of resolved remote memory addresses for RDMA operations.
+        """
+        if (
+            "remote_buffer_uuids" in transfer_spec
+            and "remote_mem_indexes" in transfer_spec
+        ):
+            peer_id = transfer_spec["receiver_id"]
+            with self._state_lock:
+                remote_mem_handles = self.remote_index_addr_dict[peer_id]
+            return [
+                remote_mem_handles.resolve_addr(buf_uuid, page_idx)
+                for buf_uuid, page_idx in zip(
+                    transfer_spec["remote_buffer_uuids"],
+                    transfer_spec["remote_mem_indexes"],
+                    strict=True,
+                )
+            ]
+        else:
+            raise ValueError(
+                "transfer_spec must contain either "
+                "(remote_buffer_uuids, remote_mem_indexes) or remote_addrs"
+            )
+
+    def _build_write_ops(
+        self,
+        objects: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: dict,
+    ) -> tuple:
+        """Build write operations and resolve connection handle.
+
+        Returns (conn_handle, write_ops) for use by write methods.
+        """
+        with self._state_lock:
+            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
+
+        remote_addrs = self._resolve_remote_addrs(transfer_spec)
+
+        write_ops = []
+        for mem_obj, remote_addr in zip(
+            objects, remote_addrs, strict=False
+        ):
+            if not isinstance(mem_obj, MemoryObj):
+                raise NotImplementedError(
+                    "Sending raw bytes is not supported in HCCL channel"
+                )
+
+            write_ops.append(
+                hcomm.HcclWriteOp(
+                    src=self.hccl_wrapper.get_local_addr(
+                        mem_obj.data_ptr, mem_obj.meta.address
+                    ),
+                    dst=remote_addr,
+                    s=self.page_size,
+                )
+            )
+        return conn_handle, write_ops
+
     def batched_write(
         self,
         objects: Union[list[bytes], list[MemoryObj]],
@@ -577,33 +663,7 @@ class HcclChannel(BaseTransferChannel):
         :return: Number of successfully transferred objects.
         """
         assert transfer_spec is not None
-
-        conn_handle = None
-        remote_mem_handles: PeerMemHandleList = None
-        with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
-            remote_mem_handles = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
-
-        write_ops = []
-        for mem_obj, remote_addr in zip(
-            objects, transfer_spec["remote_addrs"], strict=False
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported in HCCL channel"
-                )
-
-            write_ops.append(
-                hcomm.HcclWriteOp(
-                    src=self.hccl_wrapper.get_local_addr(
-                        mem_obj.data_ptr, mem_obj.meta.address
-                    ),
-                    dst=remote_mem_handles.get_buffer_addr(remote_addr),
-                    s=self.page_size,
-                )
-            )
+        conn_handle, write_ops = self._build_write_ops(objects, transfer_spec)
 
         self.hccl_agent.write_batch(
             conn_handle, write_ops, self.transport_stream.npu_stream
@@ -632,31 +692,8 @@ class HcclChannel(BaseTransferChannel):
 
         :return: Number of successfully transferred objects.
         """
-
         assert transfer_spec is not None
-
-        conn_handle = None
-        with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
-
-        write_ops = []
-        for mem_obj, remote_addr in zip(
-            objects, transfer_spec["remote_addrs"], strict=False
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported in HCCL channel"
-                )
-
-            write_ops.append(
-                hcomm.HcclWriteOp(
-                    src=self.hccl_wrapper.get_local_addr(
-                        mem_obj.data_ptr, mem_obj.meta.address
-                    ),
-                    dst=remote_addr,
-                    s=self.page_size,
-                )
-            )
+        conn_handle, write_ops = self._build_write_ops(objects, transfer_spec)
 
         self.hccl_agent.write_batch(
             conn_handle, write_ops, self.transport_stream.npu_stream
@@ -682,9 +719,11 @@ class HcclChannel(BaseTransferChannel):
         with self._state_lock:
             conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
 
+        remote_addrs = self._resolve_remote_addrs(transfer_spec)
+
         read_ops = []
         for mem_obj, remote_addr in zip(
-            buffers, transfer_spec["remote_addrs"], strict=False
+            buffers, remote_addrs, strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
@@ -702,6 +741,38 @@ class HcclChannel(BaseTransferChannel):
             )
         return conn_handle, read_ops
 
+    async def async_batched_read(
+        self,
+        buffers: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: Optional[dict] = None,
+    ) -> int:
+        """
+        Read a batch of data through the channel.
+
+        :param buffers: A list of bytes or MemoryObj to store the read data.
+        :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
+        """
+        assert transfer_spec is not None
+        conn_handle, read_ops = self._build_read_ops(buffers, transfer_spec)
+
+        self.hccl_agent.read_batch(
+            conn_handle, read_ops, self.transport_stream.npu_stream
+        )
+
+        event = torch.npu.Event()
+        event.record(self.transport_stream)
+        while not event.query():
+            await asyncio.sleep(0.001)
+
+        return len(buffers)
+    
+    ############################################################
+    # functions added for better pipelining control
+    # These allow submitting reads/writes without waiting for completion,
+    # and using events for synchronization
+    ############################################################
     def submit_batched_read(
         self,
         buffers: Union[list[bytes], list[MemoryObj]],
@@ -734,33 +805,6 @@ class HcclChannel(BaseTransferChannel):
         event = torch.npu.Event()
         event.record(self.transport_stream)
         return event
-
-    async def async_batched_read(
-        self,
-        buffers: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        """
-        Read a batch of data through the channel.
-
-        :param buffers: A list of bytes or MemoryObj to store the read data.
-        :param transfer_spec: Additional specifications for the transfer.
-
-        :return: Number of successfully transferred objects.
-        """
-        assert transfer_spec is not None
-        conn_handle, read_ops = self._build_read_ops(buffers, transfer_spec)
-
-        self.hccl_agent.read_batch(
-            conn_handle, read_ops, self.transport_stream.npu_stream
-        )
-
-        event = torch.npu.Event()
-        event.record(self.transport_stream)
-        while not event.query():
-            await asyncio.sleep(0.001)
-
-        return len(buffers)
 
     ############################################################
     # Cleanup-related functions

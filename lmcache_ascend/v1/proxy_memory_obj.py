@@ -42,7 +42,8 @@ class P2PTransferContext:
         p2p_backend: Any,
         target_peer_init_url: str,
         lookup_id: str,
-        remote_mem_addrs: List[int],
+        remote_buffer_uuids: List[str],
+        remote_mem_indexes: List[int],
         loop: asyncio.AbstractEventLoop,
         num_proxies: int,
         memory_allocator: Any = None,
@@ -54,7 +55,8 @@ class P2PTransferContext:
         self._p2p_backend = p2p_backend
         self._target_peer_init_url = target_peer_init_url
         self._lookup_id = lookup_id
-        self._remote_mem_addrs = remote_mem_addrs
+        self._remote_buffer_uuids = remote_buffer_uuids
+        self._remote_mem_indexes = remote_mem_indexes
         self._loop = loop
         self._ref_count = num_proxies
         self._done_sent = False
@@ -67,7 +69,8 @@ class P2PTransferContext:
         self._fmt = fmt
         self._use_npu = use_npu
         logger.info(f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
-                    f"target_peer={target_peer_init_url}, remote_addrs={remote_mem_addrs}, "
+                    f"target_peer={target_peer_init_url}, "
+                    f"num_buffer_refs={len(remote_buffer_uuids)}, "
                     f"num_proxies={num_proxies}, use_npu={use_npu}, "
                     f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}")
 
@@ -80,8 +83,12 @@ class P2PTransferContext:
         return self._target_peer_init_url
 
     @property
-    def remote_mem_addrs(self) -> List[int]:
-        return self._remote_mem_addrs
+    def remote_buffer_uuids(self) -> List[str]:
+        return self._remote_buffer_uuids
+
+    @property
+    def remote_mem_indexes(self) -> List[int]:
+        return self._remote_mem_indexes
 
     @property
     def max_pipeline_depth(self) -> int:
@@ -161,7 +168,6 @@ class P2PTransferContext:
                 self._p2p_backend._send_done_signal(
                     self._lookup_id,
                     self._target_peer_init_url,
-                    self._remote_mem_addrs,
                 ),
                 self._loop,
             )
@@ -193,7 +199,8 @@ class ProxyMemoryObj(MemoryObj):
         backing_obj: Optional[MemoryObj],
         transfer_channel: BaseTransferChannel,
         target_peer_init_url: str,
-        remote_mem_addr: int,
+        remote_buffer_uuid: str,
+        remote_mem_index: int,
         transfer_context: P2PTransferContext,
         chunk_index: int,
         shapes: Optional[List[torch.Size]] = None,
@@ -209,7 +216,8 @@ class ProxyMemoryObj(MemoryObj):
                 for reading data from the remote peer.
             target_peer_init_url: The remote peer's init URL, used as the
                 receiver_id for the transfer channel.
-            remote_mem_addr: The remote memory address for this specific chunk.
+            remote_buffer_uuid: Opaque UUID identifying the remote buffer.
+            remote_mem_index: Mem index within the remote buffer.
             transfer_context: Shared context managing the P2P transfer lifecycle.
             chunk_index: The index of this chunk within the batch.
             shapes: Tensor shapes (required when backing_obj is None).
@@ -220,7 +228,8 @@ class ProxyMemoryObj(MemoryObj):
         self._backing_obj = backing_obj
         self._transfer_channel = transfer_channel
         self._target_peer_init_url = target_peer_init_url
-        self._remote_mem_addr = remote_mem_addr
+        self._remote_buffer_uuid = remote_buffer_uuid
+        self._remote_mem_index = remote_mem_index
         self._transfer_context = transfer_context
         self._chunk_index = chunk_index
         self._resolved = False
@@ -298,7 +307,8 @@ class ProxyMemoryObj(MemoryObj):
 
         channel_transfer_spec = {
             "receiver_id": self._target_peer_init_url,
-            "remote_addrs": [self._remote_mem_addr],
+            "remote_buffer_uuids": [self._remote_buffer_uuid],
+            "remote_mem_indexes": [self._remote_mem_index],
         }
 
         future = asyncio.run_coroutine_threadsafe(
@@ -331,17 +341,20 @@ class ProxyMemoryObj(MemoryObj):
 
         first = unresolved[0]
         buffers = []
-        remote_addrs = []
+        remote_buffer_uuids = []
+        remote_mem_indexes = []
         for p in unresolved:
             assert p._backing_obj is not None, (
                 "Cannot resolve: no backing buffer assigned"
             )
             buffers.append(p._backing_obj)
-            remote_addrs.append(p._remote_mem_addr)
+            remote_buffer_uuids.append(p._remote_buffer_uuid)
+            remote_mem_indexes.append(p._remote_mem_index)
 
         channel_transfer_spec = {
             "receiver_id": first._target_peer_init_url,
-            "remote_addrs": remote_addrs,
+            "remote_buffer_uuids": remote_buffer_uuids,
+            "remote_mem_indexes": remote_mem_indexes,
         }
 
         future = asyncio.run_coroutine_threadsafe(
@@ -392,17 +405,20 @@ class ProxyMemoryObj(MemoryObj):
             return None
 
         buffers = []
-        remote_addrs = []
+        remote_buffer_uuids = []
+        remote_mem_indexes = []
         for p in unresolved:
             assert p._backing_obj is not None, (
                 "Cannot resolve: no backing buffer assigned"
             )
             buffers.append(p._backing_obj)
-            remote_addrs.append(p._remote_mem_addr)
+            remote_buffer_uuids.append(p._remote_buffer_uuid)
+            remote_mem_indexes.append(p._remote_mem_index)
 
         channel_transfer_spec = {
             "receiver_id": first._target_peer_init_url,
-            "remote_addrs": remote_addrs,
+            "remote_buffer_uuids": remote_buffer_uuids,
+            "remote_mem_indexes": remote_mem_indexes,
         }
 
         event = channel.submit_batched_read(
@@ -544,7 +560,7 @@ class ProxyMemoryObj(MemoryObj):
             return self._shapes[0][2] if self._shapes else 0
         elif self._fmt == MemoryFormat.KV_2TD:
             return self._shapes[0][1] if self._shapes else 0
-        elif self.fmt == MemoryFormat.KV_T2D:
+        elif self._fmt == MemoryFormat.KV_T2D:
             return self._shapes[0][0] if self._shapes else 0
         else:
             return 0

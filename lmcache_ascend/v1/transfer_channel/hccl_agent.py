@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import List
+from typing import Dict, List, Optional
+import uuid as _uuid
 
 # Third Party
 from lmcache.logging import init_logger
@@ -38,6 +39,7 @@ class HcclMemHandleMeta:
     page_size: int
     local_buffer_addrs: List[int] = None
     buffer_type: BufferType = BufferType.CPU
+    uuid: str = field(default_factory=lambda: str(_uuid.uuid4()))
 
 
 @dataclass
@@ -63,6 +65,7 @@ class HcclAgentWrapper:
         self.agent = hccl_agent
         self.mem_handles = []
         self.local_index_addr = {}
+        self._uuid_to_handle: Dict[str, HcclMemHandleMeta] = {}
 
         for buf in buffers:
             buffer_ptr = buf.ptr
@@ -109,6 +112,55 @@ class HcclAgentWrapper:
                 buffer_type=buf.device_type,
             )
             self.mem_handles.append(mem_handle_meta)
+            self._uuid_to_handle[mem_handle_meta.uuid] = mem_handle_meta
+
+    def get_handle_by_uuid(self, buffer_uuid: str) -> Optional[HcclMemHandleMeta]:
+        """Look up a local mem handle by its UUID."""
+        return self._uuid_to_handle.get(buffer_uuid)
+
+    def resolve_local_addr(self, buffer_uuid: str, page_index: int) -> int:
+        """Resolve a (buffer_uuid, page_index) to an actual local memory address.
+
+        Raises ValueError if the UUID is unknown or page_index is out of bounds.
+        """
+        meta = self._uuid_to_handle.get(buffer_uuid)
+        if meta is None:
+            raise ValueError(
+                f"Buffer UUID {buffer_uuid} not found in registered handles"
+            )
+        if meta.local_buffer_addrs is None:
+            raise ValueError(
+                f"Buffer UUID {buffer_uuid} has no local_buffer_addrs"
+            )
+        num_pages = len(meta.local_buffer_addrs)
+        if not (0 <= page_index < num_pages):
+            raise IndexError(
+                f"page_index {page_index} out of range [0, {num_pages}) "
+                f"for buffer {buffer_uuid}"
+            )
+        return meta.local_buffer_addrs[page_index]
+
+    def get_buffer_ref(
+        self, data_ptr: int, page_index: int
+    ) -> tuple:
+        """Find the buffer UUID for a given data pointer and return (uuid, page_index).
+
+        The page_index is passed through (it comes from the memory allocator's
+        meta.address) and validated against the buffer's local_buffer_addrs.
+        """
+        for meta in self.mem_handles:
+            if meta.buffer_ptr <= data_ptr < meta.buffer_ptr + meta.buffer_size:
+                if meta.local_buffer_addrs is not None:
+                    num_pages = len(meta.local_buffer_addrs)
+                    if not (0 <= page_index < num_pages):
+                        raise IndexError(
+                            f"page_index {page_index} out of range [0, {num_pages}) "
+                            f"for buffer {meta.uuid}"
+                        )
+                return (meta.uuid, page_index)
+        raise ValueError(
+            f"Pointer {data_ptr} not found in any registered memory handle."
+        )
 
     def get_local_addr(self, ptr: int, idx: int) -> int:
         # we need to first check whether this is in our mem_handles
