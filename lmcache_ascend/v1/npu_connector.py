@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import Enum, auto
-from typing import Any, List, Optional, Tuple, Union, Set
+from typing import Any, List, Optional, Set, Tuple, Union
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -17,8 +17,8 @@ from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, Memor
 import torch
 
 # First Party
+from lmcache_ascend.v1.proxy_memory_obj import P2PTransferContext, ProxyMemoryObj
 import lmcache_ascend.c_ops as lmc_ops
-from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj, P2PTransferContext
 
 logger = init_logger(__name__)
 
@@ -883,9 +883,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         # Separate proxy and non-proxy items
         proxy_items = []
         non_proxy_items = []
-        for memory_obj, start, end in zip(
-            memory_objs, starts, ends, strict=False
-        ):
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if isinstance(memory_obj, ProxyMemoryObj):
                 transfer_contexts.add(memory_obj.transfer_context)
                 proxy_items.append((memory_obj, start, end))
@@ -901,7 +899,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             pipeline_depth = first_ctx.max_pipeline_depth
             logger.info(
                 "P2P pipeline depth = %d (proxy_items=%d)",
-                pipeline_depth, len(proxy_items),
+                pipeline_depth,
+                len(proxy_items),
             )
 
             # Allocate ping-pong buffer pools
@@ -913,7 +912,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
             # Group proxy items into micro-batches
             micro_batches = [
-                proxy_items[i:i + pipeline_depth]
+                proxy_items[i : i + pipeline_depth]
                 for i in range(0, len(proxy_items), pipeline_depth)
             ]
 

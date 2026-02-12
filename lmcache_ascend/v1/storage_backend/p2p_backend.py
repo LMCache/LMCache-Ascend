@@ -47,9 +47,9 @@ logger = init_logger(__name__)
 
 class AscendBatchedLookupAndGetMsg(BatchedLookupAndGetMsg):
     # buffer uuids to lookup indiviudal mem handles
-    # as we extended the transfer channel to support multiple buffers 
-    # (e.g., CPU and NPU), we need a way to identify 
-    # which buffer the remote mem handle belongs to, 
+    # as we extended the transfer channel to support multiple buffers
+    # (e.g., CPU and NPU), we need a way to identify
+    # which buffer the remote mem handle belongs to,
     # so we use buffer uuid as the identifier.
     buffer_uuids: list[str] = []
     pull_mode: bool = False
@@ -65,6 +65,7 @@ class AscendBatchedLookupAndGetRetMsg(BatchedLookupAndGetRetMsg):
 
 class AscendBatchedLookupAndGetDoneMsg(msgspec.Struct, tag=True):
     lookup_id: str
+
 
 class AscendBatchedLookupAndGetDoneRetMsg(msgspec.Struct, tag=True):
     pass
@@ -143,6 +144,8 @@ class AscendP2PBackend(P2PBackend):
         self.pending_pull_resources: dict[str, list[MemoryObj]] = {}
 
         # NOTE (gingfung): adding support using npu memory.
+        self.use_npu = config.p2p_use_npu
+
         self.local_cpu_backend = local_cpu_backend
         self.memory_allocator = local_cpu_backend.get_memory_allocator()
         assert isinstance(self.memory_allocator, PagedCpuGpuMemoryAllocator)
@@ -154,7 +157,15 @@ class AscendP2PBackend(P2PBackend):
 
         self.delay_pull = config.p2p_delay_pull
         if self.delay_pull:
-            logger.info("P2P delay pull enabled. ")
+            assert self.pull_mode, "Delay pull only works when pull mode is enabled"
+            if not self.use_npu:
+                logger.warning("P2P delay pull is enabled "
+                               "but NPU buffer is not initialized. "
+                               "Setting delay_pull to False.")
+                self.delay_pull = False
+            else:
+                logger.info("P2P delay pull enabled. "
+                            "The npu connector will pull the data on-the-fly.")
 
         self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
         self.dtypes = self.memory_allocator.cpu_allocator.dtypes
@@ -166,7 +177,6 @@ class AscendP2PBackend(P2PBackend):
         buffer_sizes = [self.memory_allocator.cpu_allocator.buffer_size]
         buffer_types = ["cpu"]
         align_bytes = [self.memory_allocator.cpu_allocator.align_bytes]
-        self.use_npu = config.p2p_use_npu
 
         if self.use_npu:
             if (
@@ -181,7 +191,12 @@ class AscendP2PBackend(P2PBackend):
                 )
                 # get align bytes
                 _align_bytes = self.memory_allocator.cpu_allocator.align_bytes
-                align_allocator_bytes = (config.p2p_npu_buffer_size + _align_bytes - 1) // _align_bytes * _align_bytes
+                align_allocator_bytes = (
+                    (config.p2p_npu_buffer_size + _align_bytes - 1)
+                    // _align_bytes
+                    * _align_bytes
+                )
+                
                 self.memory_allocator.init_gpu_memory_allocator(
                     align_allocator_bytes,
                     self.full_size_shapes,
@@ -189,10 +204,29 @@ class AscendP2PBackend(P2PBackend):
                     self.fmt,
                     get_correct_device("npu", metadata.worker_id),
                 )
-            buffer_ptrs.append(self.memory_allocator.gpu_allocator.buffer_ptr)
-            buffer_sizes.append(self.memory_allocator.gpu_allocator.buffer_size)
+
+            gpu_alloc = self.memory_allocator.gpu_allocator
+            num_npu_pages = len(gpu_alloc.free_blocks)
+            page_size_mb = gpu_alloc.align_bytes / (1024 * 1024)
+            total_npu_mb = gpu_alloc.buffer_size / (1024 * 1024)
+            logger.info(
+                "NPU buffer initialized: %.2f MB total, "
+                "%d pages available (%.2f MB per page)",
+                total_npu_mb,
+                num_npu_pages,
+                page_size_mb,
+            )
+            if total_npu_mb <= 1024 and not self.delay_pull:
+                logger.warning(
+                    f"NPU buffer size ({total_npu_mb} MB) "
+                    f"is quite small with "
+                    f"(page size: {page_size_mb} MB). "
+                )
+
+            buffer_ptrs.append(gpu_alloc.buffer_ptr)
+            buffer_sizes.append(gpu_alloc.buffer_size)
             buffer_types.append("npu")
-            align_bytes.append(self.memory_allocator.gpu_allocator.align_bytes)
+            align_bytes.append(gpu_alloc.align_bytes)
 
         self.chunk_size = config.chunk_size
 
@@ -318,7 +352,8 @@ class AscendP2PBackend(P2PBackend):
                     should_release = False
                 else:
                     logger.warning(
-                        "Pull mode enabled but no hit chunks for lookup_id %s, receiver_id %s",
+                        "Pull mode enabled but no hit chunks "
+                        "for lookup_id %s, receiver_id %s",
                         lookup_id,
                         receiver_id,
                     )
@@ -383,6 +418,7 @@ class AscendP2PBackend(P2PBackend):
         mem_objs = []
         str_keys = []
         keys_len = len(keys)
+        allocator_label = "NPU" if self.use_npu else "CPU"
         for idx, key in enumerate(keys):
             if not self.config.save_unfull_chunk or idx < keys_len - 1:
                 shapes = self.full_size_shapes
@@ -397,6 +433,21 @@ class AscendP2PBackend(P2PBackend):
                 )
             else:
                 mem_obj = self.local_cpu_backend.allocate(shapes, self.dtypes, self.fmt)
+
+            if mem_obj is None:
+                logger.error(
+                    "%s allocator out of memory when allocating "
+                    "chunk %d/%d for key %s. "
+                    "Consider increasing the buffer size.",
+                    allocator_label,
+                    idx + 1,
+                    keys_len,
+                    key.to_string(),
+                )
+                # Release already-allocated objects before returning
+                for allocated_obj in mem_objs:
+                    allocated_obj.ref_count_down()
+                return [], []
 
             mem_objs.append(mem_obj)
             str_keys.append(key.to_string())
@@ -550,9 +601,14 @@ class AscendP2PBackend(P2PBackend):
             local_buffer_uuids = []
             local_mem_indexes = []
         else:
-            mem_objs, str_keys = self._allocate_memory_for_keys(
-                keys, cum_chunk_lengths
-            )
+            mem_objs, str_keys = self._allocate_memory_for_keys(keys, cum_chunk_lengths)
+            if not mem_objs:
+                logger.warning(
+                    "Failed to allocate memory for lookup_id %s, "
+                    "returning empty result.",
+                    lookup_id,
+                )
+                return []
             local_buffer_uuids, local_mem_indexes = (
                 self.transfer_channel.get_local_buffer_refs(mem_objs)
             )
@@ -620,8 +676,9 @@ class AscendP2PBackend(P2PBackend):
 
             return proxy_objs
 
-        # NOTE (gingfung): mem_objs is only none 
-        # iff 1) num_hit_chunks is 0, or 2) delay_pull is enabled (so we skip pre-allocation).
+        # NOTE (gingfung): mem_objs is only none
+        # iff 1) num_hit_chunks is 0, or
+        # 2) delay_pull is enabled (so we skip pre-allocation).
         # therefore if mem_objs is None, we can directly return without cleanup.
         if mem_objs is None:
             return []

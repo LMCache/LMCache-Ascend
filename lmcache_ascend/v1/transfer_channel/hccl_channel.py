@@ -70,9 +70,7 @@ class PeerMemHandle:
 class PeerMemHandleList:
     def __init__(self, mem_handles: List[HcclMemHandleMeta]):
         self.peer_mem_handles = [PeerMemHandle(handle) for handle in mem_handles]
-        self._uuid_to_handle = {
-            h.uuid: h for h in self.peer_mem_handles
-        }
+        self._uuid_to_handle = {h.uuid: h for h in self.peer_mem_handles}
 
     def extend_handles(self, mem_handles: List[HcclMemHandleMeta]):
         for handle in mem_handles:
@@ -87,9 +85,7 @@ class PeerMemHandleList:
         """
         handle = self._uuid_to_handle.get(buffer_uuid)
         if handle is None:
-            raise ValueError(
-                f"Buffer UUID {buffer_uuid} not found in peer mem handles"
-            )
+            raise ValueError(f"Buffer UUID {buffer_uuid} not found in peer mem handles")
         return handle
 
     def resolve_addr(self, buffer_uuid: str, page_index: int) -> int:
@@ -515,7 +511,6 @@ class HcclChannel(BaseTransferChannel):
     ) -> list[int]:
         raise NotImplementedError("When using Ascend, this should not be used.")
 
-
     def get_local_buffer_refs(
         self, objects: Union[list[bytes], list[MemoryObj]]
     ) -> tuple[list[str], list[int]]:
@@ -531,7 +526,8 @@ class HcclChannel(BaseTransferChannel):
         mem_indexes: list[int] = []
         if isinstance(objects[0], MemoryObj):
             for mem_obj in objects:
-                assert isinstance(mem_obj, MemoryObj)
+                assert mem_obj is not None and isinstance(mem_obj, MemoryObj), \
+                        "Expected MemoryObj, got {}".format(type(mem_obj))
                 buf_uuid, mem_idx = self.hccl_wrapper.get_buffer_ref(
                     mem_obj.data_ptr, mem_obj.meta.address
                 )
@@ -630,9 +626,7 @@ class HcclChannel(BaseTransferChannel):
         remote_addrs = self._resolve_remote_addrs(transfer_spec)
 
         write_ops = []
-        for mem_obj, remote_addr in zip(
-            objects, remote_addrs, strict=False
-        ):
+        for mem_obj, remote_addr in zip(objects, remote_addrs, strict=False):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
                     "Sending raw bytes is not supported in HCCL channel"
@@ -722,9 +716,7 @@ class HcclChannel(BaseTransferChannel):
         remote_addrs = self._resolve_remote_addrs(transfer_spec)
 
         read_ops = []
-        for mem_obj, remote_addr in zip(
-            buffers, remote_addrs, strict=False
-        ):
+        for mem_obj, remote_addr in zip(buffers, remote_addrs, strict=False):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
                     "Sending raw bytes is not supported in HCCL channel"
@@ -767,7 +759,7 @@ class HcclChannel(BaseTransferChannel):
             await asyncio.sleep(0.001)
 
         return len(buffers)
-    
+
     ############################################################
     # functions added for better pipelining control
     # These allow submitting reads/writes without waiting for completion,

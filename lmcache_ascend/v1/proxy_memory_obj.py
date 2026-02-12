@@ -13,7 +13,7 @@ before scattering, enabling overlap of remote fetch and NPU scatter operations.
 """
 
 # Standard
-from typing import Any, List, Optional, Union
+from typing import Any, List, Optional
 import asyncio
 import threading
 
@@ -68,11 +68,13 @@ class P2PTransferContext:
         self._dtypes = dtypes
         self._fmt = fmt
         self._use_npu = use_npu
-        logger.info(f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
-                    f"target_peer={target_peer_init_url}, "
-                    f"num_buffer_refs={len(remote_buffer_uuids)}, "
-                    f"num_proxies={num_proxies}, use_npu={use_npu}, "
-                    f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}")
+        logger.info(
+            f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
+            f"target_peer={target_peer_init_url}, "
+            f"num_buffer_refs={len(remote_buffer_uuids)}, "
+            f"num_proxies={num_proxies}, use_npu={use_npu}, "
+            f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
+        )
 
     @property
     def lookup_id(self) -> str:
@@ -249,7 +251,8 @@ class ProxyMemoryObj(MemoryObj):
 
         # Pre-compute size for get_size()
         self._size_bytes = sum(
-            s.numel() * d.itemsize for s, d in zip(self._shapes, self._dtypes)
+            s.numel() * d.itemsize
+            for s, d in zip(self._shapes, self._dtypes, strict=False)
         )
 
     @property
@@ -300,8 +303,7 @@ class ProxyMemoryObj(MemoryObj):
             return
 
         assert self._backing_obj is not None, (
-            "Cannot resolve: no backing buffer assigned. "
-            "Call set_backing_obj() first."
+            "Cannot resolve: no backing buffer assigned. Call set_backing_obj() first."
         )
 
         channel_transfer_spec = {

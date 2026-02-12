@@ -81,7 +81,8 @@ class HcclAgentWrapper:
 
             mem_handle = hccl_agent.register_mem(buffer_ptr, buffer_size)
             logger.info(
-                "Registered memory with HCCL: buffer_ptr=%s, buffer_size=%s, mem_handle=%s",
+                "Registered memory with HCCL: "
+                "buffer_ptr=%s, buffer_size=%s, mem_handle=%s",
                 buffer_ptr,
                 buffer_size,
                 mem_handle,
@@ -129,9 +130,7 @@ class HcclAgentWrapper:
                 f"Buffer UUID {buffer_uuid} not found in registered handles"
             )
         if meta.local_buffer_addrs is None:
-            raise ValueError(
-                f"Buffer UUID {buffer_uuid} has no local_buffer_addrs"
-            )
+            raise ValueError(f"Buffer UUID {buffer_uuid} has no local_buffer_addrs")
         num_pages = len(meta.local_buffer_addrs)
         if not (0 <= page_index < num_pages):
             raise IndexError(
@@ -140,9 +139,7 @@ class HcclAgentWrapper:
             )
         return meta.local_buffer_addrs[page_index]
 
-    def get_buffer_ref(
-        self, data_ptr: int, page_index: int
-    ) -> tuple:
+    def get_buffer_ref(self, data_ptr: int, page_index: int) -> tuple:
         """Find the buffer UUID for a given data pointer and return (uuid, page_index).
 
         The page_index is passed through (it comes from the memory allocator's
