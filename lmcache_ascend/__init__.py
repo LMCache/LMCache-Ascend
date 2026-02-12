@@ -8,11 +8,23 @@ LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
 
 
+def _is_sglang_runtime():
+    return "sglang" in sys.modules or any("sglang" in arg for arg in sys.argv)
+
 def _patch_ops():
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
+
+def _patch_torch_capability():
+    # First Party
+    from torch_npu.contrib import transfer_to_npu  # noqa: F401
+    import torch
+
+    capability_mock = lambda *args: (0, 0)
+    torch.npu.get_device_capability = capability_mock
+    torch.cuda.get_device_capability = capability_mock
 
 
 def _patch_transfer_channel():
@@ -157,7 +169,7 @@ def _patch_sys_detection():
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
 
-def _patch_sgl_init_engine():
+def _patch_sgl():
     # Third Party
     import lmcache.integration.sglang.sglang_adapter as lmc_sglang_adapter
 
@@ -193,13 +205,15 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    is_sgl = _is_sglang_runtime()
+
     if _build_info.__framework_name__ == "pytorch":
         # Third Party
         # TODO (gingfung): Currently we patch all the cuda calls
         # due to effort to port all torch.cuda will disabled torch.jit
         # NOTE: this must be done early in the patch prior to the cache engine
         # to avoid falling into non_cuda_equivalent
-        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+        _patch_torch_capability()
 
     _patch_ops()
 
@@ -211,13 +225,15 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
-    # _patch_init_engine()
     _patch_hash_token()
 
-    _patch_sgl_init_engine()
-
-    # if _build_info.__framework_name__ == "pytorch":
-    #     _patch_sys_detection()
+    if is_sgl:
+        _patch_sgl()
+    else:
+        _patch_init_engine()
+    
+        if _build_info.__framework_name__ == "pytorch":
+            _patch_sys_detection()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
