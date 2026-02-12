@@ -84,9 +84,14 @@ def CreateTransferChannel(
         assert isinstance(buffer_size, int), (
             "buffer_size must be int when buffer_ptr is int"
         )
-        buffer_size = [buffer_size]
-        # TODO (gingfung): We should not assume this.
-        buffer_type = [buffer_type] if buffer_type else ["cpu"]
+        if isinstance(buffer_size, int):
+            buffer_size = [buffer_size]
+    
+        if isinstance(buffer_type, str):
+            buffer_type = [buffer_type] if buffer_type else ["cpu"]
+        
+        if isinstance(align_bytes, int):
+            align_bytes = [align_bytes]
     else:
         assert isinstance(buffer_ptr, list), "buffer_ptr must be int or list of int"
         assert isinstance(buffer_size, list), "buffer_size must be int or list of int"

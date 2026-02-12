@@ -213,7 +213,6 @@ class HcclChannel(BaseTransferChannel):
         logger.info("Connected to remote")
 
         # Exchange and register memory with peer
-        # TODO: support multiple memory handles
         mem_handles = self.hccl_wrapper.mem_handles
         # Backward compatibility: wrap single handle if needed or send list
         # For now, we assume protocol upgrade to send list of handles
