@@ -19,7 +19,7 @@ def run_integration_patches():
 
     base_path = "lmcache_ascend.integration.patch"
     patch_tasks = [
-        # TODO(niming):("sglang", f"{base_path}.sglang.sglang_patch", "SglangPatcher"),
+        ("sglang", f"{base_path}.sglang.sglang_patch", "SglangPatcher"),
         ("vllm_ascend", f"{base_path}.vllm.cacheblend_patch", "CacheBlendPatcher"),
         # ("mindspore", "...", "MindSporePatcher"),
     ]
