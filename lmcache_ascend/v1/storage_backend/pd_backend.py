@@ -107,9 +107,12 @@ class AscendPDBackend(PDBackend):
 
     Overrides the base :class:`PDBackend` to:
 
-    * initialize allocator on NPU instead of CUDA,
+    * initialize **both** CPU and NPU allocators so that the sender can
+      offload KV caches to CPU first and transfer via RDMA from host
+      memory, while the receiver allocates directly on NPU,
     * create an HCCL transfer channel via
-      :func:`lmcache_ascend.v1.transfer_channel.CreateTransferChannel`,
+      :func:`lmcache_ascend.v1.transfer_channel.CreateTransferChannel`
+      with both CPU and NPU buffers registered (multi-buffer pattern),
     * use UUID-based buffer references in alloc responses and transfer specs
       (required by the HCCL channel's ``_resolve_remote_addrs``).
     """
@@ -119,13 +122,17 @@ class AscendPDBackend(PDBackend):
         config: LMCacheEngineConfig,
         metadata: LMCacheEngineMetadata,
     ):
-        # Skip PDBackend.__init__ and do our own setup to avoid
-        # importing CUDA-specific transfer channel / device utilities.
         self.running = True
         self.tp_rank = metadata.worker_id
 
         self.pd_config = PDConfig.from_cache_engine_config(
             config, metadata, self.tp_rank)
+
+        # CPU offload: sender offloads KV to CPU first, then RDMA from CPU.
+        # Read from LMCacheEngineConfig (not PDConfig, which is upstream).
+        self.use_cpu_offload: bool = getattr(
+            config, "pd_use_cpu_offload", False
+        )
 
         # Receiver-side KV store
         self.data: dict[CacheEngineKey, MemoryObj] = {}
@@ -162,15 +169,30 @@ class AscendPDBackend(PDBackend):
                 self.pd_config.peer_init_port
             )
 
+        # Register both CPU and NPU buffers with the transfer channel
+        # so that RDMA can operate on either memory region.
+        # (Mirrors the multi-buffer pattern used by AscendP2PBackend.)
         gpu_alloc = self.memory_allocator.gpu_allocator
+        if self.pd_config.role == "sender" and self.use_cpu_offload:
+            cpu_alloc = self.memory_allocator.cpu_allocator
+            buffer_ptr = [cpu_alloc.buffer_ptr, gpu_alloc.buffer_ptr]
+            buffer_size = [cpu_alloc.buffer_size, gpu_alloc.buffer_size]
+            buffer_type = ["cpu", "npu"]
+            align_bytes = [cpu_alloc.align_bytes, gpu_alloc.align_bytes]
+        else:
+            buffer_ptr = [gpu_alloc.buffer_ptr]
+            buffer_size = [gpu_alloc.buffer_size]
+            buffer_type = ["npu"]
+            align_bytes = [gpu_alloc.align_bytes]
+
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=False,
             role=self.pd_config.role,
-            buffer_ptr=gpu_alloc.buffer_ptr,
-            buffer_size=gpu_alloc.buffer_size,
-            buffer_type="npu",
-            align_bytes=gpu_alloc.align_bytes,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            buffer_type=buffer_type,
+            align_bytes=align_bytes,
             tp_rank=self.tp_rank,
             peer_init_url=peer_init_url,
         )
@@ -216,26 +238,77 @@ class AscendPDBackend(PDBackend):
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
     ) -> PagedCpuGpuMemoryAllocator:
-        corrected_device = get_correct_device(
-            config.pd_buffer_device, metadata.worker_id
-        )
-        logger.info("Setting NPU device to %s", corrected_device)
-        torch.npu.set_device(corrected_device)
+        npu_corrected_device = get_correct_device("npu", metadata.worker_id)
+        logger.info("Setting NPU device to %s", npu_corrected_device)
+        torch.npu.set_device(npu_corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         fmt = MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
         sizes = [torch.Size(metadata.kv_shape)]
         dtypes = [metadata.kv_dtype]
         total_size = get_size_bytes(sizes, dtypes)
-        aligned_byte = (config.pd_buffer_size + total_size - 1) // total_size * total_size
-        paged_mem_allocator.init_gpu_memory_allocator(
-            aligned_byte,
-            sizes,
-            dtypes,
-            fmt,
-            corrected_device,
+
+        # NPU allocator — needed for RDMA buffer registration and
+        # receiver-side allocation (incoming KV lands directly on NPU).
+        npu_aligned_byte = (
+            (config.pd_buffer_size + total_size - 1) // total_size * total_size
         )
+        paged_mem_allocator.init_gpu_memory_allocator(
+            npu_aligned_byte, sizes, dtypes, fmt, npu_corrected_device
+        )
+        logger.info(
+            "Initialized NPU allocator: %.2f MB",
+            npu_aligned_byte / (1024 * 1024),
+        )
+
+        if self.use_cpu_offload:
+            # CPU allocator — for sender-side KV offload (NPU → CPU → RDMA).
+            # Falls back to pd_buffer_size when pd_cpu_buffer_size is not set.
+            cpu_buffer_size = getattr(
+                config, "pd_cpu_buffer_size", config.pd_buffer_size
+            )
+            cpu_aligned_byte = (
+                (cpu_buffer_size + total_size - 1) // total_size * total_size
+            )
+            paged_mem_allocator.init_cpu_memory_allocator(
+                cpu_aligned_byte, sizes, dtypes, fmt)
+
+            logger.info(
+                "Initialized CPU allocator: %.2f MB",
+                cpu_aligned_byte / (1024 * 1024),
+            )
+
         return paged_mem_allocator
+
+    def allocate(
+        self,
+        shapes: Union[torch.Size, list[torch.Size]],
+        dtypes: Union[torch.dtype, list[torch.dtype]],
+        fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+        eviction: bool = True,
+        busy_loop: bool = True,
+    ) -> Optional[MemoryObj]:
+        """Allocate memory with role-aware placement.
+
+        * **Sender** (prefiller): allocates on **CPU** so that
+          ``gpu_connector.batched_from_gpu()`` performs an NPU → CPU
+          offload.  The CPU buffer is registered for RDMA, enabling the
+          receiver to pull (or the sender to push) directly from host
+          memory.
+        * **Receiver** (decoder): allocates on **NPU** so that incoming
+          KV data lands directly on the accelerator.
+        """
+        if fmt is None:
+            fmt = MemoryFormat.KV_2LTD
+        # Sender + cpu_offload: offload to CPU first  →  RDMA from CPU
+        # Otherwise (receiver, or sender without offload): allocate on NPU
+        use_cpu = (
+            self.pd_config.role == "sender" and self.use_cpu_offload
+        )
+        alloc_type = "cpu" if use_cpu else "gpu"
+        return self.memory_allocator.allocate(
+            shapes, dtypes, fmt=fmt, allocator_type=alloc_type
+        )
 
     # ──────────────────────────────────────────────────────────
     # Sender / prefiller overrides

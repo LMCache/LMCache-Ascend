@@ -84,6 +84,25 @@ def _patch_config():
         "peer_alloc_port + 100.  Example: [18100, 18101].",
     }
 
+    # Add pd_use_cpu_offload config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_use_cpu_offload"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to use CPU offload for PD transfers. "
+        "If True, the KV caches will be offloaded to CPU first and then transferred to remote npu later. "
+        "This config is only used when the role is `sender`.",
+    }
+
+    # Add pd_cpu_buffer_size config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_cpu_buffer_size"] = {
+        "type": int,
+        "default": None,
+        "description": "The total buffer size in bytes for PD CPU transfers. "
+        "This config is used when the role is `sender`, this is because the kvcaches can be offloaded to cpu first."
+        "and then transferred to remote npu later."
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
