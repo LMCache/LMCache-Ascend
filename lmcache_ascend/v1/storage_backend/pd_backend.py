@@ -4,6 +4,7 @@
 from typing import Any, List, Optional, Sequence, Union
 import threading
 import time
+import uuid as _uuid
 
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
@@ -34,6 +35,7 @@ import torch_npu  # noqa: F401
 import zmq
 
 # First Party
+from lmcache_ascend.v1.pd_proxy_memory_obj import PDProxyMemoryObj, PDTransferContext
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 logger = init_logger(__name__)
@@ -51,7 +53,53 @@ class AscendAllocResponse(AllocResponse):
     remote_buffer_uuids: list[str]
 
 
-AscendPDMsg = Union[AllocRequest, AscendAllocResponse, ProxyNotif]
+# ──────────────────────────────────────────────────────────
+# Pull-mode message types
+# ──────────────────────────────────────────────────────────
+
+
+class PullReadyNotif(msgspec.Struct, tag=True):
+    """Sent by the sender (prefiller) to the receiver (decoder) to advertise
+    that KV chunks are ready to be pulled.
+
+    Contains the sender's HCCL buffer references so the receiver can
+    construct RDMA read operations.
+    """
+
+    pull_id: str  # Unique ID for this pull batch
+    keys: list[str]
+    sender_buffer_uuids: list[str]
+    sender_mem_indexes: list[int]
+    sender_id: str  # Sender's HCCL peer ID (for transfer_spec receiver_id)
+    sender_done_url: str  # URL where receiver PUSHes PullDoneSignal
+    fmt: int
+    shape: list[int]
+    dtype: str
+    last_chunk_toks: int
+
+
+class PullReadyDoneAck(msgspec.Struct, tag=True):
+    """Sent by the receiver back to the sender to acknowledge the
+    PullReadyNotif.  Contains indexes of keys already received."""
+
+    already_sent_indexes: list[int]
+
+
+class PullDoneSignal(msgspec.Struct, tag=True):
+    """Sent by the receiver to the sender after all chunks in a pull batch
+    have been read.  The sender releases its pinned resources."""
+
+    pull_id: str
+
+
+AscendPDMsg = Union[
+    AllocRequest,
+    AscendAllocResponse,
+    ProxyNotif,
+    PullReadyNotif,
+    PullReadyDoneAck,
+    PullDoneSignal,
+]
 
 
 class AscendPDBackend(PDBackend):
@@ -90,6 +138,19 @@ class AscendPDBackend(PDBackend):
         self.running_threads: list[threading.Thread] = []
         self.side_channels: list[zmq.Socket] = []
 
+        # Pull mode: the receiver reads from the sender instead of the
+        # sender writing to the receiver.
+        self.pull_mode: bool = getattr(config, "pd_pull_mode", False)
+        if self.pull_mode:
+            logger.info("PD pull mode enabled.")
+
+        self.delay_pull: bool = getattr(config, "pd_delay_pull", False)
+        if self.delay_pull:
+            assert self.pull_mode, "Delay pull only works when pull mode is enabled"
+
+        # Keep config ref for extra_config access (e.g., pull_done_port)
+        self._config = config
+
         # Peer init URL / local id
         peer_init_url = None
         self.local_id = ""
@@ -119,12 +180,37 @@ class AscendPDBackend(PDBackend):
             self._init_sender()
             self.initialized_peers: set[str] = set()
             self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
+            # Pull-mode: pinned resources waiting for Done signal.
+            # Each entry is (pinned_at_timestamp, list[MemoryObj]).
+            self._pull_pending: dict[str, tuple[float, list[MemoryObj]]] = {}
+            self._pull_pending_lock = threading.Lock()
+            # Safety net: if a PullDoneSignal arrives before the main
+            # thread has registered _pull_pending (extremely unlikely
+            # after the ack-before-done reordering, but defensive),
+            # buffer the pull_id here so the main thread can release
+            # immediately after registration instead of waiting for
+            # the TTL sweep.
+            self._early_pull_done: set[str] = set()
+            # TTL in seconds for pull_pending entries.  If a receiver
+            # crashes and never sends PullDoneSignal, pinned MemObjs are
+            # released after this timeout to prevent memory leaks.
+            self._pull_pending_ttl: float = getattr(
+                config, "pd_pull_pending_ttl", 120.0
+            )
         elif self.pd_config.role == "receiver":
             self._init_receiver()
         else:
             raise ValueError("Invalid PD role.")
 
         self.full_chunk_size = config.chunk_size
+
+        # Cache metadata for proxy creation on receiver side
+        self._metadata = metadata
+        self._fmt: MemoryFormat = (
+            MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
+        )
+        self._kv_shapes = [torch.Size(metadata.kv_shape)]
+        self._kv_dtypes = [metadata.kv_dtype]
 
 
     def initialize_allocator(
@@ -155,6 +241,128 @@ class AscendPDBackend(PDBackend):
     # Sender / prefiller overrides
     # ──────────────────────────────────────────────────────────
 
+    def _init_sender(self):
+        """Extend sender init with a Done-listener for pull mode."""
+        super()._init_sender()
+
+        if self.pull_mode:
+            # The sender binds a ZMQ PULL socket for receiving
+            # PullDoneSignal from receivers.  The port is configured
+            # via ``pd_pull_done_port`` (list[int], one per TP rank)
+            pd_pull_done_ports = getattr(
+                self._config, "pd_pull_done_port", None
+            )
+            if pd_pull_done_ports is not None:
+                self._pull_done_port = pd_pull_done_ports[self.tp_rank]
+            else:
+                raise ValueError(
+                    "Pull mode requires pd_pull_done_port or "
+                    "pd_peer_alloc_port to derive a done-listener port."
+                )
+
+            # The sender's bind host — same host used for peer_host
+            self._sender_host = self.pd_config.peer_host
+            assert self._sender_host is not None, (
+                "pd_peer_host must be set on the sender for pull mode "
+                "(needed to bind the done-listener socket)."
+            )
+
+            done_url = f"{self._sender_host}:{self._pull_done_port}"
+            self.local_id = done_url
+            self._sender_done_url = done_url
+            self._pull_done_socket = get_zmq_socket(
+                self.zmq_context, done_url, "tcp", zmq.PULL, "bind"
+            )
+            self.side_channels.append(self._pull_done_socket)
+
+            self._pull_done_thread = threading.Thread(
+                target=self._pull_done_listener_loop, daemon=True
+            )
+            self._pull_done_thread.start()
+            self.running_threads.append(self._pull_done_thread)
+            logger.info(
+                "Pull-mode sender: Done listener started on %s", done_url
+            )
+
+    def _pull_done_listener_loop(self):
+        """Listen for PullDoneSignal from receivers and release pinned
+        resources.  Also sweeps expired entries on every poll cycle."""
+        while self.running:
+            try:
+                # Use a poll timeout so we can check self.running
+                if self._pull_done_socket.poll(timeout=1000):
+                    msg_bytes = self._pull_done_socket.recv(zmq.NOBLOCK)
+                    msg = msgspec.msgpack.decode(msg_bytes, type=AscendPDMsg)
+                    if isinstance(msg, PullDoneSignal):
+                        self._handle_pull_done(msg.pull_id)
+                    else:
+                        logger.warning(
+                            "Unexpected msg in done listener: %s", type(msg)
+                        )
+                # Sweep expired entries every poll cycle (~1 s)
+                self._sweep_expired_pull_pending()
+            except zmq.ZMQError as e:
+                if self.running:
+                    logger.error("ZMQ error in done listener: %s", e)
+                    time.sleep(0.01)
+            except Exception as e:
+                logger.error("Error in done listener: %s", e)
+                if self.running:
+                    time.sleep(0.01)
+
+    def _sweep_expired_pull_pending(self):
+        """Release pinned MemObjs whose TTL has expired.
+
+        This handles the case where a receiver crashes or becomes
+        unreachable and never sends a PullDoneSignal.  Without this,
+        the sender's pinned buffers would leak indefinitely.
+        """
+        now = time.monotonic()
+        expired_ids: list[str] = []
+        with self._pull_pending_lock:
+            for pull_id, (pinned_at, _objs) in self._pull_pending.items():
+                if now - pinned_at > self._pull_pending_ttl:
+                    expired_ids.append(pull_id)
+        # Release outside the scan loop to keep the critical section small
+        for pull_id in expired_ids:
+            with self._pull_pending_lock:
+                entry = self._pull_pending.pop(pull_id, None)
+            if entry is not None:
+                _pinned_at, pinned_objs = entry
+                for mem_obj in pinned_objs:
+                    mem_obj.ref_count_down()
+                logger.warning(
+                    "Pull mode: TTL expired for pull_id %s — released "
+                    "%d pinned MemObjs (receiver may have crashed).",
+                    pull_id,
+                    len(pinned_objs),
+                )
+
+    def _init_receiver(self):
+        """Extend receiver init with done-socket URL tracking for pull mode."""
+        super()._init_receiver()
+
+        if self.pull_mode:
+            # Mapping from sender_id -> done URL so we can send
+            # PullDoneSignal back to the correct sender.
+            self._sender_done_urls: dict[str, str] = {}
+            self._pull_done_sockets: dict[str, zmq.Socket] = {}
+
+    def _ensure_peer_connection(
+        self,
+        receiver_id: str,
+        receiver_host: str,
+        receiver_init_port: int,
+        receiver_alloc_port: int,
+    ) -> None:
+        """Override to call parent and handle any Ascend-specific setup."""
+        super()._ensure_peer_connection(
+            receiver_id=receiver_id,
+            receiver_host=receiver_host,
+            receiver_init_port=receiver_init_port,
+            receiver_alloc_port=receiver_alloc_port,
+        )
+
     def _remote_allocate(
         self, receiver_id: str, alloc_request: AllocRequest
     ) -> AscendAllocResponse:
@@ -175,12 +383,33 @@ class AscendPDBackend(PDBackend):
         memory_objs: List[MemoryObj],
         transfer_spec: Any = None,
     ) -> None:
-        """Send KV chunks to the remote decoder via HCCL write.
+        """Send KV chunks to the remote decoder.
 
-        Builds ``channel_transfer_spec`` with
-        ``remote_buffer_uuids`` / ``remote_mem_indexes``
-        so the HCCL channel can resolve remote memory addresses.
+        In **push mode** (default): HCCL-writes data into pre-allocated
+        remote NPU memory.
+
+        In **pull mode** (``pd_pull_mode=True``): advertises the sender's
+        buffer references so the receiver can read on-demand.  The sender
+        pins the MemObjs and waits for a Done signal from the receiver
+        before releasing them.
         """
+        if self.pull_mode:
+            self._batched_submit_put_task_pull(
+                keys, memory_objs, transfer_spec
+            )
+        else:
+            self._batched_submit_put_task_push(
+                keys, memory_objs, transfer_spec
+            )
+
+
+    def _batched_submit_put_task_push(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """Push mode: HCCL-write from sender NPU → receiver NPU."""
         for mem_obj in memory_objs:
             mem_obj.ref_count_up()
 
@@ -242,12 +471,176 @@ class AscendPDBackend(PDBackend):
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
 
+
+    def _batched_submit_put_task_pull(
+        self,
+        keys: Sequence[CacheEngineKey],
+        memory_objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> None:
+        """Pull mode: advertise sender buffer refs, let receiver read.
+
+        The sender pins the MemObjs and sends a ``PullReadyNotif`` to the
+        receiver.  The receiver acks with already-sent indexes.  The sender
+        keeps un-acked MemObjs pinned until a ``PullDoneSignal`` arrives
+        (handled in ``_pull_done_listener_loop``).
+        """
+        for mem_obj in memory_objs:
+            mem_obj.ref_count_up()
+
+        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
+        receiver_alloc_port = transfer_spec.receiver_alloc_port[self.tp_rank]
+        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+        receiver_host = transfer_spec.receiver_host
+
+        self._ensure_peer_connection(
+            receiver_id=receiver_id,
+            receiver_host=receiver_host,
+            receiver_init_port=receiver_init_port,
+            receiver_alloc_port=receiver_alloc_port,
+        )
+
+        # Resolve local buffer references for the sender's MemObjs
+        sender_buffer_uuids, sender_mem_indexes = (
+            self.transfer_channel.get_local_buffer_refs(memory_objs)
+        )
+
+        # Build PullReadyNotif with sender's buffer refs
+        fmt = memory_objs[0].meta.fmt
+        shape = memory_objs[0].meta.shape
+        dtype = TORCH_DTYPE_TO_STR_DTYPE[memory_objs[0].meta.dtype]
+        token_dim = fmt.token_dim()
+        last_chunk_toks = memory_objs[-1].meta.shape[token_dim]
+
+        pull_id = _uuid.uuid4().hex
+
+        # The done URL was computed during _init_sender and tells the
+        # receiver where to PUSH the PullDoneSignal.
+        sender_done_url = self._sender_done_url
+
+        pull_notif = PullReadyNotif(
+            pull_id=pull_id,
+            keys=[k.to_string() for k in keys],
+            sender_buffer_uuids=sender_buffer_uuids,
+            sender_mem_indexes=sender_mem_indexes,
+            sender_id=self.local_id,
+            sender_done_url=sender_done_url,
+            fmt=fmt.value,
+            shape=list(shape),
+            dtype=dtype,
+            last_chunk_toks=last_chunk_toks,
+        )
+
+        # Send PullReadyNotif and receive ack.
+        # NOTE: _pull_pending is NOT registered yet — this avoids a race
+        # where the listener thread processes a PullDoneSignal (from the
+        # receiver) before we have narrowed the entry to pinned_objs only.
+        side_channel = self.mem_alloc_sockets[receiver_id]
+        side_channel.send(msgspec.msgpack.encode(pull_notif))
+        ack_bytes = side_channel.recv()
+        ack = msgspec.msgpack.decode(ack_bytes, type=AscendPDMsg)
+        assert isinstance(ack, PullReadyDoneAck), (
+            f"Expected PullReadyDoneAck, got {type(ack)}"
+        )
+
+        # Release already-sent objects, pin the rest
+        already_sent = set(ack.already_sent_indexes)
+        pinned_objs = []
+        for idx, mem_obj in enumerate(memory_objs):
+            if idx in already_sent:
+                mem_obj.ref_count_down()
+            else:
+                pinned_objs.append(mem_obj)
+
+        if pinned_objs:
+            # Register _pull_pending with ONLY the pinned objects.
+            # Then check if the PullDoneSignal already arrived (early)
+            # while we were processing the ack.
+            early_done = False
+            with self._pull_pending_lock:
+                if pull_id in self._early_pull_done:
+                    # Done signal arrived before we registered —
+                    # release immediately, don't register.
+                    self._early_pull_done.discard(pull_id)
+                    early_done = True
+                else:
+                    self._pull_pending[pull_id] = (
+                        time.monotonic(),
+                        pinned_objs,
+                    )
+
+            if early_done:
+                for mem_obj in pinned_objs:
+                    mem_obj.ref_count_down()
+                logger.info(
+                    "Pull mode: early PullDoneSignal for pull_id %s — "
+                    "released %d pinned MemObjs immediately.",
+                    pull_id,
+                    len(pinned_objs),
+                )
+            else:
+                logger.info(
+                    "Pull mode: pinned %d MemObjs for pull_id %s, "
+                    "awaiting Done signal from receiver (TTL=%.0fs).",
+                    len(pinned_objs),
+                    pull_id,
+                    self._pull_pending_ttl,
+                )
+        else:
+            # All objects were already sent — nothing left to pin.
+            # _pull_pending[pull_id] cannot exist here because this
+            # pull_id was never registered (only the pinned_objs branch
+            # above registers it).  Just discard any early-done signal
+            # if there were any.
+            with self._pull_pending_lock:
+                self._early_pull_done.discard(pull_id)
+            logger.debug(
+                "Pull mode: all objects already sent for pull_id %s.",
+                pull_id,
+            )
+
+        if transfer_spec.is_last_prefill:
+            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+            self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
+
+    def _handle_pull_done(self, pull_id: str) -> None:
+        """Release pinned MemObjs when the receiver has finished pulling.
+
+        If the pull_id is not yet in ``_pull_pending`` (the main thread
+        hasn't finished processing the ack), buffer it in
+        ``_early_pull_done`` so the main thread releases immediately
+        after registration.
+        """
+        with self._pull_pending_lock:
+            entry = self._pull_pending.pop(pull_id, None)
+            if entry is None:
+                # Main thread hasn't registered yet — buffer for later.
+                self._early_pull_done.add(pull_id)
+                logger.info(
+                    "Pull mode: buffered early PullDoneSignal for "
+                    "pull_id %s (main thread not yet registered).",
+                    pull_id,
+                )
+                return
+        _pinned_at, pinned_objs = entry
+        for mem_obj in pinned_objs:
+            mem_obj.ref_count_down()
+        logger.info(
+            "Pull mode: released %d pinned MemObjs for pull_id %s.",
+            len(pinned_objs),
+            pull_id,
+        )
+
     # ──────────────────────────────────────────────────────────
     # Decoder / receiver overrides
     # ──────────────────────────────────────────────────────────
 
     def _allocate_and_put(self, alloc_request: AllocRequest) -> AscendAllocResponse:
-        """Allocate memory for incoming chunks and return UUID-based refs."""
+        """Allocate memory for incoming chunks and return UUID-based refs.
+
+        Used in **push mode** only.  The receiver pre-allocates NPU pages
+        and returns their HCCL buffer references so the sender can write.
+        """
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
@@ -291,20 +684,301 @@ class AscendPDBackend(PDBackend):
             remote_indexes=remote_mem_indexes,
         )
 
+    # ── Pull-mode receiver handler ────────────────────────────
+
+    def _handle_pull_ready(
+        self, msg: PullReadyNotif, sender_id: str
+    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+        """Handle a ``PullReadyNotif`` from the sender in **pull mode**.
+
+        Returns ``(ack, post_ack_callback_or_None)``.  The caller must
+        send the ack on the REP socket first, then invoke the callback
+        (if not ``None``) to send the ``PullDoneSignal``.
+        """
+        if not self.delay_pull:
+            return self._handle_pull_eager(msg, sender_id)
+        else:
+            return self._handle_pull_delay(msg, sender_id)
+    
+    def _handle_pull_eager(
+        self, msg: PullReadyNotif, sender_id: str
+    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+        """Handle a ``PullReadyNotif`` from the sender in **pull mode** with eager.
+        Allocate NPU actual mem_obj and stores them in ``self.data``.
+        The NPU connector will pull data during ``batched_to_gpu``
+        in one batch.
+
+        Returns ``(ack, post_ack_callback)``.  The caller
+        (``_mem_alloc_loop``) must send the ack on the REP socket
+        **before** invoking the callback.  This ensures the sender's
+        main thread processes the ack and registers ``_pull_pending``
+        before the ``PullDoneSignal`` arrives on the listener thread,
+        eliminating the race between the two sender threads.
+        """
+        total_allocs = len(msg.keys)
+        fmt = MemoryFormat(msg.fmt)
+        dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
+        shape = list(msg.shape)
+
+        already_sent_indexes: list[int] = []
+        remote_buffer_uuids: list[str] = []
+        remote_mem_indexes: list[int] = []
+        mem_objs: list[MemoryObj] = []
+        mem_keys: list[CacheEngineKey] = []
+        for idx, key_str in enumerate(msg.keys):
+            key = CacheEngineKey.from_string(key_str)
+            if self.contains(key, pin=True):
+                already_sent_indexes.append(idx)
+                continue
+
+            # Adjust shape for last (possibly partial) chunk
+            alloc_shape = list(shape)
+            if idx == total_allocs - 1:
+                token_dim = fmt.token_dim()
+                alloc_shape[token_dim] = msg.last_chunk_toks
+
+            mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
+
+            # Busy-loop until allocation succeeds
+            wait_time = 0.01
+            while mem_obj is None:
+                logger.warning("Failed to allocate memory object, retrying...")
+                time.sleep(wait_time)
+                mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
+
+            mem_objs.append(mem_obj)
+            remote_buffer_uuids.append(msg.sender_buffer_uuids[idx])
+            remote_mem_indexes.append(msg.sender_mem_indexes[idx])
+            mem_keys.append(key)
+
+        channel_transfer_spec = {
+            "receiver_id": sender_id,
+            "remote_buffer_uuids": remote_buffer_uuids,
+            "remote_mem_indexes": remote_mem_indexes,
+        }
+        self.transfer_channel.batched_read(
+            buffers=mem_objs,
+            transfer_spec=channel_transfer_spec,
+        )
+
+        # batched_read() synchronizes the transport stream, so all RDMA
+        # reads are complete at this point.  Store the received data.
+        for mem_obj, key in zip(mem_objs, mem_keys):
+            self.put(key, mem_obj)
+
+        # Build a callback that sends PullDoneSignal AFTER the ack reply
+        # has been sent on the REP socket.  This prevents the sender's
+        # listener thread from processing the Done signal before the
+        # sender's main thread has finished processing the ack.
+        pull_id = msg.pull_id
+
+        def _post_ack_send_done():
+            self._send_pull_done_to_sender(sender_id, pull_id)
+
+        ack = PullReadyDoneAck(already_sent_indexes=already_sent_indexes)
+        return ack, _post_ack_send_done
+
+    def _handle_pull_delay(
+        self, msg: PullReadyNotif, sender_id: str
+    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+        """Handle a ``PullReadyNotif`` from the sender in **pull mode** with delay.
+        Instead of allocating NPU pages, creates lightweight
+        :class:`PDProxyMemoryObj` wrappers and stores them in ``self.data``.
+        The NPU connector will pull data on-the-fly during ``batched_to_gpu``
+        using a pipelined ping-pong approach.
+
+        Returns ``(ack, None)`` — no post-ack callback is needed because
+        the ``PullDoneSignal`` is sent later by the NPU connector via
+        ``PDTransferContext.send_done_now()``.
+
+        Done-signal flow:
+
+        The alloc socket (REQ/REP) cannot be used for asynchronous
+        notifications because ZMQ REQ/REP strictly alternates send/recv.
+        Instead, the sender binds a **separate** ZMQ PULL socket on a
+        dedicated ``pull_done_port``.  We hand each
+        :class:`PDTransferContext` a ``done_callback`` closure that
+        PUSHes a :class:`PullDoneSignal` to that port.  The NPU
+        connector calls ``transfer_context.send_done_now()`` after all
+        proxy chunks have been pulled and scattered, which invokes the
+        callback exactly once.  The sender's ``_pull_done_listener_loop``
+        receives it and releases the pinned MemObjs.
+        """
+        already_sent_indexes: list[int] = []
+        proxy_indexes: list[int] = []  # indexes into msg arrays for new proxies
+
+        for idx, key_str in enumerate(msg.keys):
+            key = CacheEngineKey.from_string(key_str)
+            if self.contains(key, pin=True):
+                already_sent_indexes.append(idx)
+            else:
+                proxy_indexes.append(idx)
+
+        num_proxies = len(proxy_indexes)
+
+        if num_proxies > 0:
+            # Build done_callback that sends PullDoneSignal to sender
+            pull_id = msg.pull_id
+
+            def done_callback():
+                self._send_pull_done_to_sender(sender_id, pull_id)
+
+            transfer_context = PDTransferContext(
+                sender_id=sender_id,
+                done_callback=done_callback,
+                num_proxies=num_proxies,
+                memory_allocator=self.memory_allocator,
+                shapes=self._kv_shapes,
+                dtypes=self._kv_dtypes,
+                fmt=self._fmt,
+            )
+
+            for proxy_seq, msg_idx in enumerate(proxy_indexes):
+                key = CacheEngineKey.from_string(msg.keys[msg_idx])
+                proxy = PDProxyMemoryObj(
+                    backing_obj=None,
+                    transfer_channel=self.transfer_channel,
+                    sender_id=sender_id,
+                    remote_buffer_uuid=msg.sender_buffer_uuids[msg_idx],
+                    remote_mem_index=msg.sender_mem_indexes[msg_idx],
+                    transfer_context=transfer_context,
+                    chunk_index=proxy_seq,
+                    shapes=self._kv_shapes,
+                    dtypes=self._kv_dtypes,
+                    fmt=self._fmt,
+                )
+                self.put(key, proxy)
+
+            logger.info(
+                "Pull mode: created %d proxies for pull_id %s from sender %s.",
+                num_proxies,
+                msg.pull_id,
+                sender_id,
+            )
+
+        return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
+
+    def _send_pull_done_to_sender(
+        self, sender_id: str, pull_id: str
+    ) -> None:
+        """Send a ``PullDoneSignal`` to the sender on its done-listener socket.
+
+        This is called from the NPU connector thread (via
+        ``PDTransferContext.send_done_now``) after all proxy objects in a
+        pull batch have been consumed and scattered into the KV cache.
+        """
+        try:
+            done_signal = PullDoneSignal(pull_id=pull_id)
+            # Use a fresh PUSH socket to the sender's done-listener port.
+            # The port is derived from sender_id (same host, done_port)
+            # or stored during peer connection setup.
+            if not hasattr(self, "_pull_done_sockets"):
+                self._pull_done_sockets: dict[str, zmq.Socket] = {}
+
+            if sender_id not in self._pull_done_sockets:
+                # Build the done URL from sender_id.
+                # sender_id format: "<host><init_port>"
+                # The done port is the pull_done_port stored during init.
+                done_url = self._sender_done_urls.get(sender_id)
+                if done_url is None:
+                    logger.error(
+                        "No done URL for sender %s. Cannot send Done signal.",
+                        sender_id,
+                    )
+                    return
+                sock = get_zmq_socket(
+                    self.zmq_context, done_url, "tcp", zmq.PUSH, "connect"
+                )
+                self._pull_done_sockets[sender_id] = sock
+
+            self._pull_done_sockets[sender_id].send(
+                msgspec.msgpack.encode(done_signal)
+            )
+            logger.info(
+                "Sent PullDoneSignal for pull_id %s to sender %s.",
+                pull_id,
+                sender_id,
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to send PullDoneSignal for pull_id %s: %s",
+                pull_id,
+                e,
+            )
+
+    # ── Alloc / message loop ──────────────────────────────────
+
     def _mem_alloc_loop(self):
-        """Memory allocation loop that speaks the Ascend PD protocol."""
+        """Message loop for the receiver side.
+
+        Handles both push-mode ``AllocRequest`` and pull-mode
+        ``PullReadyNotif`` messages on the same REP socket.
+        """
+        # Set the NPU device context for this thread so that HCCL RDMA
+        # operations (used by pull-eager mode's batched_read) work
+        # correctly on non-default devices (e.g. TP1 on npu:1).
+        torch.npu.set_device(self.transfer_channel.handle_device)
+
+        self.alloc_side_channel.setsockopt(zmq.RCVTIMEO, 1000)
+
         while self.running:
             try:
-                alloc_req_bytes = self.alloc_side_channel.recv()
-                alloc_req = msgspec.msgpack.decode(alloc_req_bytes, type=AscendPDMsg)
-                assert isinstance(alloc_req, AllocRequest), (
-                    f"Expected AllocRequest, got {type(alloc_req)}"
+                msg_bytes = self.alloc_side_channel.recv()
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(
+                    "Failed to receive in mem alloc loop: %s", str(e)
                 )
+                if self.running:
+                    time.sleep(0.01)
+                continue
 
-                alloc_resp = self._allocate_and_put(alloc_req)
-                self.alloc_side_channel.send(msgspec.msgpack.encode(alloc_resp))
+            try:
+                msg = msgspec.msgpack.decode(msg_bytes, type=AscendPDMsg)
+
+                if isinstance(msg, AllocRequest):
+                    # Push mode: allocate NPU memory and return refs
+                    resp = self._allocate_and_put(msg)
+                    self.alloc_side_channel.send(msgspec.msgpack.encode(resp))
+
+                elif isinstance(msg, PullReadyNotif):
+                    # Pull mode: create proxies and ack.
+                    # The sender_id and done_url come from the message.
+                    sender_id = msg.sender_id
+                    # Register the done URL so we can send PullDoneSignal
+                    if sender_id not in self._sender_done_urls:
+                        self._sender_done_urls[sender_id] = msg.sender_done_url
+                        logger.info(
+                            "Pull mode: registered done URL %s for sender %s",
+                            msg.sender_done_url,
+                            sender_id,
+                        )
+                    ack, post_ack_fn = self._handle_pull_ready(msg, sender_id)
+                    # Send the ack FIRST so the sender's main thread can
+                    # process it and register _pull_pending before the
+                    # PullDoneSignal arrives on the listener thread.
+                    self.alloc_side_channel.send(msgspec.msgpack.encode(ack))
+                    if post_ack_fn is not None:
+                        post_ack_fn()
+
+                else:
+                    logger.error(
+                        "Unexpected message type in alloc loop: %s",
+                        type(msg),
+                    )
+                    # Must reply to keep REQ/REP in sync
+                    self.alloc_side_channel.send(b"")
 
             except Exception as e:
                 logger.error("Failed to process mem alloc loop: %s", str(e))
+                # Must send *something* to keep the REP socket in sync,
+                # otherwise it enters the "must send" state permanently
+                # and every subsequent recv() fails with
+                # "Operation cannot be accomplished in current state".
+                try:
+                    self.alloc_side_channel.send(b"")
+                except Exception:
+                    pass
                 if self.running:
                     time.sleep(0.01)

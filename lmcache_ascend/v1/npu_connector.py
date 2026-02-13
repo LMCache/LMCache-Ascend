@@ -17,7 +17,8 @@ from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, Memor
 import torch
 
 # First Party
-from lmcache_ascend.v1.proxy_memory_obj import P2PTransferContext, ProxyMemoryObj
+from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
+from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -878,7 +879,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         After all proxy objects are processed, sends the P2P Done signal
         to release the remote peer's pinned resources.
         """
-        transfer_contexts: Set[P2PTransferContext] = set()
+        transfer_contexts: Set[AscendBaseTransferContext] = set()
 
         # Separate proxy and non-proxy items
         proxy_items = []

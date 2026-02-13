@@ -436,7 +436,17 @@ class HcclChannel(BaseTransferChannel):
         while self.running:
             try:
                 req_bytes = self.init_side_channel.recv()
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger.error(
+                    "Failed to receive in initialization loop: %s", str(e)
+                )
+                if self.running:
+                    time.sleep(0.01)
+                continue
 
+            try:
                 logger.info("Received initialization request")
 
                 req = msgspec.msgpack.decode(req_bytes, type=Union[HcclMsg, SideMsg])
@@ -447,11 +457,16 @@ class HcclChannel(BaseTransferChannel):
 
                 logger.info("Sent initialization request response")
 
-            except zmq.Again:
-                continue
-
             except Exception as e:
                 logger.error("Failed to process initialization loop: %s", str(e))
+                # Must send *something* to keep the REP socket in sync,
+                # otherwise it enters the "must send" state permanently
+                # and every subsequent recv() fails with
+                # "Operation cannot be accomplished in current state".
+                try:
+                    self.init_side_channel.send(b"")
+                except Exception:
+                    pass
                 if self.running:
                     time.sleep(0.01)
 
@@ -669,7 +684,17 @@ class HcclChannel(BaseTransferChannel):
         buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        raise NotImplementedError
+        """
+        Read a batch of data through the channel.
+
+        :param buffers: A list of bytes or MemoryObj to store the read data.
+        :param transfer_spec: Additional specifications for the transfer.
+
+        :return: Number of successfully transferred objects.
+        """
+        self.submit_batched_read(buffers, transfer_spec)
+        self.transport_stream.synchronize()
+        return len(buffers)
 
     async def async_batched_write(
         self,

@@ -23,10 +23,13 @@ from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetad
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 import torch
 
+# First Party
+from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
+
 logger = init_logger(__name__)
 
 
-class P2PTransferContext:
+class P2PTransferContext(AscendBaseTransferContext):
     """Shared context for a batch of ProxyMemoryObjs from the same P2P lookup.
 
     Manages the lifecycle of a P2P pull-mode transfer, including sending the
@@ -52,21 +55,19 @@ class P2PTransferContext:
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         use_npu: bool = False,
     ):
+        super().__init__(
+            num_proxies=num_proxies,
+            memory_allocator=memory_allocator,
+            shapes=shapes,
+            dtypes=dtypes,
+            fmt=fmt,
+        )
         self._p2p_backend = p2p_backend
         self._target_peer_init_url = target_peer_init_url
         self._lookup_id = lookup_id
         self._remote_buffer_uuids = remote_buffer_uuids
         self._remote_mem_indexes = remote_mem_indexes
         self._loop = loop
-        self._ref_count = num_proxies
-        self._done_sent = False
-        self._lock = threading.Lock()
-
-        # Buffer allocation metadata for ping-pong pipeline
-        self._memory_allocator = memory_allocator
-        self._shapes = shapes
-        self._dtypes = dtypes
-        self._fmt = fmt
         self._use_npu = use_npu
         logger.info(
             f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
@@ -75,6 +76,10 @@ class P2PTransferContext:
             f"num_proxies={num_proxies}, use_npu={use_npu}, "
             f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
         )
+
+    @property
+    def _allocator_type(self) -> str:
+        return "gpu" if self._use_npu else "cpu"
 
     @property
     def lookup_id(self) -> str:
@@ -92,78 +97,7 @@ class P2PTransferContext:
     def remote_mem_indexes(self) -> List[int]:
         return self._remote_mem_indexes
 
-    @property
-    def max_pipeline_depth(self) -> int:
-        """Compute the max micro-batch size from the NPU buffer capacity.
-
-        Returns ``npu_buffer_size // (chunk_size * 2)`` so that two
-        ping-pong pools fit entirely inside the registered buffer,
-        clamped to [1, ∞).  Falls back to a default of 4 when the
-        allocator is unavailable or not using NPU memory.
-        """
-        _DEFAULT_PIPELINE_DEPTH = 4
-        if self._memory_allocator is None:
-            return _DEFAULT_PIPELINE_DEPTH
-
-        allocator = (
-            self._memory_allocator.gpu_allocator
-            if self._use_npu
-            else self._memory_allocator.cpu_allocator
-        )
-        chunk_bytes = allocator.align_bytes  # one chunk's physical size
-        buffer_bytes = allocator.buffer_size
-        # Two pools must fit in the buffer
-        depth = buffer_bytes // (chunk_bytes * 2)
-        return max(depth, 1)
-
-    def allocate_buffers(self, count: int) -> List[MemoryObj]:
-        """Allocate scratch buffers from the registered memory pool.
-
-        Used by the NPU connector for ping-pong pipeline buffers.
-        """
-        assert self._memory_allocator is not None, (
-            "memory_allocator not set on P2PTransferContext"
-        )
-        allocator_type = "gpu" if self._use_npu else "cpu"
-        result = self._memory_allocator.batched_allocate(
-            self._shapes, self._dtypes, count, self._fmt, allocator_type
-        )
-        if result is None:
-            raise RuntimeError(
-                f"Failed to allocate {count} ping-pong buffers "
-                f"from {allocator_type} allocator"
-            )
-        return result
-
-    def release_buffers(self, buffers: List[MemoryObj]) -> None:
-        """Release scratch buffers back to the memory pool."""
-        if not buffers:
-            return
-        assert self._memory_allocator is not None
-        allocator_type = "gpu" if self._use_npu else "cpu"
-        self._memory_allocator.batched_free(buffers, allocator_type)
-
-    def decref(self) -> None:
-        """Decrement reference count. Sends Done signal when count reaches 0."""
-        send_done = False
-        with self._lock:
-            self._ref_count -= 1
-            if self._ref_count <= 0 and not self._done_sent:
-                self._done_sent = True
-                send_done = True
-
-        if send_done:
-            self._send_done_async()
-
-    def send_done_now(self) -> None:
-        """Force send the Done signal immediately. Idempotent."""
-        with self._lock:
-            if self._done_sent:
-                return
-            self._done_sent = True
-        self._send_done_async()
-
-    def _send_done_async(self) -> None:
+    def _send_done(self) -> None:
         """Send the Done signal to the remote peer via the event loop."""
         try:
             future = asyncio.run_coroutine_threadsafe(
@@ -203,7 +137,7 @@ class ProxyMemoryObj(MemoryObj):
         target_peer_init_url: str,
         remote_buffer_uuid: str,
         remote_mem_index: int,
-        transfer_context: P2PTransferContext,
+        transfer_context: AscendBaseTransferContext,
         chunk_index: int,
         shapes: Optional[List[torch.Size]] = None,
         dtypes: Optional[List[torch.dtype]] = None,
@@ -220,7 +154,7 @@ class ProxyMemoryObj(MemoryObj):
                 receiver_id for the transfer channel.
             remote_buffer_uuid: Opaque UUID identifying the remote buffer.
             remote_mem_index: Mem index within the remote buffer.
-            transfer_context: Shared context managing the P2P transfer lifecycle.
+            transfer_context: Shared context managing the transfer lifecycle.
             chunk_index: The index of this chunk within the batch.
             shapes: Tensor shapes (required when backing_obj is None).
             dtypes: Tensor dtypes (required when backing_obj is None).
@@ -271,8 +205,8 @@ class ProxyMemoryObj(MemoryObj):
         return self._backing_obj
 
     @property
-    def transfer_context(self) -> P2PTransferContext:
-        """The shared P2P transfer context."""
+    def transfer_context(self) -> AscendBaseTransferContext:
+        """The shared transfer context."""
         return self._transfer_context
 
     def set_backing_obj(self, obj: MemoryObj) -> None:

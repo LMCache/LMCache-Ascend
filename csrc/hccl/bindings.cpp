@@ -297,7 +297,7 @@ PYBIND11_MODULE(hccl_npu_comms, m) {
             check_hccl_result(
                 self.ReadBatch(reinterpret_cast<HcclConn>(conn_handle), reads,
                                reinterpret_cast<aclrtStream>(stream_ptr)),
-                "Failed to write batch");
+                "Failed to read batch");
           },
-          py::arg("conn_handle"), py::arg("writes"), py::arg("stream"));
+          py::arg("conn_handle"), py::arg("reads"), py::arg("stream"));
 }

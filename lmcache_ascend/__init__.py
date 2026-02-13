@@ -18,6 +18,8 @@ def _patch_config():
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
+        "description": "Whether to use NPU memory for P2P transfers. "
+        "If True, the P2P transfers will be performed on NPU. "
     }
 
     # Add new p2p_npu_buffer_size config
@@ -50,6 +52,38 @@ def _patch_config():
         "and p2p_pull_mode is set to True.",
     }
 
+    # Add new pd_pull_mode config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_mode"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to use pull mode for PD disaggregated transfers. "
+        "In pull mode the receiver (decoder) reads KV cache data from the "
+        "sender (prefiller) on-demand during batched_to_gpu, using a pipelined "
+        "ping-pong approach that overlaps RDMA reads with KV cache scatter. "
+        "This avoids bulk NPU memory pre-allocation on the receiver side.",
+    }
+
+    # Add new pd_delay_pull config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_delay_pull"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to delay the pull operation for PD disaggregated transfers. "
+        "If True, the pull operation will be delayed until the data is actually needed. "
+        "This can help improve performance in some cases. This config is only used when pd_pull_mode is set to True.",
+    }
+
+    # Add new pd_pull_done_port config (list of ports, one per TP rank)
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_done_port"] = {
+        "type": list,
+        "default": None,
+        "description": "List of ports (one per TP rank) on which the sender "
+        "binds a ZMQ PULL socket to receive Done signals from the receiver "
+        "in PD pull mode.  If not set, the port is derived as "
+        "peer_alloc_port + 100.  Example: [18100, 18101].",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
@@ -67,6 +101,16 @@ def _patch_config():
         deprecated_configs=lmcache.v1.config._DEPRECATED_CONFIGS,
         namespace_extras=namespace_extras,
     )
+
+    # If lmcache.integration.vllm.utils was already imported before this
+    # patch ran, its module-level ``LMCacheEngineConfig`` still points to
+    # the OLD class whose ``_from_file`` closure now iterates the mutated
+    # _CONFIG_DEFINITIONS dict (with keys like ``p2p_use_npu``), while the
+    # OLD ``__init__`` doesn't accept them → TypeError.  Fix by updating
+    # the stale reference.
+    _utils_mod = sys.modules.get("lmcache.integration.vllm.utils")
+    if _utils_mod is not None:
+        _utils_mod.LMCacheEngineConfig = lmcache.v1.config.LMCacheEngineConfig
 
 
 def _patch_ops():
@@ -227,6 +271,8 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    _patch_config()
+
     if _build_info.__framework_name__ == "pytorch":
         # Third Party
         # TODO (gingfung): Currently we patch all the cuda calls
@@ -235,7 +281,6 @@ if not LMCACHE_ASCEND_PATCHED:
         # to avoid falling into non_cuda_equivalent
         from torch_npu.contrib import transfer_to_npu  # noqa: F401
 
-    _patch_config()
     _patch_ops()
     _patch_hash_token()
 
