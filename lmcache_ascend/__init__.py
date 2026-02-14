@@ -11,6 +11,10 @@ LMCACHE_ASCEND_PATCHED = False
 def _is_sglang_runtime():
     return "sglang" in sys.modules or any("sglang" in arg for arg in sys.argv)
 
+def _is_vllm_runtime():
+    return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
+
 def _patch_ops():
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
@@ -177,12 +181,17 @@ def _patch_sgl():
     from lmcache_ascend.integration.sglang.sglang_adapter import (
         sglang_init_lmcache_engine,
         LMCacheConnector__init__,
+        LMCacheLayerwiseConnector_global_min_tokens,
         LMCacheLayerwiseConnector_start_load_kv,
     )
 
     lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
 
     lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
+
+    lmc_sglang_adapter.LMCacheLayerwiseConnector.global_min_tokens = (
+        LMCacheLayerwiseConnector_global_min_tokens
+    )
 
     lmc_sglang_adapter.LMCacheLayerwiseConnector.start_load_kv = (
         LMCacheLayerwiseConnector_start_load_kv
@@ -206,6 +215,7 @@ if not LMCACHE_ASCEND_PATCHED:
     import sys
 
     is_sgl = _is_sglang_runtime()
+    is_vllm = _is_vllm_runtime()
 
     if _build_info.__framework_name__ == "pytorch":
         # Third Party
@@ -229,9 +239,9 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if is_sgl:
         _patch_sgl()
-    else:
+    elif is_vllm:
         _patch_init_engine()
-    
+
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()
 

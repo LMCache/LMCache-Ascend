@@ -6,6 +6,7 @@ import uuid
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
 import torch
+import torch.distributed as dist
 import itertools
 
 # First Party
@@ -151,20 +152,34 @@ def LMCacheConnector__init__(
     self.tp_size = tp_size
     self.rank = local_rank  # Use local_rank for torch.device() calls
 
-    # self.kvcaches = list(k_pool) + list(v_pool)
-
-    # self.kvcaches = k_pool + v_pool
-
-    # self.kvcaches = []
-    # self.kvcaches.extend(k_pool)
-    # self.kvcaches.extend(v_pool)
-
-    # NOTE(niming): This creates a zero-copy iterator instead of a new large list
-    self.kvcaches = list(itertools.chain(k_pool, v_pool))
+    # NOTE(niming): NPU expects kvcaches = [K_tensor, V_tensor]
+    # where K_tensor.shape = [layer_num, num_blocks, block_size, head_num, head_dim]
+    # and V_tensor.shape = [layer_num, num_blocks, block_size, head_num, head_dim]
+    self.kvcaches = [k_pool, v_pool]
 
     self.num_layer = sgl_config.num_hidden_layers
 
     self.lmcache_engine.post_init(kvcaches=self.kvcaches)
+
+
+@torch.no_grad()
+def LMCacheLayerwiseConnector_global_min_tokens(
+    self, local_tokens: int, tp_group: dist.ProcessGroup, device: torch.device
+):
+    """Synchronize min tokens across TP ranks, ensuring NPU stability under load."""
+    # If tensor parallel size is 1, no need for all_reduce
+    if self.tp_size == 1:
+        return local_tokens
+
+    t = torch.tensor([local_tokens], dtype=torch.int32, device=device)
+    # NOTE(niming):Mandatory synchronization for TP > 1 on NPU/HCCL.
+    # Under high request loads, the NPU task manager may experience race conditions
+    # between compute kernels and HCCL all_reduce, leading to a permanent deadlock.
+    torch.cuda.synchronize()
+
+    dist.all_reduce(t, op=dist.ReduceOp.MIN, group=tp_group)
+
+    return int(t.item())
 
 
 def LMCacheLayerwiseConnector_start_load_kv(self, load_metadata: LoadMetadata) -> int:
