@@ -36,6 +36,11 @@ import zmq.asyncio
 
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import P2PTransferContext, ProxyMemoryObj
+from lmcache_ascend.v1.storage_backend.utils import (
+    build_channel_transfer_spec,
+    release_memory_objects,
+    resolve_memory_format,
+)
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 if TYPE_CHECKING:
@@ -169,9 +174,7 @@ class AscendP2PBackend(P2PBackend):
 
         self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
         self.dtypes = self.memory_allocator.cpu_allocator.dtypes
-        self.fmt: MemoryFormat = (
-            MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
-        )
+        self.fmt: MemoryFormat = resolve_memory_format(metadata.use_mla)
 
         buffer_ptrs = [self.memory_allocator.cpu_allocator.buffer_ptr]
         buffer_sizes = [self.memory_allocator.cpu_allocator.buffer_size]
@@ -366,11 +369,11 @@ class AscendP2PBackend(P2PBackend):
                 remote_buffer_uuids = msg.buffer_uuids
                 remote_mem_indexes = msg.mem_indexes
 
-            channel_transfer_spec = {
-                "receiver_id": receiver_id,
-                "remote_buffer_uuids": remote_buffer_uuids[:num_hit_chunks],
-                "remote_mem_indexes": remote_mem_indexes[:num_hit_chunks],
-            }
+            channel_transfer_spec = build_channel_transfer_spec(
+                receiver_id,
+                remote_buffer_uuids[:num_hit_chunks],
+                remote_mem_indexes[:num_hit_chunks],
+            )
             await self.transfer_channel.async_batched_write(
                 objects=mem_objs,
                 transfer_spec=channel_transfer_spec,
@@ -388,9 +391,7 @@ class AscendP2PBackend(P2PBackend):
             return P2PErrorMsg(error_code=P2PErrorCode.P2P_SERVER_ERROR)
         finally:
             if should_release and mem_objs is not None:
-                for mem_obj in mem_objs:
-                    mem_obj.ref_count_down()
-                    mem_obj.unpin()
+                release_memory_objects(mem_objs, unpin=True)
 
     async def _handle_batched_lookup_and_get_done(
         self, msg: AscendBatchedLookupAndGetDoneMsg
@@ -400,9 +401,7 @@ class AscendP2PBackend(P2PBackend):
 
         if lookup_id in self.pending_pull_resources:
             mem_objs = self.pending_pull_resources.pop(lookup_id)
-            for mem_obj in mem_objs:
-                mem_obj.ref_count_down()
-                mem_obj.unpin()
+            release_memory_objects(mem_objs, unpin=True)
             logger.info("Released resources for lookup_id %s", lookup_id)
         else:
             logger.warning("No pending resources found for lookup_id %s", lookup_id)
@@ -445,8 +444,7 @@ class AscendP2PBackend(P2PBackend):
                     key.to_string(),
                 )
                 # Release already-allocated objects before returning
-                for allocated_obj in mem_objs:
-                    allocated_obj.ref_count_down()
+                release_memory_objects(mem_objs)
                 return [], []
 
             mem_objs.append(mem_obj)
@@ -557,11 +555,11 @@ class AscendP2PBackend(P2PBackend):
 
         read_success = False
         try:
-            channel_transfer_spec = {
-                "receiver_id": target_peer_init_url,
-                "remote_buffer_uuids": remote_buffer_uuids,
-                "remote_mem_indexes": remote_mem_indexes,
-            }
+            channel_transfer_spec = build_channel_transfer_spec(
+                target_peer_init_url,
+                remote_buffer_uuids,
+                remote_mem_indexes,
+            )
             await self.transfer_channel.async_batched_read(
                 buffers=hit_mem_objs,
                 transfer_spec=channel_transfer_spec,
@@ -698,8 +696,7 @@ class AscendP2PBackend(P2PBackend):
                     self._cleanup_memory_objects(mem_objs)
                     return []
 
-        for missed_mem_obj in mem_objs[num_hit_chunks:]:
-            missed_mem_obj.ref_count_down()
+        release_memory_objects(mem_objs[num_hit_chunks:])
         return hit_mem_objs
 
     async def async_batched_submit_put_task(

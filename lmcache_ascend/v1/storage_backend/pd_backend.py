@@ -36,6 +36,13 @@ import zmq
 
 # First Party
 from lmcache_ascend.v1.pd_proxy_memory_obj import PDProxyMemoryObj, PDTransferContext
+from lmcache_ascend.v1.storage_backend.utils import (
+    adjust_last_chunk_shape,
+    allocate_with_retry,
+    build_channel_transfer_spec,
+    release_memory_objects,
+    resolve_memory_format,
+)
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 logger = init_logger(__name__)
@@ -228,9 +235,7 @@ class AscendPDBackend(PDBackend):
 
         # Cache metadata for proxy creation on receiver side
         self._metadata = metadata
-        self._fmt: MemoryFormat = (
-            MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
-        )
+        self._fmt = resolve_memory_format(metadata.use_mla)
         self._kv_shapes = [torch.Size(metadata.kv_shape)]
         self._kv_dtypes = [metadata.kv_dtype]
 
@@ -243,7 +248,7 @@ class AscendPDBackend(PDBackend):
         torch.npu.set_device(npu_corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
-        fmt = MemoryFormat.KV_MLA_FMT if metadata.use_mla else MemoryFormat.KV_2LTD
+        fmt = resolve_memory_format(metadata.use_mla)
         sizes = [torch.Size(metadata.kv_shape)]
         dtypes = [metadata.kv_dtype]
         total_size = get_size_bytes(sizes, dtypes)
@@ -402,8 +407,7 @@ class AscendPDBackend(PDBackend):
                 entry = self._pull_pending.pop(pull_id, None)
             if entry is not None:
                 _pinned_at, pinned_objs = entry
-                for mem_obj in pinned_objs:
-                    mem_obj.ref_count_down()
+                release_memory_objects(pinned_objs)
                 logger.warning(
                     "Pull mode: TTL expired for pull_id %s — released "
                     "%d pinned MemObjs (receiver may have crashed).",
@@ -521,19 +525,16 @@ class AscendPDBackend(PDBackend):
 
         if mem_objs_to_send:
             # Build transfer spec with UUID-based remote refs
-            channel_transfer_spec = {
-                "receiver_id": receiver_id,
-                "remote_buffer_uuids": send_buffer_uuids,
-                "remote_mem_indexes": send_mem_indexes,
-            }
+            channel_transfer_spec = build_channel_transfer_spec(
+                receiver_id, send_buffer_uuids, send_mem_indexes,
+            )
 
             self.transfer_channel.batched_write(
                 objects=mem_objs_to_send,
                 transfer_spec=channel_transfer_spec,
             )
 
-            for mem_obj in mem_objs_to_send:
-                mem_obj.ref_count_down()
+            release_memory_objects(mem_objs_to_send)
         else:
             logger.debug(
                 "All memory objects already sent to remote peer. "
@@ -643,8 +644,7 @@ class AscendPDBackend(PDBackend):
                     )
 
             if early_done:
-                for mem_obj in pinned_objs:
-                    mem_obj.ref_count_down()
+                release_memory_objects(pinned_objs)
                 logger.info(
                     "Pull mode: early PullDoneSignal for pull_id %s — "
                     "released %d pinned MemObjs immediately.",
@@ -696,8 +696,7 @@ class AscendPDBackend(PDBackend):
                 )
                 return
         _pinned_at, pinned_objs = entry
-        for mem_obj in pinned_objs:
-            mem_obj.ref_count_down()
+        release_memory_objects(pinned_objs)
         logger.info(
             "Pull mode: released %d pinned MemObjs for pull_id %s.",
             len(pinned_objs),
@@ -730,19 +729,13 @@ class AscendPDBackend(PDBackend):
                 continue
 
             # Adjust shape for last (possibly partial) chunk
-            alloc_shape = list(shape)
-            if idx == total_allocs - 1:
-                token_dim = fmt.token_dim()
-                alloc_shape[token_dim] = alloc_request.last_chunk_toks
+            alloc_shape = adjust_last_chunk_shape(
+                shape, idx, total_allocs, fmt, alloc_request.last_chunk_toks,
+            )
 
-            mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
-
-            # Busy-loop until allocation succeeds
-            wait_time = 0.01
-            while mem_obj is None:
-                logger.warning("Failed to allocate memory object, retrying...")
-                time.sleep(wait_time)
-                mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
+            mem_obj = allocate_with_retry(
+                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+            )
 
             # Resolve UUID + page index for this allocation
             buf_uuid, mem_idx = self.transfer_channel.get_local_buffer_refs([mem_obj])
@@ -805,30 +798,22 @@ class AscendPDBackend(PDBackend):
                 continue
 
             # Adjust shape for last (possibly partial) chunk
-            alloc_shape = list(shape)
-            if idx == total_allocs - 1:
-                token_dim = fmt.token_dim()
-                alloc_shape[token_dim] = msg.last_chunk_toks
+            alloc_shape = adjust_last_chunk_shape(
+                shape, idx, total_allocs, fmt, msg.last_chunk_toks,
+            )
 
-            mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
-
-            # Busy-loop until allocation succeeds
-            wait_time = 0.01
-            while mem_obj is None:
-                logger.warning("Failed to allocate memory object, retrying...")
-                time.sleep(wait_time)
-                mem_obj = self.allocate(torch.Size(alloc_shape), dtype, fmt)
+            mem_obj = allocate_with_retry(
+                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+            )
 
             mem_objs.append(mem_obj)
             remote_buffer_uuids.append(msg.sender_buffer_uuids[idx])
             remote_mem_indexes.append(msg.sender_mem_indexes[idx])
             mem_keys.append(key)
 
-        channel_transfer_spec = {
-            "receiver_id": sender_id,
-            "remote_buffer_uuids": remote_buffer_uuids,
-            "remote_mem_indexes": remote_mem_indexes,
-        }
+        channel_transfer_spec = build_channel_transfer_spec(
+            sender_id, remote_buffer_uuids, remote_mem_indexes,
+        )
         self.transfer_channel.batched_read(
             buffers=mem_objs,
             transfer_spec=channel_transfer_spec,
