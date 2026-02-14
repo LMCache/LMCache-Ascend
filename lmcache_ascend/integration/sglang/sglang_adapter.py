@@ -6,10 +6,7 @@ import uuid
 # Third Party
 from sglang.srt.configs.model_config import ModelConfig
 import torch
-<<<<<<< HEAD
 import torch.distributed as dist
-=======
->>>>>>> 11b4e37469b203fcb447226bce5237512854b672
 import itertools
 
 # First Party
