@@ -1270,7 +1270,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
     - kvcaches: Tuple[List[Tensor], List[Tensor]]
       - The first element is a list of key tensors, one per layer.
       - The second element is a list of value tensors, one per layer.
-    - Each tensor: [page_buffer_size, head_num, head_size]
+    - Each tensor: [num_blocks, block_size, head_num, head_size]
 
     The connector manages the transfer of KV cache data between CPU and GPU
     memory for SGLang using pointer arrays for efficient access.
@@ -1334,7 +1334,6 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
 
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        logger.info("batched_to_gpu....................................")
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
@@ -1450,7 +1449,6 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
 
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
-        logger.info("batched_from_gpu....................................")
         self.initialize_kvcaches_ptr(**kwargs)
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
