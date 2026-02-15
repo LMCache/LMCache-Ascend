@@ -850,33 +850,39 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                         self.to_gpu(memory_obj, start, end, **kwargs)
             self.load_stream.synchronize()
 
+    def _clear_proxy_batch(self, batch) -> None:
+        """Clear the backing objects of the proxy batch."""
+        for proxy, _, _ in batch:
+            proxy.clear_backing_obj()
+        return None
+
     def _scatter_proxy_batch(self, batch, event, **kwargs):
-        """Wait for a read event, scatter proxies to KV cache, clear backing refs."""
+        """Wait for a read event, scatter proxies to KV cache.
+
+        Enqueues work on ``load_stream``.  The caller is responsible for
+        recording a scatter-done event afterwards if needed for
+        cross-stream synchronization.
+        """
         if event is not None:
             self.load_stream.wait_event(event)
         with torch.cuda.stream(self.load_stream):
             for proxy, start, end in batch:
                 self.to_gpu(proxy.backing_obj, start, end, **kwargs)
-        for proxy, _, _ in batch:
-            proxy.clear_backing_obj()
 
     def _remote_batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
         """Handle batched_to_gpu when ProxyMemoryObjs are present.
 
-        Uses a ping-pong pipeline to overlap remote data fetching (on the
-        HCCL transport stream) with KV cache scatter (on the load stream):
+        Uses a ping-pong pipeline with **event-based** cross-stream
+        synchronization to overlap remote data fetching (on the HCCL
+        transport stream) with KV cache scatter (on the load stream).
 
-            transport_stream: [read_batch_0]──E0  [read_batch_2]──E2  ...
-            load_stream:            wait_E0 [scatter_0]  wait_E2 [scatter_2] ...
-                                    [read_batch_1]──E1  [read_batch_3]──E3  ...
-                                          wait_E1 [scatter_1]  wait_E3 [scatter_3] ...
 
         Two pools of PIPELINE_DEPTH buffers are allocated from the
-        P2PTransferContext's registered memory and alternated (ping-pong).
-        This limits peak memory to 2 × PIPELINE_DEPTH chunks regardless
+        transfer context's registered memory and alternated (ping-pong).
+        This limits peak memory to 2 x PIPELINE_DEPTH chunks regardless
         of the total number of proxy objects.
 
-        After all proxy objects are processed, sends the P2P Done signal
+        After all proxy objects are processed, sends the Done signal
         to release the remote peer's pinned resources.
         """
         transfer_contexts: Set[AscendBaseTransferContext] = set()
@@ -898,7 +904,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             # Derive pipeline depth from NPU buffer capacity so that
             # two full ping-pong pools fit in registered memory.
             pipeline_depth = first_ctx.max_pipeline_depth
-            logger.info(
+            logger.debug(
                 "P2P pipeline depth = %d (proxy_items=%d)",
                 pipeline_depth,
                 len(proxy_items),
@@ -917,10 +923,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 for i in range(0, len(proxy_items), pipeline_depth)
             ]
 
-            prev_event = None
+            prev_read_event = None
             prev_batch = None
 
-            for batch in micro_batches:
+            for batch_idx, batch in enumerate(micro_batches):
                 pool = pools[current_pool]
 
                 # Assign backing buffers from current pool to proxies
@@ -929,23 +935,37 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
                 proxies = [item[0] for item in batch]
 
-                # Submit read for current batch → transport_stream
-                cur_event = ProxyMemoryObj.submit_resolve_batch(proxies)
+                # Submit RDMA read for current batch → transport_stream.
+                cur_read_event = ProxyMemoryObj.submit_resolve_batch(
+                    proxies
+                )
 
-                # While current batch is being read, scatter previous batch
+                # While the current batch is being read on
+                # transport_stream, scatter the previous batch on
+                # load_stream (waits for its RDMA read event).
                 if prev_batch is not None:
-                    self._scatter_proxy_batch(prev_batch, prev_event, **kwargs)
+                    self._scatter_proxy_batch(
+                        prev_batch, prev_read_event, **kwargs,
+                    )
+                    # TODO (gingfung): investigate whether 
+                    # we need to record scatter-done event on load_stream so the
+                    # next RDMA into the same pool waits for it.
+                    self._clear_proxy_batch(prev_batch)
 
-                prev_event = cur_event
+                prev_read_event = cur_read_event
                 prev_batch = batch
                 current_pool = 1 - current_pool  # toggle ping-pong
 
-            # Drain: scatter the last micro-batch
+            # Drain: scatter the last micro-batch.
             if prev_batch is not None:
-                self._scatter_proxy_batch(prev_batch, prev_event, **kwargs)
-
+                self._scatter_proxy_batch(
+                    prev_batch, prev_read_event, **kwargs,
+                )
+                self._clear_proxy_batch(prev_batch)
+            # A CPU sync is needed here because we must guarantee all
+            # scatter work is complete before releasing the ping-pong
+            # buffers and sending the Done signal.
             self.load_stream.synchronize()
-
             # Release ping-pong buffers back to the allocator
             first_ctx.release_buffers(pool_a)
             first_ctx.release_buffers(pool_b)
@@ -955,7 +975,13 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             with torch.cuda.stream(self.load_stream):
                 for memory_obj, start, end in non_proxy_items:
                     self.to_gpu(memory_obj, start, end, **kwargs)
-            self.load_stream.synchronize()
+
+        # Mark all proxy items as consumed.  After this point the remote
+        # sender's pinned memory will be released (via DoneSignal),
+        # so the proxy's remote buffer references become stale and must
+        # not be re-used for another transfer.
+        for proxy, _, _ in proxy_items:
+            proxy.mark_consumed()
 
         # Send Done signal to release remote resources
         for ctx in transfer_contexts:

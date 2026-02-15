@@ -169,6 +169,8 @@ class ProxyMemoryObj(MemoryObj):
         self._transfer_context = transfer_context
         self._chunk_index = chunk_index
         self._resolved = False
+        self._own_ref_count = 1  # Intrinsic ref count for proxy lifecycle
+        self._consumed = False  # True after data scattered into KV cache
 
         # Store allocation metadata for deferred buffer operations
         if backing_obj is not None:
@@ -198,6 +200,23 @@ class ProxyMemoryObj(MemoryObj):
     def resolved(self) -> bool:
         """Whether the data has been fetched from remote."""
         return self._resolved
+
+    @property
+    def consumed(self) -> bool:
+        """Whether this proxy has been fully consumed (data scattered to
+        KV cache).  Consumed proxies hold stale remote references and
+        must not be re-used for another transfer."""
+        return self._consumed
+
+    def mark_consumed(self) -> None:
+        """Mark this proxy as consumed.
+
+        Called by the NPU connector after the proxy's data has been
+        scattered into the paged KV cache.  Once consumed, the remote
+        sender's pinned memory may be released, so the proxy's remote
+        buffer references are no longer valid.
+        """
+        self._consumed = True
 
     @property
     def backing_obj(self) -> Optional[MemoryObj]:
@@ -307,6 +326,7 @@ class ProxyMemoryObj(MemoryObj):
     @staticmethod
     def submit_resolve_batch(
         proxies: List["ProxyMemoryObj"],
+        wait_event: Optional[torch.npu.Event] = None,
     ) -> Optional[torch.npu.Event]:
         """Submit a batched read for proxies without waiting for completion.
 
@@ -322,6 +342,10 @@ class ProxyMemoryObj(MemoryObj):
             proxies: List of ProxyMemoryObjs to resolve. All must share
                 the same transfer channel and target peer, and have
                 backing buffers assigned.
+            wait_event: Optional NPU event that the transport stream
+                should wait on before issuing the RDMA reads.  Used for
+                ping-pong pipelining so the transport stream does not
+                overwrite a buffer that the load stream is still reading.
 
         Returns:
             An NPU event if submission was asynchronous, None if resolved
@@ -359,6 +383,7 @@ class ProxyMemoryObj(MemoryObj):
         event = channel.submit_batched_read(
             buffers=buffers,
             transfer_spec=channel_transfer_spec,
+            wait_event=wait_event,
         )
 
         for p in unresolved:
@@ -474,18 +499,18 @@ class ProxyMemoryObj(MemoryObj):
         return False
 
     def ref_count_up(self) -> None:
+        self._own_ref_count += 1
         if self._backing_obj is not None:
             self._backing_obj.ref_count_up()
 
     def ref_count_down(self) -> None:
+        self._own_ref_count -= 1
         if self._backing_obj is not None:
             self._backing_obj.ref_count_down()
         self._transfer_context.decref()
 
     def get_ref_count(self) -> int:
-        if self._backing_obj is not None:
-            return self._backing_obj.get_ref_count()
-        return 0
+        return self._own_ref_count
 
     def get_num_tokens(self) -> int:
         if self._backing_obj is not None:

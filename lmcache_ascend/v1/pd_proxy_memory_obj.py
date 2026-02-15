@@ -94,7 +94,7 @@ class PDTransferContext(AscendBaseTransferContext):
         self._done_callback = done_callback
         self._loop = None
 
-        logger.info(
+        logger.debug(
             "PDTransferContext: sender_id=%s, num_proxies=%d, "
             "shapes=%s, dtypes=%s, fmt=%s",
             sender_id,
