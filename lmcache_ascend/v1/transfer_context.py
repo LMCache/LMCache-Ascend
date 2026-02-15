@@ -145,6 +145,4 @@ class AscendBaseTransferContext:
 
     def _send_done(self) -> None:
         """Deliver the Done signal.  **Must be overridden by subclasses.**"""
-        raise NotImplementedError(
-            "_send_done() must be implemented by subclasses"
-        )
+        raise NotImplementedError("_send_done() must be implemented by subclasses")

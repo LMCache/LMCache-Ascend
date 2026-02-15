@@ -86,10 +86,10 @@ def CreateTransferChannel(
         )
         if isinstance(buffer_size, int):
             buffer_size = [buffer_size]
-    
+
         if isinstance(buffer_type, str):
             buffer_type = [buffer_type] if buffer_type else ["cpu"]
-        
+
         if isinstance(align_bytes, int):
             align_bytes = [align_bytes]
     else:

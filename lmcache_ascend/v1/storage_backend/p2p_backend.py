@@ -164,13 +164,17 @@ class AscendP2PBackend(P2PBackend):
         if self.delay_pull:
             assert self.pull_mode, "Delay pull only works when pull mode is enabled"
             if not self.use_npu:
-                logger.warning("P2P delay pull is enabled "
-                               "but NPU buffer is not initialized. "
-                               "Setting delay_pull to False.")
+                logger.warning(
+                    "P2P delay pull is enabled "
+                    "but NPU buffer is not initialized. "
+                    "Setting delay_pull to False."
+                )
                 self.delay_pull = False
             else:
-                logger.info("P2P delay pull enabled. "
-                            "The npu connector will pull the data on-the-fly.")
+                logger.info(
+                    "P2P delay pull enabled. "
+                    "The npu connector will pull the data on-the-fly."
+                )
 
         self.full_size_shapes = self.memory_allocator.cpu_allocator.shapes
         self.dtypes = self.memory_allocator.cpu_allocator.dtypes
@@ -199,7 +203,7 @@ class AscendP2PBackend(P2PBackend):
                     // _align_bytes
                     * _align_bytes
                 )
-                
+
                 self.memory_allocator.init_gpu_memory_allocator(
                     align_allocator_bytes,
                     self.full_size_shapes,

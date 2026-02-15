@@ -439,9 +439,7 @@ class HcclChannel(BaseTransferChannel):
             except zmq.Again:
                 continue
             except Exception as e:
-                logger.error(
-                    "Failed to receive in initialization loop: %s", str(e)
-                )
+                logger.error("Failed to receive in initialization loop: %s", str(e))
                 if self.running:
                     time.sleep(0.01)
                 continue
@@ -540,8 +538,9 @@ class HcclChannel(BaseTransferChannel):
         mem_indexes: list[int] = []
         if isinstance(objects[0], MemoryObj):
             for mem_obj in objects:
-                assert mem_obj is not None and isinstance(mem_obj, MemoryObj), \
-                        "Expected MemoryObj, got {}".format(type(mem_obj))
+                assert mem_obj is not None and isinstance(mem_obj, MemoryObj), (
+                    "Expected MemoryObj, got {}".format(type(mem_obj))
+                )
                 buf_uuid, mem_idx = self.hccl_wrapper.get_buffer_ref(
                     mem_obj.data_ptr, mem_obj.meta.address
                 )

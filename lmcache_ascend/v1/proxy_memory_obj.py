@@ -15,7 +15,6 @@ before scattering, enabling overlap of remote fetch and NPU scatter operations.
 # Standard
 from typing import Any, List, Optional
 import asyncio
-import threading
 
 # Third Party
 from lmcache.logging import init_logger
@@ -205,7 +204,7 @@ class ProxyMemoryObj(MemoryObj):
     def consumed(self) -> bool:
         """Whether this proxy has been fully consumed (data scattered to
         KV cache).  Consumed proxies hold stale remote references and
-        must not be re-used for another transfer."""
+        must not be reused for another transfer."""
         return self._consumed
 
     def mark_consumed(self) -> None:

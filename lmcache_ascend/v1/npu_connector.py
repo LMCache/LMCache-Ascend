@@ -936,18 +936,18 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 proxies = [item[0] for item in batch]
 
                 # Submit RDMA read for current batch → transport_stream.
-                cur_read_event = ProxyMemoryObj.submit_resolve_batch(
-                    proxies
-                )
+                cur_read_event = ProxyMemoryObj.submit_resolve_batch(proxies)
 
                 # While the current batch is being read on
                 # transport_stream, scatter the previous batch on
                 # load_stream (waits for its RDMA read event).
                 if prev_batch is not None:
                     self._scatter_proxy_batch(
-                        prev_batch, prev_read_event, **kwargs,
+                        prev_batch,
+                        prev_read_event,
+                        **kwargs,
                     )
-                    # TODO (gingfung): investigate whether 
+                    # TODO (gingfung): investigate whether
                     # we need to record scatter-done event on load_stream so the
                     # next RDMA into the same pool waits for it.
                     self._clear_proxy_batch(prev_batch)
@@ -959,7 +959,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             # Drain: scatter the last micro-batch.
             if prev_batch is not None:
                 self._scatter_proxy_batch(
-                    prev_batch, prev_read_event, **kwargs,
+                    prev_batch,
+                    prev_read_event,
+                    **kwargs,
                 )
                 self._clear_proxy_batch(prev_batch)
             # A CPU sync is needed here because we must guarantee all
@@ -979,7 +981,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         # Mark all proxy items as consumed.  After this point the remote
         # sender's pinned memory will be released (via DoneSignal),
         # so the proxy's remote buffer references become stale and must
-        # not be re-used for another transfer.
+        # not be reused for another transfer.
         for proxy, _, _ in proxy_items:
             proxy.mark_consumed()
 

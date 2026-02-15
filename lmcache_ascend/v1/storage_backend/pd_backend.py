@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Any, List, Optional, Sequence, Union
+from typing import Any, Callable, List, Optional, Sequence, Union
 import threading
 import time
 import uuid as _uuid
 
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
-    CacheEngineKey,
     STR_DTYPE_TO_TORCH_DTYPE,
     TORCH_DTYPE_TO_STR_DTYPE,
+    CacheEngineKey,
 )
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
@@ -26,8 +26,8 @@ from lmcache.v1.storage_backend.pd_backend import (
     AllocRequest,
     AllocResponse,
     PDBackend,
+    PDConfig,
     ProxyNotif,
-    PDConfig
 )
 import msgspec
 import torch
@@ -133,13 +133,12 @@ class AscendPDBackend(PDBackend):
         self.tp_rank = metadata.worker_id
 
         self.pd_config = PDConfig.from_cache_engine_config(
-            config, metadata, self.tp_rank)
+            config, metadata, self.tp_rank
+        )
 
         # CPU offload: sender offloads KV to CPU first, then RDMA from CPU.
         # Read from LMCacheEngineConfig (not PDConfig, which is upstream).
-        self.use_cpu_offload: bool = getattr(
-            config, "pd_use_cpu_offload", False
-        )
+        self.use_cpu_offload: bool = getattr(config, "pd_use_cpu_offload", False)
 
         # Receiver-side KV store
         self.data: dict[CacheEngineKey, MemoryObj] = {}
@@ -250,8 +249,7 @@ class AscendPDBackend(PDBackend):
                 total_pages * (1.0 - self._pull_bp_reserve_pct / 100.0)
             )
             logger.info(
-                "Pull mode backpressure: total_pages=%d, reserve=%.1f%%, "
-                "hwm=%d pages",
+                "Pull mode backpressure: total_pages=%d, reserve=%.1f%%, hwm=%d pages",
                 total_pages,
                 self._pull_bp_reserve_pct,
                 self._pull_pending_hwm,
@@ -269,7 +267,6 @@ class AscendPDBackend(PDBackend):
         self._fmt = resolve_memory_format(metadata.use_mla)
         self._kv_shapes = [torch.Size(metadata.kv_shape)]
         self._kv_dtypes = [metadata.kv_dtype]
-
 
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
@@ -307,7 +304,8 @@ class AscendPDBackend(PDBackend):
                 (cpu_buffer_size + total_size - 1) // total_size * total_size
             )
             paged_mem_allocator.init_cpu_memory_allocator(
-                cpu_aligned_byte, sizes, dtypes, fmt)
+                cpu_aligned_byte, sizes, dtypes, fmt
+            )
 
             logger.info(
                 "Initialized CPU allocator: %.2f MB",
@@ -338,9 +336,7 @@ class AscendPDBackend(PDBackend):
             fmt = MemoryFormat.KV_2LTD
         # Sender + cpu_offload: offload to CPU first  →  RDMA from CPU
         # Otherwise (receiver, or sender without offload): allocate on NPU
-        use_cpu = (
-            self.pd_config.role == "sender" and self.use_cpu_offload
-        )
+        use_cpu = self.pd_config.role == "sender" and self.use_cpu_offload
         alloc_type = "cpu" if use_cpu else "gpu"
         return self.memory_allocator.allocate(
             shapes, dtypes, fmt=fmt, allocator_type=alloc_type
@@ -467,9 +463,7 @@ class AscendPDBackend(PDBackend):
             # The sender binds a ZMQ PULL socket for receiving
             # PullDoneSignal from receivers.  The port is configured
             # via ``pd_pull_done_port`` (list[int], one per TP rank)
-            pd_pull_done_ports = getattr(
-                self._config, "pd_pull_done_port", None
-            )
+            pd_pull_done_ports = getattr(self._config, "pd_pull_done_port", None)
             if pd_pull_done_ports is not None:
                 self._pull_done_port = pd_pull_done_ports[self.tp_rank]
             else:
@@ -499,9 +493,7 @@ class AscendPDBackend(PDBackend):
             )
             self._pull_done_thread.start()
             self.running_threads.append(self._pull_done_thread)
-            logger.info(
-                "Pull-mode sender: Done listener started on %s", done_url
-            )
+            logger.info("Pull-mode sender: Done listener started on %s", done_url)
 
     def _pull_done_listener_loop(self):
         """Listen for PullDoneSignal from receivers and release pinned
@@ -515,9 +507,7 @@ class AscendPDBackend(PDBackend):
                     if isinstance(msg, PullDoneSignal):
                         self._handle_pull_done(msg.pull_id)
                     else:
-                        logger.warning(
-                            "Unexpected msg in done listener: %s", type(msg)
-                        )
+                        logger.warning("Unexpected msg in done listener: %s", type(msg))
                 # Sweep expired entries every poll cycle (~1 s)
                 self._sweep_expired_pull_pending()
             except zmq.ZMQError as e:
@@ -576,8 +566,10 @@ class AscendPDBackend(PDBackend):
         logged = False
         while True:
             with self._pull_pending_lock:
-                if (self._pull_pending_pinned_count + num_new_pages
-                        <= self._pull_pending_hwm):
+                if (
+                    self._pull_pending_pinned_count + num_new_pages
+                    <= self._pull_pending_hwm
+                ):
                     return
                 current_pinned = self._pull_pending_pinned_count
             if not logged:
@@ -647,14 +639,9 @@ class AscendPDBackend(PDBackend):
         before releasing them.
         """
         if self.pull_mode:
-            self._batched_submit_put_task_pull(
-                keys, memory_objs, transfer_spec
-            )
+            self._batched_submit_put_task_pull(keys, memory_objs, transfer_spec)
         else:
-            self._batched_submit_put_task_push(
-                keys, memory_objs, transfer_spec
-            )
-
+            self._batched_submit_put_task_push(keys, memory_objs, transfer_spec)
 
     def _batched_submit_put_task_push(
         self,
@@ -702,7 +689,9 @@ class AscendPDBackend(PDBackend):
         if mem_objs_to_send:
             # Build transfer spec with UUID-based remote refs
             channel_transfer_spec = build_channel_transfer_spec(
-                receiver_id, send_buffer_uuids, send_mem_indexes,
+                receiver_id,
+                send_buffer_uuids,
+                send_mem_indexes,
             )
 
             self.transfer_channel.batched_write(
@@ -713,14 +702,12 @@ class AscendPDBackend(PDBackend):
             release_memory_objects(mem_objs_to_send)
         else:
             logger.debug(
-                "All memory objects already sent to remote peer. "
-                "Skipping transfer."
+                "All memory objects already sent to remote peer. Skipping transfer."
             )
 
         if transfer_spec.is_last_prefill:
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
-
 
     def _batched_submit_put_task_pull(
         self,
@@ -916,11 +903,18 @@ class AscendPDBackend(PDBackend):
 
             # Adjust shape for last (possibly partial) chunk
             alloc_shape = adjust_last_chunk_shape(
-                shape, idx, total_allocs, fmt, alloc_request.last_chunk_toks,
+                shape,
+                idx,
+                total_allocs,
+                fmt,
+                alloc_request.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+                self.allocate,
+                torch.Size(alloc_shape),
+                dtype,
+                fmt,
             )
 
             # Resolve UUID + page index for this allocation
@@ -949,7 +943,7 @@ class AscendPDBackend(PDBackend):
 
     def _handle_pull_ready(
         self, msg: PullReadyNotif, sender_id: str
-    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+    ) -> tuple[PullReadyDoneAck, Optional[Callable]]:
         """Handle a ``PullReadyNotif`` from the sender in **pull mode**.
 
         Returns ``(ack, post_ack_callback_or_None)``.  The caller must
@@ -960,10 +954,10 @@ class AscendPDBackend(PDBackend):
             return self._handle_pull_eager(msg, sender_id)
         else:
             return self._handle_pull_delay(msg, sender_id)
-    
+
     def _handle_pull_eager(
         self, msg: PullReadyNotif, sender_id: str
-    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+    ) -> tuple[PullReadyDoneAck, Optional[Callable]]:
         """Handle a ``PullReadyNotif`` from the sender in **pull mode** with eager.
         Allocate NPU actual mem_obj and stores them in ``self.data``.
         The NPU connector will pull data during ``batched_to_gpu``
@@ -997,11 +991,18 @@ class AscendPDBackend(PDBackend):
 
             # Adjust shape for last (possibly partial) chunk
             alloc_shape = adjust_last_chunk_shape(
-                shape, idx, total_allocs, fmt, msg.last_chunk_toks,
+                shape,
+                idx,
+                total_allocs,
+                fmt,
+                msg.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+                self.allocate,
+                torch.Size(alloc_shape),
+                dtype,
+                fmt,
             )
 
             mem_objs.append(mem_obj)
@@ -1010,7 +1011,9 @@ class AscendPDBackend(PDBackend):
             mem_keys.append(key)
 
         channel_transfer_spec = build_channel_transfer_spec(
-            sender_id, remote_buffer_uuids, remote_mem_indexes,
+            sender_id,
+            remote_buffer_uuids,
+            remote_mem_indexes,
         )
         self.transfer_channel.batched_read(
             buffers=mem_objs,
@@ -1019,7 +1022,7 @@ class AscendPDBackend(PDBackend):
 
         # batched_read() synchronizes the transport stream, so all RDMA
         # reads are complete at this point.  Store the received data.
-        for mem_obj, key in zip(mem_objs, mem_keys):
+        for mem_obj, key in zip(mem_objs, mem_keys, strict=False):
             self.put(key, mem_obj)
 
         # Release the pin on already-sent objects now that the RDMA reads
@@ -1043,7 +1046,7 @@ class AscendPDBackend(PDBackend):
 
     def _handle_pull_delay(
         self, msg: PullReadyNotif, sender_id: str
-    ) -> tuple[PullReadyDoneAck, Optional[callable]]:
+    ) -> tuple[PullReadyDoneAck, Optional[Callable]]:
         """Handle a ``PullReadyNotif`` from the sender in **pull mode** with delay.
         Instead of allocating NPU pages, creates lightweight
         :class:`PDProxyMemoryObj` wrappers and stores them in ``self.data``.
@@ -1122,7 +1125,11 @@ class AscendPDBackend(PDBackend):
                 # correct cross-layer strides when interpreting the raw
                 # bytes from the RDMA read.
                 alloc_shape = adjust_last_chunk_shape(
-                    shape, msg_idx, total_allocs, fmt, msg.last_chunk_toks,
+                    shape,
+                    msg_idx,
+                    total_allocs,
+                    fmt,
+                    msg.last_chunk_toks,
                 )
 
                 proxy = PDProxyMemoryObj(
@@ -1158,9 +1165,7 @@ class AscendPDBackend(PDBackend):
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 
-    def _send_pull_done_to_sender(
-        self, sender_id: str, pull_id: str
-    ) -> None:
+    def _send_pull_done_to_sender(self, sender_id: str, pull_id: str) -> None:
         """Send a ``PullDoneSignal`` to the sender on its done-listener socket.
 
         This is called from the NPU connector thread (via
@@ -1171,8 +1176,9 @@ class AscendPDBackend(PDBackend):
             done_signal = PullDoneSignal(pull_id=pull_id)
             # Use a fresh PUSH socket to the sender's done-listener port.
             # The port is derived from sender_id (same host, done_port)
-            if not hasattr(self, "_pull_done_sockets"):
-                self._pull_done_sockets: dict[str, zmq.Socket] = {}
+            assert hasattr(self, "_pull_done_sockets"), (
+                "pull_done_sockets must be initialized"
+            )
 
             if sender_id not in self._pull_done_sockets:
                 # Build the done URL from sender_id.
@@ -1190,9 +1196,7 @@ class AscendPDBackend(PDBackend):
                 )
                 self._pull_done_sockets[sender_id] = sock
 
-            self._pull_done_sockets[sender_id].send(
-                msgspec.msgpack.encode(done_signal)
-            )
+            self._pull_done_sockets[sender_id].send(msgspec.msgpack.encode(done_signal))
             logger.debug(
                 "Sent PullDoneSignal for pull_id %s to sender %s.",
                 pull_id,
@@ -1224,9 +1228,7 @@ class AscendPDBackend(PDBackend):
             except zmq.Again:
                 continue
             except Exception as e:
-                logger.error(
-                    "Failed to receive in mem alloc loop: %s", str(e)
-                )
+                logger.error("Failed to receive in mem alloc loop: %s", str(e))
                 if self.running:
                     time.sleep(0.01)
                 continue

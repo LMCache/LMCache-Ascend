@@ -19,7 +19,7 @@ def _patch_config():
         "default": False,
         "env_converter": _to_bool,
         "description": "Whether to use NPU memory for P2P transfers. "
-        "If True, the P2P transfers will be performed on NPU. "
+        "If True, the P2P transfers will be performed on NPU. ",
     }
 
     # Add new p2p_npu_buffer_size config
@@ -69,9 +69,14 @@ def _patch_config():
         "type": bool,
         "default": False,
         "env_converter": _to_bool,
-        "description": "Whether to delay the pull operation for PD disaggregated transfers. "
-        "If True, the pull operation will be delayed until the data is actually needed. "
-        "This can help improve performance in some cases. This config is only used when pd_pull_mode is set to True.",
+        "description": "Whether to delay the pull operation for "
+        "PD disaggregated transfers when using NPU memory. "
+        "If True, the pull operation will be delayed "
+        "until the data is actually needed. "
+        "This can help improve performance in some cases. "
+        "This config is only used when "
+        "pd_pull_mode is set to True and p2p_use_npu is set to True."
+        "Set at the receiver side.",
     }
 
     # Add new pd_pull_done_port config (list of ports, one per TP rank)
@@ -90,17 +95,21 @@ def _patch_config():
         "default": False,
         "env_converter": _to_bool,
         "description": "Whether to use CPU offload for PD transfers. "
-        "If True, the KV caches will be offloaded to CPU first and then transferred to remote npu later. "
-        "This config is only used when the role is `sender`.",
+        "If True, the KV caches will be offloaded to CPU first "
+        "and then transferred to remote npu later. "
+        "This config is only used when the role is `sender` "
+        "and pd_pull_mode is set to True.",
     }
 
     # Add pd_cpu_buffer_size config
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_cpu_buffer_size"] = {
         "type": int,
         "default": None,
-        "description": "The total buffer size in bytes for PD CPU transfers. "
-        "This config is used when the role is `sender`, this is because the kvcaches can be offloaded to cpu first."
-        "and then transferred to remote npu later."
+        "description": "The total buffer size in bytes for PD CPU offload. "
+        "This config is used when the role is `sender`, "
+        "because the kvcaches can be offloaded to cpu first, "
+        "and then transferred to remote npu later. "
+        "This config is only used when pd_pull_mode is set to True.",
     }
 
     namespace_extras = {
