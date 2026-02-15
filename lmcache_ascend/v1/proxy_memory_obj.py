@@ -168,7 +168,6 @@ class ProxyMemoryObj(MemoryObj):
         self._transfer_context = transfer_context
         self._chunk_index = chunk_index
         self._resolved = False
-        self._own_ref_count = 1  # Intrinsic ref count for proxy lifecycle
         self._consumed = False  # True after data scattered into KV cache
 
         # Store allocation metadata for deferred buffer operations
@@ -325,7 +324,6 @@ class ProxyMemoryObj(MemoryObj):
     @staticmethod
     def submit_resolve_batch(
         proxies: List["ProxyMemoryObj"],
-        wait_event: Optional[torch.npu.Event] = None,
     ) -> Optional[torch.npu.Event]:
         """Submit a batched read for proxies without waiting for completion.
 
@@ -341,10 +339,6 @@ class ProxyMemoryObj(MemoryObj):
             proxies: List of ProxyMemoryObjs to resolve. All must share
                 the same transfer channel and target peer, and have
                 backing buffers assigned.
-            wait_event: Optional NPU event that the transport stream
-                should wait on before issuing the RDMA reads.  Used for
-                ping-pong pipelining so the transport stream does not
-                overwrite a buffer that the load stream is still reading.
 
         Returns:
             An NPU event if submission was asynchronous, None if resolved
@@ -382,7 +376,6 @@ class ProxyMemoryObj(MemoryObj):
         event = channel.submit_batched_read(
             buffers=buffers,
             transfer_spec=channel_transfer_spec,
-            wait_event=wait_event,
         )
 
         for p in unresolved:
@@ -498,18 +491,24 @@ class ProxyMemoryObj(MemoryObj):
         return False
 
     def ref_count_up(self) -> None:
-        self._own_ref_count += 1
-        if self._backing_obj is not None:
-            self._backing_obj.ref_count_up()
+        # No-op: proxy lifecycle is managed by the transfer context,
+        # not by the standard MemoryObj ref-count protocol.  Making
+        # this a no-op allows callers (cache engine, storage manager,
+        # PD backend pin/unpin) to use the same API without needing
+        # isinstance guards to skip proxies.
+        pass
 
     def ref_count_down(self) -> None:
-        self._own_ref_count -= 1
-        if self._backing_obj is not None:
-            self._backing_obj.ref_count_down()
-        self._transfer_context.decref()
+        # No-op: see ref_count_up.  The transfer context's Done signal
+        # is sent explicitly by the NPU connector via
+        # transfer_context.send_done_now() after scatter completes.
+        pass
 
     def get_ref_count(self) -> int:
-        return self._own_ref_count
+        # Always return 1 so the proxy looks "alive" to callers that
+        # use ref_count == 1 as a "safe to delete" guard (e.g. the
+        # upstream PDBackend.remove()).
+        return 1
 
     def get_num_tokens(self) -> int:
         if self._backing_obj is not None:

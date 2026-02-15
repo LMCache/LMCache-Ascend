@@ -208,53 +208,6 @@ class AscendPDBackend(PDBackend):
             self._init_sender()
             self.initialized_peers: set[str] = set()
             self.mem_alloc_sockets: dict[str, zmq.Socket] = {}
-            # Pull-mode: pinned resources waiting for Done signal.
-            # Each entry is (pinned_at_timestamp, list[MemoryObj]).
-            self._pull_pending: dict[str, tuple[float, list[MemoryObj]]] = {}
-            self._pull_pending_lock = threading.Lock()
-            # Safety net: if a PullDoneSignal arrives before the main
-            # thread has registered _pull_pending (extremely unlikely
-            # after the ack-before-done reordering, but defensive),
-            # buffer the pull_id here so the main thread can release
-            # immediately after registration instead of waiting for
-            # the TTL sweep.
-            self._early_pull_done: set[str] = set()
-            # TTL in seconds for pull_pending entries.  If a receiver
-            # crashes and never sends PullDoneSignal, pinned MemObjs are
-            # released after this timeout to prevent memory leaks.
-            self._pull_pending_ttl: float = getattr(
-                config, "pd_pull_pending_ttl", 360.0
-            )
-
-            # Backpressure: track pinned page count and enforce a
-            # high-water mark so slow receivers don't exhaust the
-            # sender's buffer pool.
-            self._pull_pending_pinned_count: int = 0
-
-            # Reserve this percentage of the sender's buffer pool as
-            # free headroom.  When pinned pages exceed
-            # (1 - reserve_pct/100) * total_pages, new put tasks
-            # block until the daemon listener thread frees entries.
-            self._pull_bp_reserve_pct: float = getattr(
-                config, "pd_pull_backpressure_reserve_pct", 2.0
-            )
-
-            sender_alloc = (
-                self.memory_allocator.cpu_allocator
-                if self.use_cpu_offload
-                else self.memory_allocator.gpu_allocator
-            )
-            total_pages = sender_alloc.buffer_size // sender_alloc.align_bytes
-            self._pull_pending_hwm: int = int(
-                total_pages * (1.0 - self._pull_bp_reserve_pct / 100.0)
-            )
-            logger.info(
-                "Pull mode backpressure: total_pages=%d, reserve=%.1f%%, hwm=%d pages",
-                total_pages,
-                self._pull_bp_reserve_pct,
-                self._pull_pending_hwm,
-            )
-
         elif self.pd_config.role == "receiver":
             self._init_receiver()
         else:
@@ -349,22 +302,13 @@ class AscendPDBackend(PDBackend):
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """Check if *key* exists in the receiver's data store.
 
-        Overrides the base :meth:`PDBackend.contains` to handle
-        **consumed** :class:`PDProxyMemoryObj` instances — proxies whose
-        data has already been scattered into the paged KV cache and whose
-        remote buffer references are stale.
+        Overrides the base :meth:`PDBackend.contains` to evict consumed
+        :class:`PDProxyMemoryObj` instances whose remote buffer
+        references are stale.
 
-        When a consumed proxy is found it is silently removed from
-        ``self.data`` and the method returns ``False``, forcing the
-        caller to re-request the data from the prefiller.
-
-        **Proxy objects are NOT pinned.**  Calling ``ref_count_up()`` on
-        a ``PDProxyMemoryObj`` would increment its transfer-context's
-        internal reference count via the subsequent ``ref_count_down()``,
-        potentially triggering a premature ``PullDoneSignal`` that
-        releases the sender's pages before the receiver has pulled the
-        data (data corruption).  Since proxies are lightweight (no
-        backing memory to protect), skipping the pin is safe.
+        Pinning is safe for both regular MemoryObj and proxies because
+        ``ProxyMemoryObj.ref_count_up/down`` are no-ops — the proxy
+        lifecycle is managed by its transfer context, not by ref counts.
         """
         assert isinstance(key, CacheEngineKey)
         with self.data_lock:
@@ -378,64 +322,25 @@ class AscendPDBackend(PDBackend):
                 del self.data[key]
                 return False
 
-            # Only pin regular MemoryObj — never pin proxies.
-            # Pinning a proxy (ref_count_up) has no matching incref on
-            # the transfer context, so the unpin (ref_count_down) causes
-            # an extra decref that can prematurely fire PullDoneSignal.
-            if pin and not isinstance(mem_obj, PDProxyMemoryObj):
+            if pin:
                 mem_obj.ref_count_up()
             return True
 
-    def remove(self, key: CacheEngineKey, force: bool = True) -> bool:
-        """Remove *key* from the receiver's data store.
-
-        Overrides the base :meth:`PDBackend.remove` so that consumed
-        proxies are always removed regardless of their ref count.
-        Non-consumed entries follow the original ``ref_count == 1``
-        guard to avoid removing objects still in use.
-        """
-        with self.data_lock:
-            mem_obj = self.data.get(key, None)
-            if mem_obj is None:
-                return False
-
-            # Consumed proxies can always be cleaned up — their data
-            # has already been scattered and the remote sender has been
-            # (or will be) notified via PullDoneSignal.
-            if isinstance(mem_obj, PDProxyMemoryObj) and mem_obj.consumed:
-                del self.data[key]
-                return True
-
-            if mem_obj.get_ref_count() == 1:
-                del self.data[key]
-            return True
-
     def _contains_and_pin(self, key: CacheEngineKey) -> Optional[MemoryObj]:
-        """Check if *key* exists, optionally pin it, and return the object.
+        """Check if *key* exists, pin it, and return the object.
 
         Combines the existence check with an atomic ``ref_count_up()``
         under ``data_lock``, and returns the **object reference** so the
-        caller can later call ``ref_count_down()`` to release the pin —
-        even if the key has been concurrently removed from ``self.data``
-        in the meantime.
-
-        **Proxy objects are NOT pinned.**  Calling ``ref_count_up()`` on
-        a ``PDProxyMemoryObj`` would increment its transfer-context's
-        internal reference count, and the matching ``ref_count_down()``
-        would decrement it — potentially triggering a premature
-        ``PullDoneSignal`` that releases the sender's pages before the
-        receiver has pulled the data.  Since proxies are lightweight
-        (no backing memory to protect), skipping the pin is safe.
+        caller can later call ``ref_count_down()`` to release the pin.
 
         Returns ``None`` when the key is absent or is a consumed proxy.
 
         .. note::
 
-           The caller **must** call ``ref_count_down()`` on every
-           returned **non-proxy** object once the pin is no longer
-           needed; otherwise the underlying memory page will never be
-           freed.  For proxy objects the caller must **not** call
-           ``ref_count_down()``.
+           ``ref_count_up/down`` are no-ops on proxy objects, so
+           pinning them is safe and callers can use the same API
+           uniformly.  The caller **must** call ``ref_count_down()``
+           on every returned object once the pin is no longer needed.
         """
         with self.data_lock:
             mem_obj = self.data.get(key, None)
@@ -446,9 +351,7 @@ class AscendPDBackend(PDBackend):
                 del self.data[key]
                 return None
 
-            # Only pin regular MemoryObj — never pin proxies (see docstring).
-            if not isinstance(mem_obj, PDProxyMemoryObj):
-                mem_obj.ref_count_up()
+            mem_obj.ref_count_up()
             return mem_obj
 
     # ──────────────────────────────────────────────────────────
@@ -472,6 +375,24 @@ class AscendPDBackend(PDBackend):
                     "pd_peer_alloc_port to derive a done-listener port."
                 )
 
+            # Pull-mode: pinned resources waiting for Done signal.
+            # Each entry is (pinned_at_timestamp, list[MemoryObj]).
+            self._pull_pending: dict[str, tuple[float, list[MemoryObj]]] = {}
+            self._pull_pending_lock = threading.Lock()
+            # Safety net: if a PullDoneSignal arrives before the main
+            # thread has registered _pull_pending (extremely unlikely
+            # after the ack-before-done reordering, but defensive),
+            # buffer the pull_id here so the main thread can release
+            # immediately after registration instead of waiting for
+            # the TTL sweep.
+            self._early_pull_done: set[str] = set()
+            # TTL in seconds for pull_pending entries.  If a receiver
+            # crashes and never sends PullDoneSignal, pinned MemObjs are
+            # released after this timeout to prevent memory leaks.
+            self._pull_pending_ttl: float = getattr(
+                self._config, "pd_pull_pending_ttl", 360.0
+            )
+
             # The sender's bind host — same host used for peer_host
             self._sender_host = self.pd_config.peer_host
             assert self._sender_host is not None, (
@@ -494,6 +415,35 @@ class AscendPDBackend(PDBackend):
             self._pull_done_thread.start()
             self.running_threads.append(self._pull_done_thread)
             logger.info("Pull-mode sender: Done listener started on %s", done_url)
+
+            # Backpressure: track pinned page count and enforce a
+            # high-water mark so slow receivers don't exhaust the
+            # sender's buffer pool.
+            self._pull_pending_pinned_count: int = 0
+
+            # Reserve this percentage of the sender's buffer pool as
+            # free headroom.  When pinned pages exceed
+            # (1 - reserve_pct/100) * total_pages, new put tasks
+            # block until the daemon listener thread frees entries.
+            self._pull_bp_reserve_pct: float = getattr(
+                self._config, "pd_pull_backpressure_reserve_pct", 2.0
+            )
+
+            sender_alloc = (
+                self.memory_allocator.cpu_allocator
+                if self.use_cpu_offload
+                else self.memory_allocator.gpu_allocator
+            )
+            total_pages = sender_alloc.buffer_size // sender_alloc.align_bytes
+            self._pull_pending_hwm: int = int(
+                total_pages * (1.0 - self._pull_bp_reserve_pct / 100.0)
+            )
+            logger.info(
+                "Pull mode backpressure: total_pages=%d, reserve=%.1f%%, hwm=%d pages",
+                total_pages,
+                self._pull_bp_reserve_pct,
+                self._pull_pending_hwm,
+            )
 
     def _pull_done_listener_loop(self):
         """Listen for PullDoneSignal from receivers and release pinned
@@ -926,12 +876,10 @@ class AscendPDBackend(PDBackend):
 
         # Release the pin on already-sent objects.  The pin was held to
         # prevent a concurrent remove() from freeing the page while we
-        # were building the response.  Now that the response is ready
-        # the extra refcount is no longer needed.  Skip proxies — they
-        # were not pinned by _contains_and_pin (see its docstring).
+        # were building the response.  ref_count_down is a no-op on
+        # proxies, so no isinstance guard is needed.
         for obj in already_sent_objs:
-            if not isinstance(obj, PDProxyMemoryObj):
-                obj.ref_count_down()
+            obj.ref_count_down()
 
         return AscendAllocResponse(
             already_sent_indexes=already_sent_indexes,
@@ -1026,11 +974,10 @@ class AscendPDBackend(PDBackend):
             self.put(key, mem_obj)
 
         # Release the pin on already-sent objects now that the RDMA reads
-        # are complete and all new data has been stored.  Skip proxies —
-        # they were not pinned by _contains_and_pin (see its docstring).
+        # are complete and all new data has been stored.  ref_count_down
+        # is a no-op on proxies, so no isinstance guard is needed.
         for obj in already_sent_objs:
-            if not isinstance(obj, PDProxyMemoryObj):
-                obj.ref_count_down()
+            obj.ref_count_down()
 
         # Build a callback that sends PullDoneSignal AFTER the ack reply
         # has been sent on the REP socket.  This prevents the sender's
@@ -1153,15 +1100,10 @@ class AscendPDBackend(PDBackend):
                 sender_id,
             )
 
-        # Release the pin on already-sent objects.  Only non-proxy objects
-        # were actually pinned (ref_count_up) by _contains_and_pin; proxy
-        # objects must NOT be ref_count_down'd here — doing so would call
-        # transfer_context.decref() on the *old* batch's context, which
-        # can trigger a premature PullDoneSignal and cause the sender to
-        # free its pages before the receiver pulls the data (data corruption).
+        # Release the pin on already-sent objects.  ref_count_down is a
+        # no-op on proxies, so no isinstance guard is needed.
         for obj in already_sent_objs:
-            if not isinstance(obj, PDProxyMemoryObj):
-                obj.ref_count_down()
+            obj.ref_count_down()
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 

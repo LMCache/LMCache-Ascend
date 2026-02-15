@@ -47,9 +47,8 @@ class PDTransferContext(AscendBaseTransferContext):
       registered HCCL memory pool.
     * Sending a ``DoneSignal`` ZMQ message to the *sender* so it can
       release its pinned resources. The signal is sent exactly once,
-      triggered either by :meth:`send_done_now` (called from the NPU
-      connector after all proxies have been scattered) or when the last
-      proxy's ``ref_count_down()`` fires.
+      triggered by :meth:`send_done_now` (called from the NPU
+      connector after all proxies have been scattered).
 
     Parameters
     ----------

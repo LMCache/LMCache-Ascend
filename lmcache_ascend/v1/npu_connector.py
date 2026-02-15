@@ -914,80 +914,78 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             pool_size = min(pipeline_depth, len(proxy_items))
             pool_a = first_ctx.allocate_buffers(pool_size)
             pool_b = first_ctx.allocate_buffers(pool_size)
-            pools = [pool_a, pool_b]
-            current_pool = 0
 
-            # Group proxy items into micro-batches
-            micro_batches = [
-                proxy_items[i : i + pipeline_depth]
-                for i in range(0, len(proxy_items), pipeline_depth)
-            ]
+            try:
+                pools = [pool_a, pool_b]
+                current_pool = 0
 
-            prev_read_event = None
-            prev_batch = None
+                # Group proxy items into micro-batches
+                micro_batches = [
+                    proxy_items[i : i + pipeline_depth]
+                    for i in range(0, len(proxy_items), pipeline_depth)
+                ]
 
-            for batch_idx, batch in enumerate(micro_batches):
-                pool = pools[current_pool]
+                prev_read_event = None
+                prev_batch = None
 
-                # Assign backing buffers from current pool to proxies
-                for i, (proxy, _, _) in enumerate(batch):
-                    proxy.set_backing_obj(pool[i])
+                for batch_idx, batch in enumerate(micro_batches):
+                    pool = pools[current_pool]
 
-                proxies = [item[0] for item in batch]
+                    # Assign backing buffers from current pool to proxies
+                    for i, (proxy, _, _) in enumerate(batch):
+                        proxy.set_backing_obj(pool[i])
 
-                # Submit RDMA read for current batch → transport_stream.
-                cur_read_event = ProxyMemoryObj.submit_resolve_batch(proxies)
+                    proxies = [item[0] for item in batch]
 
-                # While the current batch is being read on
-                # transport_stream, scatter the previous batch on
-                # load_stream (waits for its RDMA read event).
+                    # Submit RDMA read for current batch → transport_stream.
+                    cur_read_event = ProxyMemoryObj.submit_resolve_batch(proxies)
+
+                    # While the current batch is being read on
+                    # transport_stream, scatter the previous batch on
+                    # load_stream (waits for its RDMA read event).
+                    if prev_batch is not None:
+                        self._scatter_proxy_batch(
+                            prev_batch,
+                            prev_read_event,
+                            **kwargs,
+                        )
+                        # TODO (gingfung): investigate whether
+                        # we need to record scatter-done event on load_stream
+                        # so the next RDMA into the same pool waits for it.
+                        self._clear_proxy_batch(prev_batch)
+
+                    prev_read_event = cur_read_event
+                    prev_batch = batch
+                    current_pool = 1 - current_pool  # toggle ping-pong
+
+                # Drain: scatter the last micro-batch.
                 if prev_batch is not None:
                     self._scatter_proxy_batch(
                         prev_batch,
                         prev_read_event,
                         **kwargs,
                     )
-                    # TODO (gingfung): investigate whether
-                    # we need to record scatter-done event on load_stream so the
-                    # next RDMA into the same pool waits for it.
                     self._clear_proxy_batch(prev_batch)
+            finally:
+                # Guarantee ping-pong buffers are returned and the Done
+                # signal is sent even if the pipeline raises.  Without
+                # this, an exception would leak NPU pages and leave the
+                # sender's pinned resources stuck until its TTL expires.
+                self.load_stream.synchronize()
+                first_ctx.release_buffers(pool_a)
+                first_ctx.release_buffers(pool_b)
 
-                prev_read_event = cur_read_event
-                prev_batch = batch
-                current_pool = 1 - current_pool  # toggle ping-pong
+                for proxy, _, _ in proxy_items:
+                    proxy.mark_consumed()
 
-            # Drain: scatter the last micro-batch.
-            if prev_batch is not None:
-                self._scatter_proxy_batch(
-                    prev_batch,
-                    prev_read_event,
-                    **kwargs,
-                )
-                self._clear_proxy_batch(prev_batch)
-            # A CPU sync is needed here because we must guarantee all
-            # scatter work is complete before releasing the ping-pong
-            # buffers and sending the Done signal.
-            self.load_stream.synchronize()
-            # Release ping-pong buffers back to the allocator
-            first_ctx.release_buffers(pool_a)
-            first_ctx.release_buffers(pool_b)
+                for ctx in transfer_contexts:
+                    ctx.send_done_now()
 
         # Process non-proxy items on load_stream (no pipelining needed)
         if non_proxy_items:
             with torch.cuda.stream(self.load_stream):
                 for memory_obj, start, end in non_proxy_items:
                     self.to_gpu(memory_obj, start, end, **kwargs)
-
-        # Mark all proxy items as consumed.  After this point the remote
-        # sender's pinned memory will be released (via DoneSignal),
-        # so the proxy's remote buffer references become stale and must
-        # not be reused for another transfer.
-        for proxy, _, _ in proxy_items:
-            proxy.mark_consumed()
-
-        # Send Done signal to release remote resources
-        for ctx in transfer_contexts:
-            ctx.send_done_now()
 
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):

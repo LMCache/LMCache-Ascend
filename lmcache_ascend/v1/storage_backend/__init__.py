@@ -63,6 +63,7 @@ def CreateStorageBackends(
         # First Party
         from lmcache_ascend.v1.storage_backend.pd_backend import AscendPDBackend
 
+        assert not config.use_layerwise, "Layerwise is not supported for PD"
         storage_backends["PDBackend"] = AscendPDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
