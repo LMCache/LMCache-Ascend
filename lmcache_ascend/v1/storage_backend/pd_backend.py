@@ -161,7 +161,7 @@ class AscendPDBackend(PDBackend):
         self.delay_pull: bool = getattr(config, "pd_delay_pull", False)
         if self.delay_pull:
             assert self.pull_mode, "Delay pull only works when pull mode is enabled"
-            assert self.pd_config.buffer_device == "npu", "Delay pull only works when buffer device is NPU"
+            assert self.pd_config.buffer_device.startswith("npu"), "Delay pull only works when buffer device is NPU"
 
         # Keep config ref for extra_config access (e.g., pull_done_port)
         self._config = config
@@ -184,7 +184,7 @@ class AscendPDBackend(PDBackend):
         buffer_size = []
         buffer_type = []
         align_bytes = []
-        if self.pd_config.buffer_device == "npu":
+        if self.pd_config.buffer_device.startswith("npu"):
             buffer_ptr.append(self.memory_allocator.gpu_allocator.buffer_ptr)
             buffer_size.append(self.memory_allocator.gpu_allocator.buffer_size)
             buffer_type.append("npu")
@@ -244,7 +244,7 @@ class AscendPDBackend(PDBackend):
         dtypes = [metadata.kv_dtype]
         total_size = get_size_bytes(sizes, dtypes)
 
-        if self.pd_config.buffer_device == "npu":
+        if self.pd_config.buffer_device.startswith("npu"):
             # NPU allocator — needed for RDMA buffer registration and
             # receiver-side allocation (incoming KV lands directly on NPU).
             npu_aligned_byte = (
