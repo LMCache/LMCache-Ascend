@@ -35,7 +35,8 @@ import torch_npu  # noqa: F401
 import zmq
 
 # First Party
-from lmcache_ascend.v1.pd_proxy_memory_obj import PDProxyMemoryObj, PDTransferContext
+from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
+from lmcache_ascend.v1.transfer_context import PDTransferContext
 from lmcache_ascend.v1.storage_backend.utils import (
     adjust_last_chunk_shape,
     allocate_with_retry,
@@ -160,6 +161,7 @@ class AscendPDBackend(PDBackend):
         self.delay_pull: bool = getattr(config, "pd_delay_pull", False)
         if self.delay_pull:
             assert self.pull_mode, "Delay pull only works when pull mode is enabled"
+            assert self.pd_config.buffer_device == "npu", "Delay pull only works when buffer device is NPU"
 
         # Keep config ref for extra_config access (e.g., pull_done_port)
         self._config = config
@@ -178,18 +180,26 @@ class AscendPDBackend(PDBackend):
         # Register both CPU and NPU buffers with the transfer channel
         # so that RDMA can operate on either memory region.
         # (Mirrors the multi-buffer pattern used by AscendP2PBackend.)
-        gpu_alloc = self.memory_allocator.gpu_allocator
-        if self.pd_config.role == "sender" and self.use_cpu_offload:
-            cpu_alloc = self.memory_allocator.cpu_allocator
-            buffer_ptr = [cpu_alloc.buffer_ptr, gpu_alloc.buffer_ptr]
-            buffer_size = [cpu_alloc.buffer_size, gpu_alloc.buffer_size]
-            buffer_type = ["cpu", "npu"]
-            align_bytes = [cpu_alloc.align_bytes, gpu_alloc.align_bytes]
-        else:
-            buffer_ptr = [gpu_alloc.buffer_ptr]
-            buffer_size = [gpu_alloc.buffer_size]
-            buffer_type = ["npu"]
-            align_bytes = [gpu_alloc.align_bytes]
+        buffer_ptr = []
+        buffer_size = []
+        buffer_type = []
+        align_bytes = []
+        if self.pd_config.buffer_device == "npu":
+            buffer_ptr.append(self.memory_allocator.gpu_allocator.buffer_ptr)
+            buffer_size.append(self.memory_allocator.gpu_allocator.buffer_size)
+            buffer_type.append("npu")
+            align_bytes.append(self.memory_allocator.gpu_allocator.align_bytes)
+
+        if self.pd_config.buffer_device == "cpu" or self.use_cpu_offload:
+            buffer_ptr.append(self.memory_allocator.cpu_allocator.buffer_ptr)
+            buffer_size.append(self.memory_allocator.cpu_allocator.buffer_size)
+            buffer_type.append("cpu")
+            align_bytes.append(self.memory_allocator.cpu_allocator.align_bytes)
+        
+        assert len(buffer_ptr) > 0, "No buffer pointers found"
+        assert len(buffer_size) > 0, "No buffer sizes found"
+        assert len(buffer_type) > 0, "No buffer types found"
+        assert len(align_bytes) > 0, "No align bytes found"
 
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
@@ -234,21 +244,23 @@ class AscendPDBackend(PDBackend):
         dtypes = [metadata.kv_dtype]
         total_size = get_size_bytes(sizes, dtypes)
 
-        # NPU allocator — needed for RDMA buffer registration and
-        # receiver-side allocation (incoming KV lands directly on NPU).
-        npu_aligned_byte = (
-            (config.pd_buffer_size + total_size - 1) // total_size * total_size
-        )
-        paged_mem_allocator.init_gpu_memory_allocator(
-            npu_aligned_byte, sizes, dtypes, fmt, npu_corrected_device
-        )
-        logger.info(
-            "Initialized NPU allocator: %.2f MB",
-            npu_aligned_byte / (1024 * 1024),
-        )
+        if self.pd_config.buffer_device == "npu":
+            # NPU allocator — needed for RDMA buffer registration and
+            # receiver-side allocation (incoming KV lands directly on NPU).
+            npu_aligned_byte = (
+                (config.pd_buffer_size + total_size - 1) // total_size * total_size
+            )
+            paged_mem_allocator.init_gpu_memory_allocator(
+                npu_aligned_byte, sizes, dtypes, fmt, npu_corrected_device
+            )
+            logger.info(
+                "Initialized NPU allocator: %.2f MB",
+                npu_aligned_byte / (1024 * 1024),
+            )
 
-        if self.use_cpu_offload:
+        if self.pd_config.buffer_device == "cpu" or self.use_cpu_offload:
             # CPU allocator — for sender-side KV offload (NPU → CPU → RDMA).
+            # or configured to use CPU as the buffer device.
             # Falls back to pd_buffer_size when pd_cpu_buffer_size is not set.
             cpu_buffer_size = getattr(
                 config, "pd_cpu_buffer_size", config.pd_buffer_size
@@ -289,21 +301,18 @@ class AscendPDBackend(PDBackend):
             fmt = MemoryFormat.KV_2LTD
         # Sender + cpu_offload: offload to CPU first  →  RDMA from CPU
         # Otherwise (receiver, or sender without offload): allocate on NPU
-        use_cpu = self.pd_config.role == "sender" and self.use_cpu_offload
+        use_cpu = (self.pd_config.buffer_device == "cpu" or 
+            (self.pd_config.role == "sender" and self.use_cpu_offload))
         alloc_type = "cpu" if use_cpu else "gpu"
         return self.memory_allocator.allocate(
             shapes, dtypes, fmt=fmt, allocator_type=alloc_type
         )
 
-    # ──────────────────────────────────────────────────────────
-    # Data access overrides (consumed-proxy awareness)
-    # ──────────────────────────────────────────────────────────
-
     def contains(self, key: CacheEngineKey, pin: bool = False) -> bool:
         """Check if *key* exists in the receiver's data store.
 
         Overrides the base :meth:`PDBackend.contains` to evict consumed
-        :class:`PDProxyMemoryObj` instances whose remote buffer
+        :class:`ProxyMemoryObj` instances whose remote buffer
         references are stale.
 
         Pinning is safe for both regular MemoryObj and proxies because
@@ -318,7 +327,7 @@ class AscendPDBackend(PDBackend):
 
             # Consumed proxies hold stale remote refs — evict and
             # report the key as absent so the caller re-fetches.
-            if isinstance(mem_obj, PDProxyMemoryObj) and mem_obj.consumed:
+            if isinstance(mem_obj, ProxyMemoryObj) and mem_obj.consumed:
                 del self.data[key]
                 return False
 
@@ -347,12 +356,54 @@ class AscendPDBackend(PDBackend):
             if mem_obj is None:
                 return None
 
-            if isinstance(mem_obj, PDProxyMemoryObj) and mem_obj.consumed:
+            if isinstance(mem_obj, ProxyMemoryObj) and mem_obj.consumed:
                 del self.data[key]
                 return None
 
             mem_obj.ref_count_up()
             return mem_obj
+
+    def _partition_keys(
+        self,
+        keys: list[str],
+    ) -> tuple[list[int], list[MemoryObj], list[int]]:
+        """Partition message keys into already-sent (pinned) and new indexes.
+
+        Iterates over *keys*, calling :meth:`_contains_and_pin` for each.
+        Keys that already exist in ``self.data`` are pinned and collected
+        as "already sent"; the rest are collected as "new".
+
+        Returns
+        -------
+        already_sent_indexes : list[int]
+            Indexes (into *keys*) of chunks that were already present.
+        already_sent_objs : list[MemoryObj]
+            The pinned MemoryObj for each already-sent key.  The caller
+            **must** call :meth:`_release_pinned` when done.
+        new_indexes : list[int]
+            Indexes (into *keys*) of chunks that need to be fetched.
+        """
+        already_sent_indexes: list[int] = []
+        already_sent_objs: list[MemoryObj] = []
+        new_indexes: list[int] = []
+        for idx, key_str in enumerate(keys):
+            key = CacheEngineKey.from_string(key_str)
+            pinned = self._contains_and_pin(key)
+            if pinned is not None:
+                already_sent_indexes.append(idx)
+                already_sent_objs.append(pinned)
+            else:
+                new_indexes.append(idx)
+        return already_sent_indexes, already_sent_objs, new_indexes
+
+    def _release_pinned(self, objs: list[MemoryObj]) -> None:
+        """Release the pin on previously pinned objects.
+
+        ``ref_count_down`` is a no-op on proxy objects, so no
+        ``isinstance`` guard is needed.
+        """
+        for obj in objs:
+            obj.ref_count_down()
 
     # ──────────────────────────────────────────────────────────
     # Sender / prefiller overrides
@@ -838,48 +889,30 @@ class AscendPDBackend(PDBackend):
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
         shape = list(alloc_request.shape)
 
-        already_sent_indexes: list[int] = []
-        already_sent_objs: list[MemoryObj] = []
+        already_sent_indexes, already_sent_objs, new_indexes = (
+            self._partition_keys(alloc_request.keys)
+        )
+
         remote_buffer_uuids: list[str] = []
         remote_mem_indexes: list[int] = []
+        for idx in new_indexes:
+            key = CacheEngineKey.from_string(alloc_request.keys[idx])
 
-        for idx, key_str in enumerate(alloc_request.keys):
-            key = CacheEngineKey.from_string(key_str)
-            pinned = self._contains_and_pin(key)
-            if pinned is not None:
-                already_sent_indexes.append(idx)
-                already_sent_objs.append(pinned)
-                continue
-
-            # Adjust shape for last (possibly partial) chunk
             alloc_shape = adjust_last_chunk_shape(
-                shape,
-                idx,
-                total_allocs,
-                fmt,
-                alloc_request.last_chunk_toks,
+                shape, idx, total_allocs, fmt, alloc_request.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate,
-                torch.Size(alloc_shape),
-                dtype,
-                fmt,
+                self.allocate, torch.Size(alloc_shape), dtype, fmt,
             )
 
-            # Resolve UUID + page index for this allocation
             buf_uuid, mem_idx = self.transfer_channel.get_local_buffer_refs([mem_obj])
             remote_buffer_uuids.append(buf_uuid[0])
             remote_mem_indexes.append(mem_idx[0])
 
             self.put(key, mem_obj)
 
-        # Release the pin on already-sent objects.  The pin was held to
-        # prevent a concurrent remove() from freeing the page while we
-        # were building the response.  ref_count_down is a no-op on
-        # proxies, so no isinstance guard is needed.
-        for obj in already_sent_objs:
-            obj.ref_count_down()
+        self._release_pinned(already_sent_objs)
 
         return AscendAllocResponse(
             already_sent_indexes=already_sent_indexes,
@@ -923,34 +956,23 @@ class AscendPDBackend(PDBackend):
         dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
         shape = list(msg.shape)
 
-        already_sent_indexes: list[int] = []
-        already_sent_objs: list[MemoryObj] = []
+        already_sent_indexes, already_sent_objs, new_indexes = (
+            self._partition_keys(msg.keys)
+        )
+
         remote_buffer_uuids: list[str] = []
         remote_mem_indexes: list[int] = []
         mem_objs: list[MemoryObj] = []
         mem_keys: list[CacheEngineKey] = []
-        for idx, key_str in enumerate(msg.keys):
-            key = CacheEngineKey.from_string(key_str)
-            pinned = self._contains_and_pin(key)
-            if pinned is not None:
-                already_sent_indexes.append(idx)
-                already_sent_objs.append(pinned)
-                continue
+        for idx in new_indexes:
+            key = CacheEngineKey.from_string(msg.keys[idx])
 
-            # Adjust shape for last (possibly partial) chunk
             alloc_shape = adjust_last_chunk_shape(
-                shape,
-                idx,
-                total_allocs,
-                fmt,
-                msg.last_chunk_toks,
+                shape, idx, total_allocs, fmt, msg.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate,
-                torch.Size(alloc_shape),
-                dtype,
-                fmt,
+                self.allocate, torch.Size(alloc_shape), dtype, fmt,
             )
 
             mem_objs.append(mem_obj)
@@ -959,9 +981,7 @@ class AscendPDBackend(PDBackend):
             mem_keys.append(key)
 
         channel_transfer_spec = build_channel_transfer_spec(
-            sender_id,
-            remote_buffer_uuids,
-            remote_mem_indexes,
+            sender_id, remote_buffer_uuids, remote_mem_indexes,
         )
         self.transfer_channel.batched_read(
             buffers=mem_objs,
@@ -973,11 +993,7 @@ class AscendPDBackend(PDBackend):
         for mem_obj, key in zip(mem_objs, mem_keys, strict=False):
             self.put(key, mem_obj)
 
-        # Release the pin on already-sent objects now that the RDMA reads
-        # are complete and all new data has been stored.  ref_count_down
-        # is a no-op on proxies, so no isinstance guard is needed.
-        for obj in already_sent_objs:
-            obj.ref_count_down()
+        self._release_pinned(already_sent_objs)
 
         # Build a callback that sends PullDoneSignal AFTER the ack reply
         # has been sent on the REP socket.  This prevents the sender's
@@ -996,7 +1012,7 @@ class AscendPDBackend(PDBackend):
     ) -> tuple[PullReadyDoneAck, Optional[Callable]]:
         """Handle a ``PullReadyNotif`` from the sender in **pull mode** with delay.
         Instead of allocating NPU pages, creates lightweight
-        :class:`PDProxyMemoryObj` wrappers and stores them in ``self.data``.
+        :class:`ProxyMemoryObj` wrappers and stores them in ``self.data``.
         The NPU connector will pull data on-the-fly during ``batched_to_gpu``
         using a pipelined ping-pong approach.
 
@@ -1017,23 +1033,13 @@ class AscendPDBackend(PDBackend):
         callback exactly once.  The sender's ``_pull_done_listener_loop``
         receives it and releases the pinned MemObjs.
         """
-        already_sent_indexes: list[int] = []
-        already_sent_objs: list[MemoryObj] = []
-        proxy_indexes: list[int] = []  # indexes into msg arrays for new proxies
+        already_sent_indexes, already_sent_objs, new_indexes = (
+            self._partition_keys(msg.keys)
+        )
 
-        for idx, key_str in enumerate(msg.keys):
-            key = CacheEngineKey.from_string(key_str)
-            pinned = self._contains_and_pin(key)
-            if pinned is not None:
-                already_sent_indexes.append(idx)
-                already_sent_objs.append(pinned)
-            else:
-                proxy_indexes.append(idx)
-
-        num_proxies = len(proxy_indexes)
+        num_proxies = len(new_indexes)
 
         if num_proxies > 0:
-            # Build done_callback that sends PullDoneSignal to sender
             pull_id = msg.pull_id
 
             def done_callback():
@@ -1064,25 +1070,17 @@ class AscendPDBackend(PDBackend):
                 fmt=fmt,
             )
 
-            for proxy_seq, msg_idx in enumerate(proxy_indexes):
+            for proxy_seq, msg_idx in enumerate(new_indexes):
                 key = CacheEngineKey.from_string(msg.keys[msg_idx])
 
-                # Adjust shape for last (possibly partial) chunk — same
-                # as _handle_pull_eager — so the scatter kernel uses the
-                # correct cross-layer strides when interpreting the raw
-                # bytes from the RDMA read.
                 alloc_shape = adjust_last_chunk_shape(
-                    shape,
-                    msg_idx,
-                    total_allocs,
-                    fmt,
-                    msg.last_chunk_toks,
+                    shape, msg_idx, total_allocs, fmt, msg.last_chunk_toks,
                 )
 
-                proxy = PDProxyMemoryObj(
+                proxy = ProxyMemoryObj(
                     backing_obj=None,
                     transfer_channel=self.transfer_channel,
-                    sender_id=sender_id,
+                    target_peer_url=sender_id,
                     remote_buffer_uuid=msg.sender_buffer_uuids[msg_idx],
                     remote_mem_index=msg.sender_mem_indexes[msg_idx],
                     transfer_context=transfer_context,
@@ -1100,10 +1098,7 @@ class AscendPDBackend(PDBackend):
                 sender_id,
             )
 
-        # Release the pin on already-sent objects.  ref_count_down is a
-        # no-op on proxies, so no isinstance guard is needed.
-        for obj in already_sent_objs:
-            obj.ref_count_down()
+        self._release_pinned(already_sent_objs)
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 
