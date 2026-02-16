@@ -12,6 +12,11 @@ struct RegisteredMemoryRecord {
   int32_t device;
 };
 
+struct AllocatedMemoryRecord {
+  uintptr_t ptr;
+  size_t buffSize;
+};
+
 /*
  * We are not responsible for acl init and ctx initialization,
  * we assume the user responsible for ctx initialization
@@ -28,8 +33,10 @@ private:
   HostRegisteredMemoryManager &
   operator=(HostRegisteredMemoryManager &&) = delete;
 
-  std::map<void *, RegisteredMemoryRecord> allocatedMap;
-  mutable std::shared_mutex mux;
+  std::map<void *, RegisteredMemoryRecord> registeredMap;
+  std::map<void *, AllocatedMemoryRecord> allocatedMap;
+  mutable std::shared_mutex regMux;   // Lock for registeredMap
+  mutable std::shared_mutex allocMux; // Lock for allocatedMap
 
 public:
   static HostRegisteredMemoryManager &GetInstance() {
@@ -59,6 +66,10 @@ public:
   void *getDevicePtr(void *hostPtr);
   size_t getRecordSize(void *hostPtr);
   void unregisterAll();
+
+  // Track memory allocations
+  AllocatedMemoryRecord *allocMem(size_t size);
+  void freeMem(void *hostPtr);
 };
 
 std::string get_driver_version();
@@ -71,6 +82,10 @@ void hal_host_unregister_ptr(void *ptr);
 void *register_ptr(void *ptr, size_t size);
 int unregister_ptr(void *ptr);
 void *register_mapping(void *hostPtr, void *devPtr, size_t size);
+
+// Generic memory allocation functions
+void *alloc_mem(size_t size);
+void free_mem(void *ptr);
 
 // Takes in input a host pointer, returns the corresponding device pointer
 void *get_device_ptr(void *ptr);
