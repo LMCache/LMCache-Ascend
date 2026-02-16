@@ -168,8 +168,6 @@ class P2PTransferContext(AscendBaseTransferContext):
         p2p_backend: Any,
         target_peer_url: str,
         lookup_id: str,
-        remote_buffer_uuids: List[str],
-        remote_mem_indexes: List[int],
         loop: asyncio.AbstractEventLoop,
         num_proxies: int,
         memory_allocator: Any = None,
@@ -188,14 +186,11 @@ class P2PTransferContext(AscendBaseTransferContext):
         self._p2p_backend = p2p_backend
         self._target_peer_url = target_peer_url
         self._lookup_id = lookup_id
-        self._remote_buffer_uuids = remote_buffer_uuids
-        self._remote_mem_indexes = remote_mem_indexes
         self._loop = loop
         self._use_npu = use_npu
         logger.info(
             f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
             f"target_peer={target_peer_url}, "
-            f"num_buffer_refs={len(remote_buffer_uuids)}, "
             f"num_proxies={num_proxies}, use_npu={use_npu}, "
             f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
         )
@@ -211,14 +206,6 @@ class P2PTransferContext(AscendBaseTransferContext):
     @property
     def target_peer_url(self) -> str:
         return self._target_peer_url
-
-    @property
-    def remote_buffer_uuids(self) -> List[str]:
-        return self._remote_buffer_uuids
-
-    @property
-    def remote_mem_indexes(self) -> List[int]:
-        return self._remote_mem_indexes
 
     def _send_done(self) -> None:
         """Send the Done signal to the remote peer via the event loop."""

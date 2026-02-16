@@ -650,8 +650,6 @@ class AscendP2PBackend(P2PBackend):
                 p2p_backend=self,
                 target_peer_url=target_peer_url,
                 lookup_id=lookup_id,
-                remote_buffer_uuids=remote_buffer_uuids,
-                remote_mem_indexes=remote_mem_indexes,
                 loop=self.loop,
                 num_proxies=num_hit_chunks,
                 memory_allocator=self.memory_allocator,
