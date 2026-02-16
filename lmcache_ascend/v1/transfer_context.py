@@ -1,21 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-AscendBaseTransferContext: shared base for P2P and PD transfer contexts.
+Transfer contexts for Ascend KV cache transfers.
 
-Both ``P2PTransferContext`` (async, event-loop-driven) and
-``PDTransferContext`` (synchronous, callback-driven) manage the same
-lifecycle:
+Contains ``AscendBaseTransferContext`` (shared base) and its two concrete
+subclasses:
+
+* ``P2PTransferContext`` — async, event-loop-driven (P2P pull mode).
+* ``PDTransferContext`` — synchronous, callback-driven (PD pull mode).
+
+All three manage the same lifecycle:
 
 1. Allocate / release ping-pong buffers from a registered memory pool.
 2. Track a reference count across proxy memory objects.
 3. Send a *Done* signal exactly once when all proxies are consumed.
 
-This module extracts that common logic so subclasses only need to
-implement :meth:`_send_done`.
+Subclasses only need to implement :meth:`_send_done`.
 """
 
 # Standard
 from typing import Any, List, Optional
+import asyncio
 import threading
 
 # Third Party
@@ -146,3 +150,168 @@ class AscendBaseTransferContext:
     def _send_done(self) -> None:
         """Deliver the Done signal.  **Must be overridden by subclasses.**"""
         raise NotImplementedError("_send_done() must be implemented by subclasses")
+
+
+class P2PTransferContext(AscendBaseTransferContext):
+    """Shared context for a batch of ProxyMemoryObjs from the same P2P lookup.
+
+    Manages the lifecycle of a P2P pull-mode transfer, including sending the
+    Done signal to the remote peer when all proxy objects have been consumed
+    (either resolved and used, or released as unused).
+
+    The Done signal tells the remote peer to release its pinned resources.
+    It is sent exactly once, when all proxy objects' ref counts reach zero.
+    """
+
+    def __init__(
+        self,
+        p2p_backend: Any,
+        target_peer_url: str,
+        lookup_id: str,
+        remote_buffer_uuids: List[str],
+        remote_mem_indexes: List[int],
+        loop: asyncio.AbstractEventLoop,
+        num_proxies: int,
+        memory_allocator: Any = None,
+        shapes: Optional[List[torch.Size]] = None,
+        dtypes: Optional[List[torch.dtype]] = None,
+        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
+        use_npu: bool = False,
+    ):
+        super().__init__(
+            num_proxies=num_proxies,
+            memory_allocator=memory_allocator,
+            shapes=shapes,
+            dtypes=dtypes,
+            fmt=fmt,
+        )
+        self._p2p_backend = p2p_backend
+        self._target_peer_url = target_peer_url
+        self._lookup_id = lookup_id
+        self._remote_buffer_uuids = remote_buffer_uuids
+        self._remote_mem_indexes = remote_mem_indexes
+        self._loop = loop
+        self._use_npu = use_npu
+        logger.info(
+            f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
+            f"target_peer={target_peer_url}, "
+            f"num_buffer_refs={len(remote_buffer_uuids)}, "
+            f"num_proxies={num_proxies}, use_npu={use_npu}, "
+            f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
+        )
+
+    @property
+    def _allocator_type(self) -> str:
+        return "gpu" if self._use_npu else "cpu"
+
+    @property
+    def lookup_id(self) -> str:
+        return self._lookup_id
+
+    @property
+    def target_peer_url(self) -> str:
+        return self._target_peer_url
+
+    @property
+    def remote_buffer_uuids(self) -> List[str]:
+        return self._remote_buffer_uuids
+
+    @property
+    def remote_mem_indexes(self) -> List[int]:
+        return self._remote_mem_indexes
+
+    def _send_done(self) -> None:
+        """Send the Done signal to the remote peer via the event loop."""
+        try:
+            future = asyncio.run_coroutine_threadsafe(
+                self._p2p_backend._send_done_signal(
+                    self._lookup_id,
+                    self._target_peer_url,
+                ),
+                self._loop,
+            )
+            future.result(timeout=30)
+        except Exception as e:
+            logger.error(
+                "Failed to send P2P Done signal for lookup_id %s: %s",
+                self._lookup_id,
+                e,
+            )
+
+
+class PDTransferContext(AscendBaseTransferContext):
+    """Shared context for a batch of ProxyMemoryObjs from the same PD
+    pull-mode transfer.
+
+    Manages the lifecycle of a pull-mode transfer for PD, including:
+
+    * Allocating/releasing ping-pong buffers from the *receiver's*
+      registered HCCL memory pool.
+    * Sending a ``DoneSignal`` ZMQ message to the *sender* so it can
+      release its pinned resources. The signal is sent exactly once,
+      triggered by :meth:`send_done_now` (called from the NPU
+      connector after all proxies have been scattered).
+
+    Parameters
+    ----------
+    sender_id : str
+        The sender's HCCL peer ID (used as ``receiver_id`` in
+        ``transfer_spec`` for read operations).
+    done_callback : callable
+        A zero-argument callable that sends the Done signal to the sender.
+        The PD backend supplies this so the context need not know about
+        ZMQ sockets directly.
+    num_proxies : int
+        Total number of :class:`ProxyMemoryObj` instances that share
+        this context.
+    memory_allocator : PagedCpuGpuMemoryAllocator
+        The receiver's memory allocator for ping-pong buffer allocation.
+    shapes : list[torch.Size]
+        Tensor shapes for buffer allocation.
+    dtypes : list[torch.dtype]
+        Tensor dtypes for buffer allocation.
+    fmt : MemoryFormat
+        Memory format for buffer allocation.
+    """
+
+    def __init__(
+        self,
+        sender_id: str,
+        done_callback: Any,
+        num_proxies: int,
+        memory_allocator: Any,
+        shapes: List[torch.Size],
+        dtypes: List[torch.dtype],
+        fmt: MemoryFormat,
+    ):
+        super().__init__(
+            num_proxies=num_proxies,
+            memory_allocator=memory_allocator,
+            shapes=shapes,
+            dtypes=dtypes,
+            fmt=fmt,
+        )
+        self._sender_id = sender_id
+        self._done_callback = done_callback
+        self._loop = None
+
+        logger.debug(
+            "PDTransferContext: sender_id=%s, num_proxies=%d, "
+            "shapes=%s, dtypes=%s, fmt=%s",
+            sender_id,
+            num_proxies,
+            shapes,
+            dtypes,
+            fmt,
+        )
+
+    def _send_done(self) -> None:
+        """Invoke the done callback to signal the sender."""
+        try:
+            self._done_callback()
+        except Exception as e:
+            logger.error(
+                "Failed to send PD Done signal to sender %s: %s",
+                self._sender_id,
+                e,
+            )

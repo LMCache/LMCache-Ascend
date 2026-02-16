@@ -28,93 +28,6 @@ from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 logger = init_logger(__name__)
 
 
-class P2PTransferContext(AscendBaseTransferContext):
-    """Shared context for a batch of ProxyMemoryObjs from the same P2P lookup.
-
-    Manages the lifecycle of a P2P pull-mode transfer, including sending the
-    Done signal to the remote peer when all proxy objects have been consumed
-    (either resolved and used, or released as unused).
-
-    The Done signal tells the remote peer to release its pinned resources.
-    It is sent exactly once, when all proxy objects' ref counts reach zero.
-    """
-
-    def __init__(
-        self,
-        p2p_backend: Any,
-        target_peer_init_url: str,
-        lookup_id: str,
-        remote_buffer_uuids: List[str],
-        remote_mem_indexes: List[int],
-        loop: asyncio.AbstractEventLoop,
-        num_proxies: int,
-        memory_allocator: Any = None,
-        shapes: Optional[List[torch.Size]] = None,
-        dtypes: Optional[List[torch.dtype]] = None,
-        fmt: MemoryFormat = MemoryFormat.UNDEFINED,
-        use_npu: bool = False,
-    ):
-        super().__init__(
-            num_proxies=num_proxies,
-            memory_allocator=memory_allocator,
-            shapes=shapes,
-            dtypes=dtypes,
-            fmt=fmt,
-        )
-        self._p2p_backend = p2p_backend
-        self._target_peer_init_url = target_peer_init_url
-        self._lookup_id = lookup_id
-        self._remote_buffer_uuids = remote_buffer_uuids
-        self._remote_mem_indexes = remote_mem_indexes
-        self._loop = loop
-        self._use_npu = use_npu
-        logger.info(
-            f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
-            f"target_peer={target_peer_init_url}, "
-            f"num_buffer_refs={len(remote_buffer_uuids)}, "
-            f"num_proxies={num_proxies}, use_npu={use_npu}, "
-            f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
-        )
-
-    @property
-    def _allocator_type(self) -> str:
-        return "gpu" if self._use_npu else "cpu"
-
-    @property
-    def lookup_id(self) -> str:
-        return self._lookup_id
-
-    @property
-    def target_peer_init_url(self) -> str:
-        return self._target_peer_init_url
-
-    @property
-    def remote_buffer_uuids(self) -> List[str]:
-        return self._remote_buffer_uuids
-
-    @property
-    def remote_mem_indexes(self) -> List[int]:
-        return self._remote_mem_indexes
-
-    def _send_done(self) -> None:
-        """Send the Done signal to the remote peer via the event loop."""
-        try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._p2p_backend._send_done_signal(
-                    self._lookup_id,
-                    self._target_peer_init_url,
-                ),
-                self._loop,
-            )
-            future.result(timeout=30)
-        except Exception as e:
-            logger.error(
-                "Failed to send P2P Done signal for lookup_id %s: %s",
-                self._lookup_id,
-                e,
-            )
-
-
 class ProxyMemoryObj(MemoryObj):
     """A deferred-fetch memory object for P2P KV cache transfer.
 
@@ -133,7 +46,7 @@ class ProxyMemoryObj(MemoryObj):
         self,
         backing_obj: Optional[MemoryObj],
         transfer_channel: BaseTransferChannel,
-        target_peer_init_url: str,
+        target_peer_url: str,
         remote_buffer_uuid: str,
         remote_mem_index: int,
         transfer_context: AscendBaseTransferContext,
@@ -149,7 +62,7 @@ class ProxyMemoryObj(MemoryObj):
                 lightweight mode (ping-pong pipeline).
             transfer_channel: The transfer channel (e.g., HCCL) to use
                 for reading data from the remote peer.
-            target_peer_init_url: The remote peer's init URL, used as the
+            target_peer_url: The remote peer's URL, used as the
                 receiver_id for the transfer channel.
             remote_buffer_uuid: Opaque UUID identifying the remote buffer.
             remote_mem_index: Mem index within the remote buffer.
@@ -162,7 +75,7 @@ class ProxyMemoryObj(MemoryObj):
         # Don't call super().__init__() since we manage meta ourselves
         self._backing_obj = backing_obj
         self._transfer_channel = transfer_channel
-        self._target_peer_init_url = target_peer_init_url
+        self._target_peer_url = target_peer_url
         self._remote_buffer_uuid = remote_buffer_uuid
         self._remote_mem_index = remote_mem_index
         self._transfer_context = transfer_context
@@ -258,7 +171,7 @@ class ProxyMemoryObj(MemoryObj):
         )
 
         channel_transfer_spec = {
-            "receiver_id": self._target_peer_init_url,
+            "receiver_id": self._target_peer_url,
             "remote_buffer_uuids": [self._remote_buffer_uuid],
             "remote_mem_indexes": [self._remote_mem_index],
         }
@@ -304,7 +217,7 @@ class ProxyMemoryObj(MemoryObj):
             remote_mem_indexes.append(p._remote_mem_index)
 
         channel_transfer_spec = {
-            "receiver_id": first._target_peer_init_url,
+            "receiver_id": first._target_peer_url,
             "remote_buffer_uuids": remote_buffer_uuids,
             "remote_mem_indexes": remote_mem_indexes,
         }
@@ -368,7 +281,7 @@ class ProxyMemoryObj(MemoryObj):
             remote_mem_indexes.append(p._remote_mem_index)
 
         channel_transfer_spec = {
-            "receiver_id": first._target_peer_init_url,
+            "receiver_id": first._target_peer_url,
             "remote_buffer_uuids": remote_buffer_uuids,
             "remote_mem_indexes": remote_mem_indexes,
         }

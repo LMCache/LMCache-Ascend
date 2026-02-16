@@ -35,7 +35,8 @@ import msgspec
 import zmq.asyncio
 
 # First Party
-from lmcache_ascend.v1.proxy_memory_obj import P2PTransferContext, ProxyMemoryObj
+from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
+from lmcache_ascend.v1.transfer_context import P2PTransferContext
 from lmcache_ascend.v1.storage_backend.utils import (
     build_channel_transfer_spec,
     release_memory_objects,
@@ -458,7 +459,7 @@ class AscendP2PBackend(P2PBackend):
     async def _send_lookup_request_with_retry(
         self,
         lookup_id: str,
-        target_peer_init_url: str,
+        target_peer_url: str,
         msg: AscendBatchedLookupAndGetMsg,
     ) -> Optional[AscendP2PMsg]:
         """Send lookup request to peer with retry logic.
@@ -467,7 +468,7 @@ class AscendP2PBackend(P2PBackend):
         """
         retry_count = 0
         while retry_count < self.max_retry_count:
-            peer_info = self.target_peer_info_mapping[target_peer_init_url]
+            peer_info = self.target_peer_info_mapping[target_peer_url]
             async with peer_info.lookup_lock:
                 try:
                     retry_count += 1
@@ -485,7 +486,7 @@ class AscendP2PBackend(P2PBackend):
                             lookup_id,
                             retry_count,
                         )
-                        await self._ensure_peer_connection(target_peer_init_url, True)
+                        await self._ensure_peer_connection(target_peer_url, True)
                     else:
                         return ret_msg
                 except zmq.ZMQError as e:
@@ -494,7 +495,7 @@ class AscendP2PBackend(P2PBackend):
                         lookup_id,
                         e,
                     )
-                    await self._ensure_peer_connection(target_peer_init_url, True)
+                    await self._ensure_peer_connection(target_peer_url, True)
                     if retry_count == self.max_retry_count:
                         logger.error(
                             "Max retry count reached for lookup_id %s",
@@ -514,7 +515,7 @@ class AscendP2PBackend(P2PBackend):
     async def _send_done_signal(
         self,
         lookup_id: str,
-        target_peer_init_url: str,
+        target_peer_url: str,
     ) -> None:
         """Send Done signal to peer so it can release pinned resources.
 
@@ -524,7 +525,7 @@ class AscendP2PBackend(P2PBackend):
             done_msg = AscendBatchedLookupAndGetDoneMsg(
                 lookup_id=lookup_id,
             )
-            peer_info = self.target_peer_info_mapping[target_peer_init_url]
+            peer_info = self.target_peer_info_mapping[target_peer_url]
             async with peer_info.lookup_lock:
                 await peer_info.lookup_socket.send(msgspec.msgpack.encode(done_msg))
                 # Wait for Ack (required for ZMQ REQ/REP state machine)
@@ -540,7 +541,7 @@ class AscendP2PBackend(P2PBackend):
     async def _handle_pull_mode_transfer(
         self,
         lookup_id: str,
-        target_peer_init_url: str,
+        target_peer_url: str,
         hit_mem_objs: list[MemoryObj],
         remote_buffer_uuids: list[str],
         remote_mem_indexes: list[int],
@@ -560,7 +561,7 @@ class AscendP2PBackend(P2PBackend):
         read_success = False
         try:
             channel_transfer_spec = build_channel_transfer_spec(
-                target_peer_init_url,
+                target_peer_url,
                 remote_buffer_uuids,
                 remote_mem_indexes,
             )
@@ -578,7 +579,7 @@ class AscendP2PBackend(P2PBackend):
             )
             # Do not return yet — must send Done signal to server
 
-        await self._send_done_signal(lookup_id, target_peer_init_url)
+        await self._send_done_signal(lookup_id, target_peer_url)
         return read_success
 
     async def batched_get_non_blocking(
@@ -587,7 +588,7 @@ class AscendP2PBackend(P2PBackend):
         keys: list[CacheEngineKey],
         transfer_spec: Any = None,
     ) -> list[MemoryObj]:
-        target_peer_init_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
+        target_peer_url, _ = self.lookup_id_to_peer_mapping.pop(lookup_id)
 
         assert isinstance(transfer_spec, dict)
         cum_chunk_lengths = transfer_spec.get("cum_chunk_lengths", None)
@@ -625,7 +626,7 @@ class AscendP2PBackend(P2PBackend):
         )
 
         ret_msg = await self._send_lookup_request_with_retry(
-            lookup_id, target_peer_init_url, msg
+            lookup_id, target_peer_url, msg
         )
         if ret_msg is None or isinstance(ret_msg, P2PErrorMsg):
             if isinstance(ret_msg, P2PErrorMsg):
@@ -647,7 +648,7 @@ class AscendP2PBackend(P2PBackend):
             remote_mem_indexes = ret_msg.remote_mem_indexes
             transfer_context = P2PTransferContext(
                 p2p_backend=self,
-                target_peer_init_url=target_peer_init_url,
+                target_peer_url=target_peer_url,
                 lookup_id=lookup_id,
                 remote_buffer_uuids=remote_buffer_uuids,
                 remote_mem_indexes=remote_mem_indexes,
@@ -665,7 +666,7 @@ class AscendP2PBackend(P2PBackend):
                 proxy = ProxyMemoryObj(
                     backing_obj=None,
                     transfer_channel=self.transfer_channel,
-                    target_peer_init_url=target_peer_init_url,
+                    target_peer_url=target_peer_url,
                     remote_buffer_uuid=remote_buffer_uuids[idx],
                     remote_mem_index=remote_mem_indexes[idx],
                     transfer_context=transfer_context,
@@ -691,7 +692,7 @@ class AscendP2PBackend(P2PBackend):
             if not self.delay_pull:
                 success = await self._handle_pull_mode_transfer(
                     lookup_id,
-                    target_peer_init_url,
+                    target_peer_url,
                     hit_mem_objs,
                     ret_msg.remote_buffer_uuids,
                     ret_msg.remote_mem_indexes,
