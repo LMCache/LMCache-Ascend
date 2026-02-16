@@ -910,12 +910,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 len(proxy_items),
             )
 
-            # Allocate ping-pong buffer pools
+            # Allocate ping-pong buffer pools.
+            # Initialized to None so the finally block can safely skip
+            # release if allocation itself fails.
             pool_size = min(pipeline_depth, len(proxy_items))
-            pool_a = first_ctx.allocate_buffers(pool_size)
-            pool_b = first_ctx.allocate_buffers(pool_size)
+            pool_a = None
+            pool_b = None
 
             try:
+                pool_a = first_ctx.allocate_buffers(pool_size)
+                pool_b = first_ctx.allocate_buffers(pool_size)
+
                 pools = [pool_a, pool_b]
                 current_pool = 0
 
@@ -968,12 +973,15 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self._clear_proxy_batch(prev_batch)
             finally:
                 # Guarantee ping-pong buffers are returned and the Done
-                # signal is sent even if the pipeline raises.  Without
-                # this, an exception would leak NPU pages and leave the
-                # sender's pinned resources stuck until its TTL expires.
+                # signal is sent even if the pipeline raises or
+                # allocate_buffers itself fails.  Without this, an
+                # exception would leak NPU pages and leave the sender's
+                # pinned resources stuck until its TTL expires.
                 self.load_stream.synchronize()
-                first_ctx.release_buffers(pool_a)
-                first_ctx.release_buffers(pool_b)
+                if pool_a is not None:
+                    first_ctx.release_buffers(pool_a)
+                if pool_b is not None:
+                    first_ctx.release_buffers(pool_b)
 
                 for proxy, _, _ in proxy_items:
                     proxy.mark_consumed()

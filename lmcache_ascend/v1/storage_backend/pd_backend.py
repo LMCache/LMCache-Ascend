@@ -59,6 +59,7 @@ class AscendAllocResponse(AllocResponse):
     """
 
     remote_buffer_uuids: list[str]
+    alloc_failed: bool = False
 
 
 # ──────────────────────────────────────────────────────────
@@ -88,9 +89,15 @@ class PullReadyNotif(msgspec.Struct, tag=True):
 
 class PullReadyDoneAck(msgspec.Struct, tag=True):
     """Sent by the receiver back to the sender to acknowledge the
-    PullReadyNotif.  Contains indexes of keys already received."""
+    PullReadyNotif.  Contains indexes of keys already received.
+
+    When ``alloc_failed`` is ``True``, the receiver could not allocate
+    memory for the requested chunks.  The sender should release its
+    pinned resources and skip the transfer.
+    """
 
     already_sent_indexes: list[int]
+    alloc_failed: bool = False
 
 
 class PullDoneSignal(msgspec.Struct, tag=True):
@@ -165,6 +172,17 @@ class AscendPDBackend(PDBackend):
 
         # Keep config ref for extra_config access (e.g., pull_done_port)
         self._config = config
+
+        # Per-peer circuit breaker: when a receiver fails to allocate,
+        # skip all transfers to that peer until the TTL expires.
+        # Protected by _peer_alloc_backoff_lock to prevent a race
+        # where a concurrent call slips past the check before the
+        # failing call has set the backoff timestamp.
+        self._peer_alloc_backoff: dict[str, float] = {}
+        self._peer_alloc_backoff_lock = threading.Lock()
+        self._peer_alloc_backoff_ttl: float = getattr(
+            config, "pd_alloc_fail_backoff_ttl", 5.0
+        )
 
         # Peer init URL / local id
         peer_init_url = None
@@ -396,14 +414,6 @@ class AscendPDBackend(PDBackend):
                 new_indexes.append(idx)
         return already_sent_indexes, already_sent_objs, new_indexes
 
-    def _release_pinned(self, objs: list[MemoryObj]) -> None:
-        """Release the pin on previously pinned objects.
-
-        ``ref_count_down`` is a no-op on proxy objects, so no
-        ``isinstance`` guard is needed.
-        """
-        for obj in objs:
-            obj.ref_count_down()
 
     # ──────────────────────────────────────────────────────────
     # Sender / prefiller overrides
@@ -482,7 +492,7 @@ class AscendPDBackend(PDBackend):
 
             sender_alloc = (
                 self.memory_allocator.cpu_allocator
-                if self.use_cpu_offload
+                if self.use_cpu_offload or self.pd_config.buffer_device == "cpu"
                 else self.memory_allocator.gpu_allocator
             )
             total_pages = sender_alloc.buffer_size // sender_alloc.align_bytes
@@ -638,7 +648,44 @@ class AscendPDBackend(PDBackend):
         buffer references so the receiver can read on-demand.  The sender
         pins the MemObjs and waits for a Done signal from the receiver
         before releasing them.
+
+        If the target peer is currently backed off (circuit breaker),
+        the transfer is skipped entirely to avoid wasted network I/O.
         """
+        # Per-peer circuit breaker: skip transfer if the receiver
+        # recently reported an allocation failure.  The lock prevents a
+        # concurrent call from slipping past the check before a failing
+        # call has set the backoff timestamp.
+        receiver_init_port = transfer_spec.receiver_init_port[self.tp_rank]
+        receiver_id = transfer_spec.receiver_host + str(receiver_init_port)
+        with self._peer_alloc_backoff_lock:
+            now = time.monotonic()
+            backoff_until = self._peer_alloc_backoff.get(receiver_id, 0)
+            if now < backoff_until:
+                logger.warning(
+                    "Peer %s is backed off (%.1fs remaining). "
+                    "Skipping KV transfer for %d chunks.",
+                    receiver_id,
+                    backoff_until - now,
+                    len(memory_objs),
+                )
+                # NOTE: Do NOT call release_memory_objects here.
+                # The caller (storage_manager.batched_put) always
+                # calls ref_count_down on every memory_obj after
+                # batched_submit_put_task returns (line 420 in
+                # storage_manager.py).  Since we never called
+                # ref_count_up (that happens inside the pull/push
+                # sub-methods), calling release_memory_objects here
+                # would double-decrement the ref count, causing a
+                # premature free and PagedTensorMemoryAllocator
+                # double-free corruption.
+                if transfer_spec.is_last_prefill:
+                    notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                    self.proxy_side_channel.send(
+                        msgspec.msgpack.encode(notif_msg)
+                    )
+                return
+
         if self.pull_mode:
             self._batched_submit_put_task_pull(keys, memory_objs, transfer_spec)
         else:
@@ -669,6 +716,28 @@ class AscendPDBackend(PDBackend):
         # Remote allocation — returns UUID-based refs
         alloc_request = self._get_remote_alloc_request(keys, memory_objs)
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
+
+        if alloc_response.alloc_failed:
+            # Receiver could not allocate — release all pinned
+            # MemObjs, set per-peer backoff, and skip transfer.
+            logger.warning(
+                "Push mode: receiver %s reported alloc_failed. "
+                "Releasing %d pinned MemObjs.",
+                receiver_id,
+                len(memory_objs),
+            )
+            release_memory_objects(memory_objs)
+            with self._peer_alloc_backoff_lock:
+                self._peer_alloc_backoff[receiver_id] = (
+                    time.monotonic() + self._peer_alloc_backoff_ttl
+                )
+            if transfer_spec.is_last_prefill:
+                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                self.proxy_side_channel.send(
+                    msgspec.msgpack.encode(notif_msg)
+                )
+            return
+
         already_sent_indexes = alloc_response.already_sent_indexes
         remote_buffer_uuids = alloc_response.remote_buffer_uuids
         remote_mem_indexes = alloc_response.remote_indexes
@@ -786,6 +855,27 @@ class AscendPDBackend(PDBackend):
             f"Expected PullReadyDoneAck, got {type(ack)}"
         )
 
+        if ack.alloc_failed:
+            # Receiver could not allocate — release all pinned
+            # MemObjs, set per-peer backoff, and skip pending.
+            logger.warning(
+                "Pull mode: receiver %s reported alloc_failed. "
+                "Releasing %d pinned MemObjs.",
+                receiver_id,
+                len(memory_objs),
+            )
+            release_memory_objects(memory_objs)
+            with self._peer_alloc_backoff_lock:
+                self._peer_alloc_backoff[receiver_id] = (
+                    time.monotonic() + self._peer_alloc_backoff_ttl
+                )
+            if transfer_spec.is_last_prefill:
+                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
+                self.proxy_side_channel.send(
+                    msgspec.msgpack.encode(notif_msg)
+                )
+            return
+
         # Release already-sent objects, pin the rest
         already_sent = set(ack.already_sent_indexes)
         pinned_objs = []
@@ -895,6 +985,8 @@ class AscendPDBackend(PDBackend):
 
         remote_buffer_uuids: list[str] = []
         remote_mem_indexes: list[int] = []
+        allocated_keys: list[CacheEngineKey] = []
+        allocated_objs: list[MemoryObj] = []
         for idx in new_indexes:
             key = CacheEngineKey.from_string(alloc_request.keys[idx])
 
@@ -906,13 +998,34 @@ class AscendPDBackend(PDBackend):
                 self.allocate, torch.Size(alloc_shape), dtype, fmt,
             )
 
+            if mem_obj is None:
+                # Allocation timed out — undo already-stored chunks and
+                # report failure to the sender.
+                logger.error(
+                    "Push-mode: allocation failed at chunk %d/%d. "
+                    "Releasing %d already-allocated objects.",
+                    idx, total_allocs, len(allocated_objs),
+                )
+                with self.data_lock:
+                    for k in allocated_keys:
+                        self.data.pop(k, None)
+                release_memory_objects(allocated_objs + already_sent_objs)
+                return AscendAllocResponse(
+                    already_sent_indexes=already_sent_indexes,
+                    remote_buffer_uuids=[],
+                    remote_indexes=[],
+                    alloc_failed=True,
+                )
+
             buf_uuid, mem_idx = self.transfer_channel.get_local_buffer_refs([mem_obj])
             remote_buffer_uuids.append(buf_uuid[0])
             remote_mem_indexes.append(mem_idx[0])
 
             self.put(key, mem_obj)
+            allocated_keys.append(key)
+            allocated_objs.append(mem_obj)
 
-        self._release_pinned(already_sent_objs)
+        release_memory_objects(already_sent_objs)
 
         return AscendAllocResponse(
             already_sent_indexes=already_sent_indexes,
@@ -975,6 +1088,24 @@ class AscendPDBackend(PDBackend):
                 self.allocate, torch.Size(alloc_shape), dtype, fmt,
             )
 
+            if mem_obj is None:
+                # Allocation timed out — clean up already-allocated
+                # objects and report failure to the sender.
+                logger.error(
+                    "Pull-eager: allocation failed at chunk %d/%d. "
+                    "Releasing %d already-allocated objects.",
+                    idx, total_allocs, len(mem_objs),
+                )
+                # release the mem objs + sent
+                release_memory_objects(mem_objs + already_sent_objs)
+                return (
+                    PullReadyDoneAck(
+                        already_sent_indexes=already_sent_indexes,
+                        alloc_failed=True,
+                    ),
+                    None,
+                )
+
             mem_objs.append(mem_obj)
             remote_buffer_uuids.append(msg.sender_buffer_uuids[idx])
             remote_mem_indexes.append(msg.sender_mem_indexes[idx])
@@ -993,7 +1124,7 @@ class AscendPDBackend(PDBackend):
         for mem_obj, key in zip(mem_objs, mem_keys, strict=False):
             self.put(key, mem_obj)
 
-        self._release_pinned(already_sent_objs)
+        release_memory_objects(already_sent_objs)
 
         # Build a callback that sends PullDoneSignal AFTER the ack reply
         # has been sent on the REP socket.  This prevents the sender's
@@ -1098,7 +1229,7 @@ class AscendPDBackend(PDBackend):
                 sender_id,
             )
 
-        self._release_pinned(already_sent_objs)
+        release_memory_objects(already_sent_objs)
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 

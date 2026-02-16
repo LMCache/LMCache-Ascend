@@ -53,8 +53,9 @@ def allocate_with_retry(
     dtype: torch.dtype,
     fmt: MemoryFormat,
     poll_interval: float = 0.01,
-) -> MemoryObj:
-    """Busy-loop until ``allocate_fn`` succeeds.
+    timeout: float = 5.0,
+) -> Optional[MemoryObj]:
+    """Retry ``allocate_fn`` until it succeeds or *timeout* elapses.
 
     Parameters
     ----------
@@ -64,19 +65,27 @@ def allocate_with_retry(
         Arguments forwarded to *allocate_fn*.
     poll_interval:
         Seconds to sleep between retries.
+    timeout:
+        Maximum seconds to keep retrying.  Returns ``None`` on timeout.
 
     Returns
     -------
-    MemoryObj
-        A successfully allocated memory object (never ``None``).
+    Optional[MemoryObj]
+        A successfully allocated memory object, or ``None`` if the
+        allocation could not be fulfilled within *timeout* seconds.
     """
+    deadline = time.monotonic() + timeout
     mem_obj = allocate_fn(shape, dtype, fmt)
     while mem_obj is None:
+        if time.monotonic() >= deadline:
+            logger.error(
+                "Memory allocation timed out after %.1fs", timeout
+            )
+            return None
         logger.warning("Failed to allocate memory object, retrying...")
         time.sleep(poll_interval)
         mem_obj = allocate_fn(shape, dtype, fmt)
     return mem_obj
-
 
 def adjust_last_chunk_shape(
     shape: list[int],
