@@ -7,9 +7,11 @@ role-neutral code lives here: initialisation, allocator setup, memory
 allocation, and key lookup/partitioning.
 """
 
+# Standard
 from typing import Optional, Union
 import threading
 
+# Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
@@ -26,9 +28,10 @@ import torch
 import torch_npu  # noqa: F401
 import zmq
 
+# First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
-from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
 from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import AscendPDReceiverMixin
+from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
 from lmcache_ascend.v1.storage_backend.utils import resolve_memory_format
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
@@ -41,8 +44,8 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
     Overrides the base :class:`PDBackend` to:
 
     * initialize **both** CPU and NPU allocators so that the sender can
-      offload KV caches to CPU first (pd_use_cpu_offload) and 
-      transfer via RDMA from host memory, 
+      offload KV caches to CPU first (pd_use_cpu_offload) and
+      transfer via RDMA from host memory,
       while the receiver allocates directly on NPU (pd_buffer_device),
     * create an HCCL transfer channel via
       :func:`lmcache_ascend.v1.transfer_channel.CreateTransferChannel`
@@ -87,7 +90,9 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         self.delay_pull: bool = getattr(config, "pd_delay_pull", False)
         if self.delay_pull:
             assert self.pull_mode, "Delay pull only works when pull mode is enabled"
-            assert self.pd_config.buffer_device.startswith("npu"), "Delay pull only works when buffer device is NPU"
+            assert self.pd_config.buffer_device.startswith("npu"), (
+                "Delay pull only works when buffer device is NPU"
+            )
 
         # Keep config ref for extra_config access (e.g., pull_done_port)
         self._config = config
@@ -246,8 +251,9 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             fmt = MemoryFormat.KV_2LTD
         # Sender + cpu_offload: offload to CPU first  ->  RDMA from CPU
         # Otherwise (receiver, or sender without offload): allocate on NPU
-        use_cpu = (self.pd_config.buffer_device == "cpu" or
-            (self.pd_config.role == "sender" and self.use_cpu_offload))
+        use_cpu = self.pd_config.buffer_device == "cpu" or (
+            self.pd_config.role == "sender" and self.use_cpu_offload
+        )
         alloc_type = "cpu" if use_cpu else "gpu"
         return self.memory_allocator.allocate(
             shapes, dtypes, fmt=fmt, allocator_type=alloc_type

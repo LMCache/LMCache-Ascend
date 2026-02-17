@@ -5,9 +5,11 @@ Contains all receiver-side methods: push-mode allocation, pull-mode
 eager/delay handlers, done-signal sending, and the alloc message loop.
 """
 
+# Standard
 from typing import Callable, Optional
 import time
 
+# Third Party
 from lmcache.logging import init_logger
 from lmcache.utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
@@ -21,8 +23,8 @@ import torch
 import torch_npu  # noqa: F401
 import zmq
 
+# First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
-from lmcache_ascend.v1.transfer_context import PDTransferContext
 from lmcache_ascend.v1.storage_backend.pd.messages import (
     AscendAllocResponse,
     AscendPDMsg,
@@ -36,6 +38,7 @@ from lmcache_ascend.v1.storage_backend.utils import (
     build_channel_transfer_spec,
     release_memory_objects,
 )
+from lmcache_ascend.v1.transfer_context import PDTransferContext
 
 logger = init_logger(__name__)
 
@@ -77,8 +80,8 @@ class AscendPDReceiverMixin:
         dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
         shape = list(alloc_request.shape)
 
-        already_sent_indexes, already_sent_objs, new_indexes = (
-            self._partition_keys(alloc_request.keys)
+        already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
+            alloc_request.keys
         )
 
         remote_buffer_uuids: list[str] = []
@@ -89,11 +92,18 @@ class AscendPDReceiverMixin:
             key = CacheEngineKey.from_string(alloc_request.keys[idx])
 
             alloc_shape = adjust_last_chunk_shape(
-                shape, idx, total_allocs, fmt, alloc_request.last_chunk_toks,
+                shape,
+                idx,
+                total_allocs,
+                fmt,
+                alloc_request.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+                self.allocate,
+                torch.Size(alloc_shape),
+                dtype,
+                fmt,
             )
 
             if mem_obj is None:
@@ -102,7 +112,9 @@ class AscendPDReceiverMixin:
                 logger.error(
                     "Push-mode: allocation failed at chunk %d/%d. "
                     "Releasing %d already-allocated objects.",
-                    idx, total_allocs, len(allocated_objs),
+                    idx,
+                    total_allocs,
+                    len(allocated_objs),
                 )
                 with self.data_lock:
                     for k in allocated_keys:
@@ -169,8 +181,8 @@ class AscendPDReceiverMixin:
         dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
         shape = list(msg.shape)
 
-        already_sent_indexes, already_sent_objs, new_indexes = (
-            self._partition_keys(msg.keys)
+        already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
+            msg.keys
         )
 
         remote_buffer_uuids: list[str] = []
@@ -181,11 +193,18 @@ class AscendPDReceiverMixin:
             key = CacheEngineKey.from_string(msg.keys[idx])
 
             alloc_shape = adjust_last_chunk_shape(
-                shape, idx, total_allocs, fmt, msg.last_chunk_toks,
+                shape,
+                idx,
+                total_allocs,
+                fmt,
+                msg.last_chunk_toks,
             )
 
             mem_obj = allocate_with_retry(
-                self.allocate, torch.Size(alloc_shape), dtype, fmt,
+                self.allocate,
+                torch.Size(alloc_shape),
+                dtype,
+                fmt,
             )
 
             if mem_obj is None:
@@ -194,7 +213,9 @@ class AscendPDReceiverMixin:
                 logger.error(
                     "Pull-eager: allocation failed at chunk %d/%d. "
                     "Releasing %d already-allocated objects.",
-                    idx, total_allocs, len(mem_objs),
+                    idx,
+                    total_allocs,
+                    len(mem_objs),
                 )
                 # release the mem objs + sent
                 release_memory_objects(mem_objs + already_sent_objs)
@@ -212,7 +233,9 @@ class AscendPDReceiverMixin:
             mem_keys.append(key)
 
         channel_transfer_spec = build_channel_transfer_spec(
-            sender_id, remote_buffer_uuids, remote_mem_indexes,
+            sender_id,
+            remote_buffer_uuids,
+            remote_mem_indexes,
         )
         self.transfer_channel.batched_read(
             buffers=mem_objs,
@@ -264,8 +287,8 @@ class AscendPDReceiverMixin:
         callback exactly once.  The sender's ``_pull_done_listener_loop``
         receives it and releases the pinned MemObjs.
         """
-        already_sent_indexes, already_sent_objs, new_indexes = (
-            self._partition_keys(msg.keys)
+        already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
+            msg.keys
         )
 
         num_proxies = len(new_indexes)
@@ -305,7 +328,11 @@ class AscendPDReceiverMixin:
                 key = CacheEngineKey.from_string(msg.keys[msg_idx])
 
                 alloc_shape = adjust_last_chunk_shape(
-                    shape, msg_idx, total_allocs, fmt, msg.last_chunk_toks,
+                    shape,
+                    msg_idx,
+                    total_allocs,
+                    fmt,
+                    msg.last_chunk_toks,
                 )
 
                 proxy = ProxyMemoryObj(

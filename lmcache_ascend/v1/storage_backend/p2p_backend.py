@@ -36,13 +36,13 @@ import zmq.asyncio
 
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
-from lmcache_ascend.v1.transfer_context import P2PTransferContext
 from lmcache_ascend.v1.storage_backend.utils import (
     build_channel_transfer_spec,
     release_memory_objects,
     resolve_memory_format,
 )
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
+from lmcache_ascend.v1.transfer_context import P2PTransferContext
 
 if TYPE_CHECKING:
     # Third Party

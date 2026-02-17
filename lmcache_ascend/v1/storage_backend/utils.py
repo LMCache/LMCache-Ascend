@@ -78,14 +78,13 @@ def allocate_with_retry(
     mem_obj = allocate_fn(shape, dtype, fmt)
     while mem_obj is None:
         if time.monotonic() >= deadline:
-            logger.error(
-                "Memory allocation timed out after %.1fs", timeout
-            )
+            logger.error("Memory allocation timed out after %.1fs", timeout)
             return None
         logger.warning("Failed to allocate memory object, retrying...")
         time.sleep(poll_interval)
         mem_obj = allocate_fn(shape, dtype, fmt)
     return mem_obj
+
 
 def adjust_last_chunk_shape(
     shape: list[int],
