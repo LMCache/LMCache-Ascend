@@ -145,9 +145,18 @@ class AscendP2PBackend(P2PBackend):
         # TODO(chunxiaozheng): location is not used for now
         self.lookup_id_to_peer_mapping: dict[str, tuple[str, str]] = {}
 
-        # Dictionary to store memory objects during pull mode operations
-        # Key: lookup_id, Value: list of MemoryObj
-        self.pending_pull_resources: dict[str, list[MemoryObj]] = {}
+        # Dictionary to store memory objects during pull mode operations.
+        # Key: lookup_id, Value: (pinned_at_timestamp, list of MemoryObj).
+        # The timestamp is used by the TTL sweep to release entries whose
+        # peer crashed and never sent the Done signal.
+        self.pending_pull_resources: dict[str, tuple[float, list[MemoryObj]]] = {}
+
+        # TTL in seconds for pending_pull_resources entries.  If a peer
+        # crashes mid-pull and never sends the Done signal, pinned MemObjs
+        # are released after this timeout to prevent memory leaks.
+        self._pull_pending_ttl: float = config.get_extra_config_value(
+            "p2p_pull_pending_ttl", 360.0
+        )
 
         # NOTE (gingfung): adding support using npu memory.
         self.use_npu = config.p2p_use_npu
@@ -259,6 +268,9 @@ class AscendP2PBackend(P2PBackend):
         asyncio.run_coroutine_threadsafe(
             self._run_peer_request_handler_with_recovery(), loop
         )
+        asyncio.run_coroutine_threadsafe(
+            self._sweep_expired_pending_pull_resources(), loop
+        )
 
     async def _handle_peer_requests(self):
         """
@@ -355,8 +367,13 @@ class AscendP2PBackend(P2PBackend):
                         self.transfer_channel.get_local_buffer_refs(mem_objs)
                     )
 
-                    # Store mem_objs to prevent premature release
-                    self.pending_pull_resources[lookup_id] = mem_objs
+                    # Store mem_objs to prevent premature release.
+                    # Record the timestamp so the TTL sweep can detect
+                    # stale entries if the peer never sends Done.
+                    self.pending_pull_resources[lookup_id] = (
+                        self.loop.time(),
+                        mem_objs,
+                    )
                     should_release = False
                 else:
                     logger.warning(
@@ -405,13 +422,60 @@ class AscendP2PBackend(P2PBackend):
         logger.info("Received Done signal for lookup_id %s", lookup_id)
 
         if lookup_id in self.pending_pull_resources:
-            mem_objs = self.pending_pull_resources.pop(lookup_id)
+            _, mem_objs = self.pending_pull_resources.pop(lookup_id)
             release_memory_objects(mem_objs, unpin=True)
             logger.info("Released resources for lookup_id %s", lookup_id)
         else:
             logger.warning("No pending resources found for lookup_id %s", lookup_id)
 
         return AscendBatchedLookupAndGetDoneRetMsg()
+
+    async def _sweep_expired_pending_pull_resources(self):
+        """Periodically release pinned MemObjs whose TTL has expired.
+
+        This handles the case where a peer crashes or becomes unreachable
+        mid-pull and never sends the Done signal.  Without this, the
+        server's pinned buffers would leak indefinitely.
+
+        Since this coroutine runs on the same event loop as the request
+        handler, no locking is required for ``pending_pull_resources``.
+        """
+        while self.running.is_set():
+            try:
+                now = self.loop.time()
+                expired_ids = [
+                    pid
+                    for pid, (ts, _) in self.pending_pull_resources.items()
+                    if now - ts > self._pull_pending_ttl
+                ]
+                for pid in expired_ids:
+                    entry = self.pending_pull_resources.pop(pid, None)
+                    if entry is not None:
+                        _, mem_objs = entry
+                        release_memory_objects(mem_objs, unpin=True)
+                        logger.warning(
+                            "P2P pull mode: TTL expired for lookup_id %s "
+                            "— released %d pinned MemObjs "
+                            "(peer may have crashed).",
+                            pid,
+                            len(mem_objs),
+                        )
+            except Exception as e:
+                logger.error(
+                    "Error in pending pull resources sweep: %s",
+                    e,
+                    exc_info=True,
+                )
+            await asyncio.sleep(10)
+
+    async def _handle_batched_lookup_and_put(
+        self, msg: AscendBatchedLookupAndPutMsg
+    ) -> P2PErrorMsg:
+        logger.error(
+            "_handle_batched_lookup_and_put is not implemented "
+            "for AscendP2PBackend"
+        )
+        return P2PErrorMsg(error_code=P2PErrorCode.P2P_SERVER_ERROR)
 
     def _allocate_memory_for_keys(
         self,
