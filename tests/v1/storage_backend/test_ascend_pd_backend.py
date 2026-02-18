@@ -133,7 +133,7 @@ def _make_pd_backend_stub(
     return backend
 
 
-class TestAscendPDBackendUnit:
+class TestAscendPDBackend:
     """Mock-based unit tests for AscendPDBackend logic."""
 
     def test_pd_message_types(self):
@@ -142,7 +142,7 @@ class TestAscendPDBackendUnit:
             AllocRequest(
                 keys=["k1", "k2"],
                 fmt=MemoryFormat.KV_2LTD.value,
-                shape=[DEFAULT_SHAPE],
+                shape=list(DEFAULT_SHAPE),
                 dtype="bfloat16",
                 last_chunk_toks=256,
             ),
@@ -160,7 +160,7 @@ class TestAscendPDBackendUnit:
                 sender_id="sender_1",
                 sender_done_url="tcp://sender:9999",
                 fmt=MemoryFormat.KV_2LTD.value,
-                shape=[DEFAULT_SHAPE],
+                shape=list(DEFAULT_SHAPE),
                 dtype="bfloat16",
                 last_chunk_toks=256,
             ),
@@ -328,7 +328,7 @@ class TestAscendPDBackendUnit:
         alloc_req = AllocRequest(
             keys=[_make_key("k1").to_string()],
             fmt=MemoryFormat.KV_2LTD.value,
-            shape=[DEFAULT_SHAPE],
+            shape=list(DEFAULT_SHAPE),
             dtype="bfloat16",
             last_chunk_toks=256,
         )
@@ -356,7 +356,7 @@ class TestAscendPDBackendUnit:
         alloc_req = AllocRequest(
             keys=[_make_key("k1").to_string()],
             fmt=MemoryFormat.KV_2LTD.value,
-            shape=[2, 2, 256, 512],
+            shape=list(DEFAULT_SHAPE),
             dtype="bfloat16",
             last_chunk_toks=256,
         )
@@ -393,7 +393,7 @@ class TestAscendPDBackendUnit:
             sender_id="sender_1",
             sender_done_url="tcp://sender:9999",
             fmt=MemoryFormat.KV_2LTD.value,
-            shape=[2, 2, 256, 512],
+            shape=list(DEFAULT_SHAPE),
             dtype="bfloat16",
             last_chunk_toks=256,
         )
@@ -438,7 +438,7 @@ class TestAscendPDBackendUnit:
             sender_id="sender_1",
             sender_done_url="tcp://sender:9999",
             fmt=MemoryFormat.KV_2LTD.value,
-            shape=[2, 2, 256, 512],
+            shape=list(DEFAULT_SHAPE),
             dtype="bfloat16",
             last_chunk_toks=256,
         )
@@ -464,7 +464,7 @@ class TestAscendPDBackendUnit:
         backend = _make_pd_backend_stub(
             delay_pull=True,
             buffer_device="npu:0",
-            kv_shape=(2, 2, 256, 512),
+            kv_shape=DEFAULT_SHAPE,
             kv_dtype=torch.bfloat16,
             chunk_size=256,
             pull_mode=True,
