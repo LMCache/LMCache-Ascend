@@ -6,7 +6,6 @@ from typing import Any, Dict, List, Tuple
 import multiprocessing as mp
 import sys
 import time
-
 import warnings
 
 # First Party
@@ -19,7 +18,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, PagedCpuGpuMemoryAllocator
 import pytest
 import torch
-import torch_npu
 
 # First Party
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
@@ -120,9 +118,7 @@ def _build_channel_buffers(
 # ──────────────────────────────────────────────────────────
 
 
-def write_sender_process(
-    config: HcclTestConfig, shared_dict: Dict[str, Any]
-) -> None:
+def write_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
         logger = init_logger(__name__)
@@ -186,11 +182,11 @@ def write_sender_process(
         while "receiver_init_done" not in shared_dict:
             time.sleep(0.1)
             if time.time() - wait_start > 30:
-                raise TimeoutError(
-                    "Sender timed out waiting for receiver buffer refs"
-                )
-            logger.info("Sender: Waiting for receiver initialization, "
-                        "shared_dict keys: %s", list(shared_dict.keys()))
+                raise TimeoutError("Sender timed out waiting for receiver buffer refs")
+            logger.info(
+                "Sender: Waiting for receiver initialization, shared_dict keys: %s",
+                list(shared_dict.keys()),
+            )
 
         shared_dict["sender_init_done"] = True
         logger.info("Sender: Sender initialization complete")
@@ -227,9 +223,7 @@ def write_sender_process(
         sys.exit(1)
 
 
-def write_receiver_process(
-    config: HcclTestConfig, shared_dict: Dict[str, Any]
-) -> None:
+def write_receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
         logger = init_logger(__name__)
@@ -288,8 +282,10 @@ def write_receiver_process(
         wait_start = time.time()
         while "sender_init_done" not in shared_dict:
             time.sleep(0.1)
-            logger.info("Receiver: Waiting for sender initialization, "
-                        "shared_dict keys: %s", list(shared_dict.keys()))
+            logger.info(
+                "Receiver: Waiting for sender initialization, shared_dict keys: %s",
+                list(shared_dict.keys()),
+            )
             if time.time() - wait_start > 30:
                 raise TimeoutError(
                     "Receiver timed out waiting for Sender initialization"
@@ -299,8 +295,10 @@ def write_receiver_process(
         wait_start = time.time()
         while "write_complete" not in shared_dict:
             time.sleep(0.1)
-            logger.info("Receiver: Waiting for write completion, "
-                        "shared_dict keys: %s", list(shared_dict.keys()))
+            logger.info(
+                "Receiver: Waiting for write completion, shared_dict keys: %s",
+                list(shared_dict.keys()),
+            )
             if time.time() - wait_start > config.timeout:
                 raise TimeoutError("Timed out waiting for write completion.")
 
@@ -391,9 +389,7 @@ def read_data_provider_process(
         while "reader_init_done" not in shared_dict:
             time.sleep(0.1)
             if time.time() - wait_start > 30:
-                raise TimeoutError(
-                    "Data provider timed out waiting for reader init"
-                )
+                raise TimeoutError("Data provider timed out waiting for reader init")
 
         remote_url = f"0.0.0.0:377{config.recv_device_id}"
         channel.lazy_init_peer_connection(
@@ -786,25 +782,16 @@ def _run_two_process_test(
             p_send.terminate()
             errors.append("Sender process timed out")
         elif p_send.exitcode != 0:
-            errors.append(
-                f"Sender process failed with exitcode {p_send.exitcode}"
-            )
+            errors.append(f"Sender process failed with exitcode {p_send.exitcode}")
 
         if p_recv.is_alive():
             p_recv.terminate()
             errors.append("Receiver process timed out")
         elif p_recv.exitcode != 0:
-            errors.append(
-                f"Receiver process failed with exitcode {p_recv.exitcode}"
-            )
+            errors.append(f"Receiver process failed with exitcode {p_recv.exitcode}")
 
         if errors:
             pytest.fail("\n".join(errors))
-
-
-# ──────────────────────────────────────────────────────────
-# Write tests (sender pushes data into receiver's buffer)
-# ──────────────────────────────────────────────────────────
 
 
 @pytest.mark.skipif(
@@ -851,11 +838,6 @@ def test_hccl_write_host(num_objs, num_layer, chunk_size, num_kv_head, head_size
     _run_two_process_test(config, write_sender_process, write_receiver_process)
 
 
-# ──────────────────────────────────────────────────────────
-# Multi-buffer test (sender CPU buffer → receiver NPU buffer)
-# ──────────────────────────────────────────────────────────
-
-
 @pytest.mark.skipif(
     not torch.npu.is_available() or torch.npu.device_count() < 2,
     reason="Requires at least 2 NPU devices",
@@ -879,11 +861,6 @@ def test_hccl_multi_buffer(num_objs, num_layer, chunk_size, num_kv_head, head_si
     _run_two_process_test(
         config, multi_buffer_sender_process, multi_buffer_receiver_process
     )
-
-
-# ──────────────────────────────────────────────────────────
-# Read tests (receiver pulls data from sender's memory)
-# ──────────────────────────────────────────────────────────
 
 
 @pytest.mark.skipif(

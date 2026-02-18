@@ -472,8 +472,7 @@ class AscendP2PBackend(P2PBackend):
         self, msg: AscendBatchedLookupAndPutMsg
     ) -> P2PErrorMsg:
         logger.error(
-            "_handle_batched_lookup_and_put is not implemented "
-            "for AscendP2PBackend"
+            "_handle_batched_lookup_and_put is not implemented for AscendP2PBackend"
         )
         return P2PErrorMsg(error_code=P2PErrorCode.P2P_SERVER_ERROR)
 
