@@ -41,10 +41,6 @@ from lmcache_ascend.v1.storage_backend.pd.messages import (
 logger = init_logger(__name__)
 
 
-# ──────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────
-
 
 def _make_key(key_id: str = "test_key") -> CacheEngineKey:
     return CacheEngineKey(
@@ -130,15 +126,10 @@ def _make_pd_backend_stub(
     return backend
 
 
-# ──────────────────────────────────────────────────────────
-# Unit tests (mock-based, no NPU required)
-# ──────────────────────────────────────────────────────────
-
 
 class TestAscendPDBackendUnit:
     """Mock-based unit tests for AscendPDBackend logic."""
 
-    # ── Message encode/decode ──────────────────────────────
 
     def test_pd_message_types(self):
         """All Ascend PD message types roundtrip through msgspec."""
@@ -179,7 +170,6 @@ class TestAscendPDBackendUnit:
             decoded = msgspec.msgpack.decode(encoded, type=AscendPDMsg)
             assert type(decoded) is type(msg)
 
-    # ── allocate() role-aware placement ────────────────────
 
     def test_allocate_receiver_uses_gpu(self):
         """Receiver allocates on GPU (NPU)."""
@@ -308,8 +298,6 @@ class TestAscendPDBackendUnit:
         assert new_idx == [1, 2]
         mock_obj0.ref_count_up.assert_called_once()
 
-    # ── _allocate_and_put (push mode) ──────────────────────
-
     def test_push_mode_allocate_and_put(self):
         """Push-mode allocate_and_put returns UUID-based refs."""
         from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
@@ -370,7 +358,6 @@ class TestAscendPDBackendUnit:
         assert resp.alloc_failed is True
         backend.put.assert_not_called()
 
-    # ── _handle_pull_eager ─────────────────────────────────
 
     def test_pull_eager_flow(self):
         """Pull-eager: allocates, reads from sender, returns ack + callback."""
@@ -453,7 +440,6 @@ class TestAscendPDBackendUnit:
         assert ack.alloc_failed is True
         assert post_ack_fn is None
 
-    # ── _handle_pull_delay ─────────────────────────────────
 
     def test_pull_delay_flow(self):
         """Pull-delay creates ProxyMemoryObj instances in data store."""
@@ -499,7 +485,6 @@ class TestAscendPDBackendUnit:
             _, mem_obj = call.args
             assert isinstance(mem_obj, ProxyMemoryObj)
 
-    # ── Circuit breaker ────────────────────────────────────
 
     def test_circuit_breaker_skips_backed_off_peer(self):
         """When peer is backed off, put task is skipped."""
@@ -535,7 +520,6 @@ class TestAscendPDBackendUnit:
         # Should still send proxy notification for last prefill
         backend.proxy_side_channel.send.assert_called_once()
 
-    # ── Pull done listener ─────────────────────────────────
 
     def test_handle_pull_done_releases_resources(self):
         """_handle_pull_done releases pinned MemObjs."""
@@ -572,7 +556,6 @@ class TestAscendPDBackendUnit:
 
         assert "pull_early" in backend._early_pull_done
 
-    # ── Backpressure ───────────────────────────────────────
 
     def test_backpressure_blocks_when_above_hwm(self):
         """_wait_for_backpressure blocks until count drops below HWM."""
@@ -603,7 +586,6 @@ class TestAscendPDBackendUnit:
         assert released.is_set()
         t.join(timeout=2)
 
-    # ── Sweep expired pull pending ─────────────────────────
 
     def test_sweep_expired_pull_pending(self):
         """Expired entries are released by the sweep."""
@@ -629,7 +611,6 @@ class TestAscendPDBackendUnit:
         mock_obj.ref_count_down.assert_called_once()
         assert backend._pull_pending_pinned_count == 0
 
-    # ── _allocate_and_put with already_sent keys ───────────
 
     def test_allocate_and_put_with_already_sent(self):
         """Already-sent keys are identified and not re-allocated."""
