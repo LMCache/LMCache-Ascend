@@ -188,11 +188,17 @@ class P2PTransferContext(AscendBaseTransferContext):
         self._lookup_id = lookup_id
         self._loop = loop
         self._use_npu = use_npu
-        logger.info(
-            f"Initialized P2PTransferContext: lookup_id={lookup_id}, "
-            f"target_peer={target_peer_url}, "
-            f"num_proxies={num_proxies}, use_npu={use_npu}, "
-            f"shapes={shapes}, dtypes={dtypes}, fmt={fmt}"
+        logger.debug(
+            "Initialized P2PTransferContext: lookup_id=%s, "
+            "target_peer=%s, num_proxies=%d, use_npu=%s, "
+            "shapes=%s, dtypes=%s, fmt=%s",
+            lookup_id,
+            target_peer_url,
+            num_proxies,
+            use_npu,
+            shapes,
+            dtypes,
+            fmt,
         )
 
     @property

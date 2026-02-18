@@ -187,6 +187,38 @@ class ProxyMemoryObj(MemoryObj):
         self._resolved = True
 
     @staticmethod
+    def _collect_batch_read_args(
+        unresolved: List["ProxyMemoryObj"],
+    ) -> tuple[List[MemoryObj], dict]:
+        """Collect backing buffers and build a transfer spec for a batch read.
+
+        Args:
+            unresolved: List of unresolved ProxyMemoryObjs.  All must have
+                backing buffers assigned and share the same target peer.
+
+        Returns:
+            (buffers, channel_transfer_spec) ready for
+            ``batched_read`` / ``async_batched_read`` / ``submit_batched_read``.
+        """
+        buffers: List[MemoryObj] = []
+        remote_buffer_uuids: list[str] = []
+        remote_mem_indexes: list[int] = []
+        for p in unresolved:
+            assert p._backing_obj is not None, (
+                "Cannot resolve: no backing buffer assigned"
+            )
+            buffers.append(p._backing_obj)
+            remote_buffer_uuids.append(p._remote_buffer_uuid)
+            remote_mem_indexes.append(p._remote_mem_index)
+
+        channel_transfer_spec = {
+            "receiver_id": unresolved[0]._target_peer_url,
+            "remote_buffer_uuids": remote_buffer_uuids,
+            "remote_mem_indexes": remote_mem_indexes,
+        }
+        return buffers, channel_transfer_spec
+
+    @staticmethod
     def resolve_batch(
         proxies: List["ProxyMemoryObj"],
     ) -> None:
@@ -205,22 +237,9 @@ class ProxyMemoryObj(MemoryObj):
             return
 
         first = unresolved[0]
-        buffers = []
-        remote_buffer_uuids = []
-        remote_mem_indexes = []
-        for p in unresolved:
-            assert p._backing_obj is not None, (
-                "Cannot resolve: no backing buffer assigned"
-            )
-            buffers.append(p._backing_obj)
-            remote_buffer_uuids.append(p._remote_buffer_uuid)
-            remote_mem_indexes.append(p._remote_mem_index)
-
-        channel_transfer_spec = {
-            "receiver_id": first._target_peer_url,
-            "remote_buffer_uuids": remote_buffer_uuids,
-            "remote_mem_indexes": remote_mem_indexes,
-        }
+        buffers, channel_transfer_spec = ProxyMemoryObj._collect_batch_read_args(
+            unresolved
+        )
 
         future = asyncio.run_coroutine_threadsafe(
             first._transfer_channel.async_batched_read(
@@ -269,22 +288,9 @@ class ProxyMemoryObj(MemoryObj):
             ProxyMemoryObj.resolve_batch(proxies)
             return None
 
-        buffers = []
-        remote_buffer_uuids = []
-        remote_mem_indexes = []
-        for p in unresolved:
-            assert p._backing_obj is not None, (
-                "Cannot resolve: no backing buffer assigned"
-            )
-            buffers.append(p._backing_obj)
-            remote_buffer_uuids.append(p._remote_buffer_uuid)
-            remote_mem_indexes.append(p._remote_mem_index)
-
-        channel_transfer_spec = {
-            "receiver_id": first._target_peer_url,
-            "remote_buffer_uuids": remote_buffer_uuids,
-            "remote_mem_indexes": remote_mem_indexes,
-        }
+        buffers, channel_transfer_spec = ProxyMemoryObj._collect_batch_read_args(
+            unresolved
+        )
 
         event = channel.submit_batched_read(
             buffers=buffers,

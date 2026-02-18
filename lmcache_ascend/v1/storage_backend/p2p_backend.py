@@ -52,7 +52,7 @@ logger = init_logger(__name__)
 
 
 class AscendBatchedLookupAndGetMsg(BatchedLookupAndGetMsg):
-    # buffer uuids to lookup indiviudal mem handles
+    # buffer uuids to lookup individual mem handles
     # as we extended the transfer channel to support multiple buffers
     # (e.g., CPU and NPU), we need a way to identify
     # which buffer the remote mem handle belongs to,
@@ -314,10 +314,10 @@ class AscendP2PBackend(P2PBackend):
                 ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
 
             if monitor_req_id is not None:
-                logger.info(f"P2P transfer finished for request {monitor_req_id}")
+                logger.info("P2P transfer finished for request %s", monitor_req_id)
                 self.stats_monitor.on_p2p_transfer_finished(monitor_req_id)
             else:
-                logger.info("P2P transfer finished for control signal with no tokens.")
+                logger.debug("P2P transfer finished for control signal with no tokens.")
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
 
@@ -328,7 +328,7 @@ class AscendP2PBackend(P2PBackend):
         mem_objs = None
         should_release = True
         try:
-            logger.info(
+            logger.debug(
                 "Received P2P batched lookup and get msg, lookup_id: %s", lookup_id
             )
             receiver_id = msg.receiver_id
@@ -419,12 +419,12 @@ class AscendP2PBackend(P2PBackend):
         self, msg: AscendBatchedLookupAndGetDoneMsg
     ) -> AscendBatchedLookupAndGetDoneRetMsg:
         lookup_id = msg.lookup_id
-        logger.info("Received Done signal for lookup_id %s", lookup_id)
+        logger.debug("Received Done signal for lookup_id %s", lookup_id)
 
         if lookup_id in self.pending_pull_resources:
             _, mem_objs = self.pending_pull_resources.pop(lookup_id)
             release_memory_objects(mem_objs, unpin=True)
-            logger.info("Released resources for lookup_id %s", lookup_id)
+            logger.debug("Released resources for lookup_id %s", lookup_id)
         else:
             logger.warning("No pending resources found for lookup_id %s", lookup_id)
 
@@ -751,17 +751,16 @@ class AscendP2PBackend(P2PBackend):
         hit_mem_objs = mem_objs[:num_hit_chunks]
 
         if num_hit_chunks > 0 and self.pull_mode:
-            if not self.delay_pull:
-                success = await self._handle_pull_mode_transfer(
-                    lookup_id,
-                    target_peer_url,
-                    hit_mem_objs,
-                    ret_msg.remote_buffer_uuids,
-                    ret_msg.remote_mem_indexes,
-                )
-                if not success:
-                    self._cleanup_memory_objects(mem_objs)
-                    return []
+            success = await self._handle_pull_mode_transfer(
+                lookup_id,
+                target_peer_url,
+                hit_mem_objs,
+                ret_msg.remote_buffer_uuids,
+                ret_msg.remote_mem_indexes,
+            )
+            if not success:
+                self._cleanup_memory_objects(mem_objs)
+                return []
 
         release_memory_objects(mem_objs[num_hit_chunks:])
         return hit_mem_objs

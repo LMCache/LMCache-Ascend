@@ -95,7 +95,7 @@ class AscendPDSenderMixin:
 
             done_url = f"{self._sender_host}:{self._pull_done_port}"
             self.local_id = done_url
-            logger.info(f"Pull-mode sender local_id: {done_url}")
+            logger.info("Pull-mode sender local_id: %s", done_url)
             self._sender_done_url = done_url
             self._pull_done_socket = get_zmq_socket(
                 self.zmq_context, done_url, "tcp", zmq.PULL, "bind"
@@ -243,7 +243,7 @@ class AscendPDSenderMixin:
             if entry is None:
                 # Main thread hasn't registered yet — buffer for later.
                 self._early_pull_done.add(pull_id)
-                logger.info(
+                logger.debug(
                     "Pull mode: buffered early PullDoneSignal for "
                     "pull_id %s (main thread not yet registered).",
                     pull_id,
@@ -400,7 +400,7 @@ class AscendPDSenderMixin:
                 self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
             return
 
-        already_sent_indexes = alloc_response.already_sent_indexes
+        already_sent_indexes = set(alloc_response.already_sent_indexes)
         remote_buffer_uuids = alloc_response.remote_buffer_uuids
         remote_mem_indexes = alloc_response.remote_indexes
 

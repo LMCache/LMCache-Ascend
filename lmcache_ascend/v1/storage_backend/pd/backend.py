@@ -138,10 +138,9 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             buffer_type.append("cpu")
             align_bytes.append(self.memory_allocator.cpu_allocator.align_bytes)
 
-        assert len(buffer_ptr) > 0, "No buffer pointers found"
-        assert len(buffer_size) > 0, "No buffer sizes found"
-        assert len(buffer_type) > 0, "No buffer types found"
-        assert len(align_bytes) > 0, "No align bytes found"
+        assert buffer_ptr, (
+            "No buffers registered — at least one of NPU or CPU must be configured"
+        )
 
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
