@@ -3,7 +3,14 @@ local_cpu: False # Enable local CPU RAM cache for fast access
 enable_pd: True
 transfer_channel: "hccl"
 pd_role: "sender"
-pd_proxy_host: "localhost"
-pd_proxy_port: 7500
-pd_buffer_size: 2415919104 #1207959552 # 1.xxGB
-pd_buffer_device: "npu" # Use npu memory for buffering
+pd_pull_mode: False
+pd_delay_pull: False
+pd_pull_done_port: [7600, 7601] # per TP instance
+pd_use_cpu_offload: False
+pd_cpu_buffer_size: 21474836480 # 20GB
+pd_peer_host: "localhost" # replace with the host ip
+pd_proxy_host: "localhost" # replace with the proxy ip
+pd_proxy_port: 7500 # replace with the proxy port
+pd_buffer_size: 2415919104 # Size of the buffer for fetching data from the peer (in bytes)
+pd_buffer_device: "npu" # Use NPU memory for buffer
+save_unfull_chunk: True # Save unfull chunk to disk,

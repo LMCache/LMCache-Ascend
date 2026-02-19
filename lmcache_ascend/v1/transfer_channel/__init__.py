@@ -1,9 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
+from typing import List, Union
+
 # Third Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+import torch
+import torch_npu  # noqa: F401
 
 # First Party
 from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+
+# Local
+from .hccl_agent import BufferConfig, BufferType
 
 
 def get_correct_device(device: str, worker_id: int) -> str:
@@ -25,13 +33,26 @@ def get_correct_device(device: str, worker_id: int) -> str:
         raise ValueError(f"Invalid device: {device}")
 
 
+def get_device_buffer_type(device: str) -> BufferType:
+    if device == "cpu":
+        return BufferType.CPU
+    elif device.startswith("npu"):
+        return BufferType.NPU
+    else:
+        raise ValueError(f"Invalid device: {device}")
+
+
 def CreateTransferChannel(
     channel_type: str,
     async_mode: bool,
     role: str,
-    buffer_ptr: int,
-    buffer_size: int,
-    align_bytes: int,
+    buffer_ptr: Union[
+        int, List[int]
+    ],  # accept both single buffer and multiple buffers for hccl
+    buffer_size: Union[
+        int, List[int]
+    ],  # accept both single buffer and multiple buffers for hccl
+    align_bytes: Union[int, List[int]],
     tp_rank: int,
     peer_init_url: str,
     **kwargs,
@@ -54,12 +75,58 @@ def CreateTransferChannel(
 
     assert channel_type in ["hccl"], f"Unsupported channel type: {channel_type}"
 
+    # construct the buffer config here
+    buffer_type = kwargs.get("buffer_type", [])
+    buffer_configs = []
+    if isinstance(buffer_ptr, int):
+        buffer_ptr = [buffer_ptr]
+        # since int, then we assert buffer size is also an int
+        assert isinstance(buffer_size, int), (
+            "buffer_size must be int when buffer_ptr is int"
+        )
+        if isinstance(buffer_size, int):
+            buffer_size = [buffer_size]
+
+        if isinstance(buffer_type, str):
+            buffer_type = [buffer_type] if buffer_type else ["cpu"]
+
+        if isinstance(align_bytes, int):
+            align_bytes = [align_bytes]
+    else:
+        assert isinstance(buffer_ptr, list), "buffer_ptr must be int or list of int"
+        assert isinstance(buffer_size, list), "buffer_size must be int or list of int"
+        assert isinstance(align_bytes, list), "align_bytes must be int or list of int"
+        assert len(buffer_ptr) == len(buffer_size), (
+            "buffer_ptr and buffer_size must have the same length"
+        )
+        if not buffer_type:
+            raise ValueError("buffer_type must be provided when buffer_ptr is a list")
+        assert isinstance(buffer_type, list), (
+            "buffer_type must be list when buffer_ptr is list"
+        )
+        assert len(buffer_type) == len(buffer_ptr), (
+            "buffer_type must have the same length as buffer_ptr"
+        )
+
+    for ptr, size, b_type, align in zip(
+        buffer_ptr, buffer_size, buffer_type, align_bytes, strict=False
+    ):
+        device_type = get_device_buffer_type(b_type)
+        device_id = -1 if device_type == BufferType.CPU else torch.npu.current_device()
+        buffer_configs.append(
+            BufferConfig(
+                ptr=ptr,
+                size=size,
+                device_id=device_id,
+                device_type=device_type,
+                align_bytes=align,
+            )
+        )
+
     transfer_channel = HcclChannel(
         async_mode=async_mode,
         role=role,
-        buffer_ptr=buffer_ptr,
-        buffer_size=buffer_size,
-        align_bytes=align_bytes,
+        buffers=buffer_configs,
         tp_rank=tp_rank,
         peer_init_url=peer_init_url,
         **kwargs,

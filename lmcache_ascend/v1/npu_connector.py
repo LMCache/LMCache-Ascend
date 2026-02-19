@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from enum import Enum, auto
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Set, Tuple, Union
 
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
@@ -18,6 +18,8 @@ from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, Memor
 import torch
 
 # First Party
+from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
+from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
@@ -876,13 +878,168 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        # Check if any memory objects are ProxyMemoryObjs (deferred P2P fetch)
+        has_proxy = any(isinstance(m, ProxyMemoryObj) for m in memory_objs)
+
+        if has_proxy:
+            assert not is_310p(), "Batched P2P transfer is not supported on 310P."
+
+            self._remote_batched_to_gpu(memory_objs, starts, ends, **kwargs)
+        else:
+            with torch.cuda.stream(self.load_stream):
+                for memory_obj, start, end in zip(
+                    memory_objs, starts, ends, strict=False
+                ):
+                    if is_310p():
+                        self.to_gpu_310p(memory_obj, start, end, **kwargs)
+                    else:
+                        self.to_gpu(memory_obj, start, end, **kwargs)
+            self.load_stream.synchronize()
+
+    def _clear_proxy_batch(self, batch) -> None:
+        """Clear the backing objects of the proxy batch."""
+        for proxy, _, _ in batch:
+            proxy.clear_backing_obj()
+        return None
+
+    def _scatter_proxy_batch(self, batch, event, **kwargs):
+        """Wait for a read event, scatter proxies to KV cache.
+
+        Enqueues work on ``load_stream``.  The caller is responsible for
+        recording a scatter-done event afterwards if needed for
+        cross-stream synchronization.
+        """
+        if event is not None:
+            self.load_stream.wait_event(event)
         with torch.cuda.stream(self.load_stream):
-            for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
-                if is_310p():
-                    self.to_gpu_310p(memory_obj, start, end, **kwargs)
-                else:
+            for proxy, start, end in batch:
+                self.to_gpu(proxy.backing_obj, start, end, **kwargs)
+
+    def _remote_batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        """Handle batched_to_gpu when ProxyMemoryObjs are present.
+
+        Uses a ping-pong pipeline with **event-based** cross-stream
+        synchronization to overlap remote data fetching (on the HCCL
+        transport stream) with KV cache scatter (on the load stream).
+
+
+        Two pools of PIPELINE_DEPTH buffers are allocated from the
+        transfer context's registered memory and alternated (ping-pong).
+        This limits peak memory to 2 x PIPELINE_DEPTH chunks regardless
+        of the total number of proxy objects.
+
+        After all proxy objects are processed, sends the Done signal
+        to release the remote peer's pinned resources.
+        """
+        transfer_contexts: Set[AscendBaseTransferContext] = set()
+
+        # Separate proxy and non-proxy items
+        proxy_items = []
+        non_proxy_items = []
+        for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
+            if isinstance(memory_obj, ProxyMemoryObj):
+                transfer_contexts.add(memory_obj.transfer_context)
+                proxy_items.append((memory_obj, start, end))
+            else:
+                non_proxy_items.append((memory_obj, start, end))
+
+        if proxy_items:
+            # Get the transfer context for buffer allocation
+            first_ctx = proxy_items[0][0].transfer_context
+
+            # Derive pipeline depth from NPU buffer capacity so that
+            # two full ping-pong pools fit in registered memory.
+            pipeline_depth = first_ctx.max_pipeline_depth
+            logger.debug(
+                "P2P pipeline depth = %d (proxy_items=%d)",
+                pipeline_depth,
+                len(proxy_items),
+            )
+
+            # Allocate ping-pong buffer pools.
+            # Initialized to None so the finally block can safely skip
+            # release if allocation itself fails.
+            pool_size = min(pipeline_depth, len(proxy_items))
+            pool_a = None
+            pool_b = None
+
+            try:
+                pool_a = first_ctx.allocate_buffers(pool_size)
+                pool_b = first_ctx.allocate_buffers(pool_size)
+
+                pools = [pool_a, pool_b]
+                current_pool = 0
+
+                # Group proxy items into micro-batches
+                micro_batches = [
+                    proxy_items[i : i + pipeline_depth]
+                    for i in range(0, len(proxy_items), pipeline_depth)
+                ]
+
+                prev_read_event = None
+                prev_batch = None
+
+                for batch_idx, batch in enumerate(micro_batches):
+                    pool = pools[current_pool]
+
+                    # Assign backing buffers from current pool to proxies
+                    for i, (proxy, _, _) in enumerate(batch):
+                        proxy.set_backing_obj(pool[i])
+
+                    proxies = [item[0] for item in batch]
+
+                    # Submit RDMA read for current batch → transport_stream.
+                    cur_read_event = ProxyMemoryObj.submit_resolve_batch(proxies)
+
+                    # While the current batch is being read on
+                    # transport_stream, scatter the previous batch on
+                    # load_stream (waits for its RDMA read event).
+                    if prev_batch is not None:
+                        self._scatter_proxy_batch(
+                            prev_batch,
+                            prev_read_event,
+                            **kwargs,
+                        )
+                        # TODO (gingfung): investigate whether
+                        # we need to record scatter-done event on load_stream
+                        # so the next RDMA into the same pool waits for it.
+                        self._clear_proxy_batch(prev_batch)
+
+                    prev_read_event = cur_read_event
+                    prev_batch = batch
+                    current_pool = 1 - current_pool  # toggle ping-pong
+
+                # Drain: scatter the last micro-batch.
+                if prev_batch is not None:
+                    self._scatter_proxy_batch(
+                        prev_batch,
+                        prev_read_event,
+                        **kwargs,
+                    )
+                    self._clear_proxy_batch(prev_batch)
+            finally:
+                # Guarantee ping-pong buffers are returned and the Done
+                # signal is sent even if the pipeline raises or
+                # allocate_buffers itself fails.  Without this, an
+                # exception would leak NPU pages and leave the sender's
+                # pinned resources stuck until its TTL expires.
+                self.load_stream.synchronize()
+                if pool_a is not None:
+                    first_ctx.release_buffers(pool_a)
+                if pool_b is not None:
+                    first_ctx.release_buffers(pool_b)
+
+                for proxy, _, _ in proxy_items:
+                    proxy.mark_consumed()
+
+                for ctx in transfer_contexts:
+                    ctx.send_done_now()
+
+        # Process non-proxy items on load_stream (no pipelining needed)
+        if non_proxy_items:
+            with torch.cuda.stream(self.load_stream):
+                for memory_obj, start, end in non_proxy_items:
                     self.to_gpu(memory_obj, start, end, **kwargs)
-        self.load_stream.synchronize()
 
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
