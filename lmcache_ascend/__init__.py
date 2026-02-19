@@ -52,6 +52,16 @@ def _patch_config():
         "and p2p_pull_mode is set to True.",
     }
 
+    # Add new p2p_pull_pending_ttl config
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_pull_pending_ttl"] = {
+        "type": float,
+        "default": 360.0,
+        "description": "TTL in seconds for pull-pending entries on the sender side. "
+        "If a receiver crashes and never sends PullDoneSignal, "
+        "pinned MemObjs are released after this timeout. "
+        "This config is only used when p2p_pull_mode is set to True.",
+    }
+
     # Add new pd_pull_mode config
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_mode"] = {
         "type": bool,
@@ -75,7 +85,7 @@ def _patch_config():
         "until the data is actually needed. "
         "This can help improve performance in some cases. "
         "This config is only used when "
-        "pd_pull_mode is set to True and p2p_use_npu is set to True."
+        "pd_pull_mode is set to True and pd_use_npu is set to True."
         "Set at the receiver side.",
     }
 
@@ -116,7 +126,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_alloc_fail_backoff_ttl"] = {
         "type": float,
         "default": 2.0,
-        "description": "The timeout in seconds for the allocation failure backoff"
+        "description": "The timeout in seconds for the allocation failure backoff. "
         "This config is used to avoid infinite loop for memory allocation.",
     }
 
