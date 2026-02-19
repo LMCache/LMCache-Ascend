@@ -104,6 +104,7 @@ class AscendPDReceiverMixin:
                 torch.Size(alloc_shape),
                 dtype,
                 fmt,
+                timeout=self._peer_alloc_backoff_ttl,
             )
 
             if mem_obj is None:
@@ -205,6 +206,7 @@ class AscendPDReceiverMixin:
                 torch.Size(alloc_shape),
                 dtype,
                 fmt,
+                timeout=self._peer_alloc_backoff_ttl,
             )
 
             if mem_obj is None:

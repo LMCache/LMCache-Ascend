@@ -112,6 +112,34 @@ def _patch_config():
         "This config is only used when pd_pull_mode is set to True.",
     }
 
+    # Add pd_alloc_fail_backoff_ttl config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_alloc_fail_backoff_ttl"] = {
+        "type": float,
+        "default": 2.0,
+        "description": "The timeout in seconds for the backoff of the PD allocation failure. "
+        "This config is used to avoid infinite loop for memory allocation.",
+    }
+
+    # Add pd_pull_pending_ttl config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_pending_ttl"] = {
+        "type": float,
+        "default": 360.0,
+        "description": "TTL in seconds for pull-pending entries on the sender side. "
+        "If a receiver crashes and never sends PullDoneSignal, "
+        "pinned MemObjs are released after this timeout. "
+        "This config is only used when pd_pull_mode is set to True.",
+    }
+
+    # Add pd_pull_backpressure_reserve_pct config
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_backpressure_reserve_pct"] = {
+        "type": float,
+        "default": 2.0,
+        "description": "Percentage of the sender buffer pool to reserve as free "
+        "headroom in pull mode. New put tasks block when pinned pages "
+        "exceed (1 - reserve_pct/100) * total_pages. "
+        "This config is only used when pd_pull_mode is set to True.",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,

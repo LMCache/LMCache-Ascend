@@ -105,7 +105,7 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         self._peer_alloc_backoff: dict[str, float] = {}
         self._peer_alloc_backoff_lock = threading.Lock()
         self._peer_alloc_backoff_ttl: float = getattr(
-            config, "pd_alloc_fail_backoff_ttl", 5.0
+            config, "pd_alloc_fail_backoff_ttl", 2.0
         )
 
         # Peer init URL / local id
