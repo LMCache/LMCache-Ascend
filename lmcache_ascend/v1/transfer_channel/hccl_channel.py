@@ -383,8 +383,6 @@ class HcclChannel(BaseTransferChannel):
             logger.info("Processing HcclMemRegRequest")
             conn_handle = None
 
-            # FIXME (gingfung): Seems to have race condition
-            # if I move to the next lock position...
             with self._state_lock:
                 conn_handle = self.conn_handles_dict[req.local_id]
 
