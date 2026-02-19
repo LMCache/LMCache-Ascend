@@ -246,6 +246,23 @@ def _patch_init_engine():
     )
 
 
+def _patch_wait_for_save():
+    # Third Party
+    import lmcache.integration.vllm.vllm_v1_adapter
+
+    # First Party
+    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+        wait_for_save as ascend_wait_for_save,
+    )
+
+    # Fixes a bug where disagg_spec.num_transferred_tokens (initialized to 0)
+    # overrides save_spec.skip_leading_tokens via min(), causing redundant
+    # full re-saves when there is an existing cache hit.
+    lmcache.integration.vllm.vllm_v1_adapter.LMCacheConnectorV1Impl.wait_for_save = (
+        ascend_wait_for_save
+    )
+
+
 def _patch_hash_token():
     # On OpenEuler and python3.10,
     # the _hash_tokens func hash(None) seems to run into
@@ -322,6 +339,7 @@ if not LMCACHE_ASCEND_PATCHED:
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
     _patch_init_engine()
+    _patch_wait_for_save()
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_sys_detection()
