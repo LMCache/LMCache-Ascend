@@ -5,16 +5,21 @@ enable_async_loading: True
 
 # P2P configurations
 enable_p2p: True
-p2p_host: "localhost"
+p2p_host: <hostIp>
 p2p_init_ports: [9960, 9961]
 p2p_lookup_ports: [9962, 9963]
 transfer_channel: "hccl"
+p2p_use_npu: True
+p2p_pull_mode: True
+p2p_delay_pull: True
+# 128MB
+p2p_npu_buffer_size: 134217728
 
 # Controller configurations
 enable_controller: True
 lmcache_instance_id: "lmcache_instance_1"
-controller_pull_url: "localhost:8600"
-controller_reply_url: "localhost:8700"
+controller_pull_url: <ControllerIp>:<ControllerPullPort>
+controller_reply_url: <ControllerIp>:<ControllerReplyPort>
 lmcache_worker_ports: [9950, 9951]
 
 extra_config:

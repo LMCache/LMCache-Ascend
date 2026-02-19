@@ -116,7 +116,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_alloc_fail_backoff_ttl"] = {
         "type": float,
         "default": 2.0,
-        "description": "The timeout in seconds for the backoff of the PD allocation failure. "
+        "description": "The timeout in seconds for the allocation failure backoff"
         "This config is used to avoid infinite loop for memory allocation.",
     }
 
