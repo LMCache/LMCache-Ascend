@@ -6,7 +6,7 @@ pd_role: "receiver"
 pd_peer_host: "localhost" # replace with the host ip
 pd_pull_mode: False
 pd_delay_pull: False # Enable delayed pulling of data from the peer
-pd_peer_init_port: [7300, 7301] #7300 # Need to have 1 for each TP instance
-pd_peer_alloc_port: [7400, 7401]   #7400 # Need to have 1 for each TP instance
+pd_peer_init_port: [7300, 7301] # Need to have 1 for each TP instance
+pd_peer_alloc_port: [7400, 7401] # Need to have 1 for each TP instance
 pd_buffer_size: 134217728 # Size of the buffer for fetching data from the peer (in bytes)
 pd_buffer_device: "npu" # Use npu memory for buffering
