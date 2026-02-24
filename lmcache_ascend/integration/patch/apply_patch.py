@@ -10,8 +10,6 @@ from lmcache_ascend.v1.npu_connector import is_310p
 
 logger = logging.getLogger(__name__)
 
-os.environ["SKIP_LMCACHE_PATCH"] = "1"
-
 
 def is_installed(package_name: str) -> bool:
     return importlib.util.find_spec(package_name) is not None

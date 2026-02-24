@@ -1298,7 +1298,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
 
         if self.use_gpu and self.gpu_buffer_allocator is None:
             k_cache_shape_per_layer = kv_caches[0][0].shape
-            max_tokens = k_cache_shape_per_layer[0]
+            max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
             num_elements = k_cache_shape_per_layer.numel() * 2
             gpu_buffer_size = num_elements * self.element_size
 
@@ -1307,6 +1307,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
                 f"  - Format: {self.kv_format.name}\n"
                 f"  - Key cache shape per layer: {k_cache_shape_per_layer}\n"
                 f"  - Max tokens: {max_tokens}\n"
+                f"  - num_elements: {num_elements}\n"
                 f"  - gpu_buffer_size: {gpu_buffer_size / (1024 * 1024)} MB"
             )
 
