@@ -105,6 +105,7 @@ def check_paged_kv_cache_equal(
         assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
         assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
+
 def generate_sglang_npu_kv_cache(
     num_layers,
     num_blocks,
@@ -116,17 +117,17 @@ def generate_sglang_npu_kv_cache(
 ):
     """
     Generate SGLang NPU Layer-Concatenated format KV cache.
-    
+
     Format: [2, layer_nums, num_blocks, block_size, num_heads, head_dim]
     kvcaches = [K_all_layers, V_all_layers]
     - K_tensor.shape = [layer_nums, num_blocks, block_size, num_heads, head_dim]
     - V_tensor.shape = [layer_nums, num_blocks, block_size, num_heads, head_dim]
     """
     shape = [num_layers, num_blocks, block_size, num_heads, head_size]
-    
+
     k_tensor = torch.rand(shape, dtype=dtype, device=device)
     v_tensor = torch.rand(shape, dtype=dtype, device=device)
-    
+
     return [k_tensor, v_tensor]
 
 
@@ -135,26 +136,31 @@ def check_sglang_npu_kv_cache_equal(
 ):
     """
     Check whether two SGLang NPU KV caches are the same at slot_mapping.
-    
+
     Format: [2, layer_nums, num_blocks, block_size, num_heads, head_dim]
     """
     num_tokens = slot_mapping.shape[0]
-    
+
     left_k = left[0]
     left_v = left[1]
     right_k = right[0]
     right_v = right[1]
-    
+
     for layer_id in range(left_k.shape[0]):
         left_k_layer = left_k[layer_id].reshape(-1, num_heads, head_size)
         left_v_layer = left_v[layer_id].reshape(-1, num_heads, head_size)
         right_k_layer = right_k[layer_id].reshape(-1, num_heads, head_size)
         right_v_layer = right_v[layer_id].reshape(-1, num_heads, head_size)
-        
+
         assert left_k_layer.shape[0] >= num_tokens
         assert left_v_layer.shape[0] >= num_tokens
         assert right_k_layer.shape[0] >= num_tokens
         assert right_v_layer.shape[0] >= num_tokens
-        
-        assert (left_k_layer[slot_mapping, :, :] == right_k_layer[slot_mapping, :, :]).all()
-        assert (left_v_layer[slot_mapping, :, :] == right_v_layer[slot_mapping, :, :]).all()
+
+        assert (
+            left_k_layer[slot_mapping, :, :] == right_k_layer[slot_mapping, :, :]
+        ).all()
+
+        assert (
+            left_v_layer[slot_mapping, :, :] == right_v_layer[slot_mapping, :, :]
+        ).all()

@@ -1,17 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import (
-    Generator,
-    List,
-    Optional,
-    Tuple,
-    Union,
-)
+from typing import Generator, List, Optional, Tuple, Union
 import time
 
 # Third Party
-import torch
-
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
@@ -24,9 +16,8 @@ from lmcache.v1.gpu_connector import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.memory_management import (  # noqa: E501
-    MemoryObj,
-)
+from lmcache.v1.memory_management import MemoryObj  # noqa: E501
+import torch
 
 logger = init_logger(__name__)
 

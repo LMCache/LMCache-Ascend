@@ -5,14 +5,13 @@ from typing import Optional
 import threading
 
 # Third Party
-import torch
-
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import (
     MemoryAllocatorInterface,
     PagedTensorMemoryAllocator,
     TensorMemoryAllocator,
 )
+import torch
 
 logger = init_logger(__name__)
 

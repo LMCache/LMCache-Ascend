@@ -11,8 +11,10 @@ LMCACHE_ASCEND_PATCHED = False
 def _is_sglang_runtime():
     return "sglang" in sys.modules or any("sglang" in arg for arg in sys.argv)
 
+
 def _is_vllm_runtime():
     return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
 
 def _patch_ops():
     # First Party
@@ -20,8 +22,9 @@ def _patch_ops():
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
+
 def _patch_torch_capability():
-    # First Party
+    # Third Party
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
     import torch
 
@@ -178,10 +181,10 @@ def _patch_sgl():
 
     # First Party
     from lmcache_ascend.integration.sglang.sglang_adapter import (
-        sglang_init_lmcache_engine,
         LMCacheConnector__init__,
         LMCacheLayerwiseConnector_global_min_tokens,
         LMCacheLayerwiseConnector_start_load_kv,
+        sglang_init_lmcache_engine,
     )
 
     lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
@@ -200,9 +203,7 @@ def _patch_sgl():
     import lmcache.v1.memory_management as lmc_memory_management
 
     # First Party
-    from lmcache_ascend.v1.memory_management import (
-        GPUMemoryAllocator__init__,
-    )
+    from lmcache_ascend.v1.memory_management import GPUMemoryAllocator__init__
 
     lmc_memory_management.GPUMemoryAllocator.__init__ = GPUMemoryAllocator__init__
 

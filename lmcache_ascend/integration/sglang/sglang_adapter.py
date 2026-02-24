@@ -4,31 +4,26 @@ from typing import List
 import uuid
 
 # Third Party
-from sglang.srt.configs.model_config import ModelConfig
-import torch
-import torch.distributed as dist
-import itertools
-
-# First Party
 from lmcache.config import LMCacheEngineMetadata
+from lmcache.integration.sglang.sglang_adapter import (
+    LoadMetadata,
+    need_gpu_interm_buffer,
+)
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
 from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import (
-    GPUConnectorInterface,
-)
-from lmcache.integration.sglang.sglang_adapter import (
-    need_gpu_interm_buffer,
-)
+from lmcache.v1.gpu_connector import GPUConnectorInterface
+from sglang.srt.configs.model_config import ModelConfig
+import torch
+import torch.distributed as dist
 
+# First Party
 from lmcache_ascend.v1.npu_connector import (
-    SGLangNPUConnector,
     SGLangLayerwiseNPUConnector,
+    SGLangNPUConnector,
 )
-
-from lmcache.integration.sglang.sglang_adapter import LoadMetadata
 
 logger = init_logger(__name__)
 
@@ -124,9 +119,8 @@ def LMCacheConnector__init__(
     k_pool: List[torch.Tensor],
     v_pool: List[torch.Tensor],
 ):
-    from lmcache.integration.sglang.sglang_adapter import (
-        init_lmcache_engine,
-    )
+    # Third Party
+    from lmcache.integration.sglang.sglang_adapter import init_lmcache_engine
 
     # NOTE(niming): Ensure k_pool is non-empty before accessing its elements.
     # Explicitly check length to avoid ambiguity with Tensor-like objects.

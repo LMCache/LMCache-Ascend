@@ -10,11 +10,11 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector import (
+    SGLangGPUConnector,
+    SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
-    SGLangGPUConnector,
-    SGLangLayerwiseGPUConnector,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
 import torch
