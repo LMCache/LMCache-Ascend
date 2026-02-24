@@ -24,15 +24,12 @@ import pytest
 import torch
 
 # First Party
-from tests.v1.utils import (
-    check_sglang_npu_kv_cache_equal,
-    generate_sglang_npu_kv_cache,
-)
 from lmcache_ascend.v1.npu_connector import (
     SGLangLayerwiseNPUConnector,
     VLLMPagedMemLayerwiseNPUConnector,
     VLLMPagedMemNPUConnectorV2,
 )
+from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
 
 
 @pytest.mark.parametrize("use_npu", [True, False])
