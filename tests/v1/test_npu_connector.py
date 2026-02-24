@@ -24,7 +24,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.tests.v1.utils import (
+from tests.v1.utils import (
     check_sglang_npu_kv_cache_equal,
     generate_sglang_npu_kv_cache,
 )

@@ -214,4 +214,200 @@ jobs:
               description: state === 'success' ? 'Tests Passed' : 'Tests Failed',
               context: '910B Unit Tests Status'
             });
- 
+  
+  test-sglang:
+    name: SGLang Unit Tests on 910B
+    runs-on: [self-hosted, Linux, ARM64, 910b4]
+    timeout-minutes: 30
+
+    environment: 
+      name: 910b-hardware
+    
+    if: >
+      github.event_name != 'workflow_run' || 
+      github.event.workflow_run.conclusion == 'success'
+    
+    container:
+      image: quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b
+      env:
+        SOC_VERSION: Ascend910B4
+        PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+        LMCACHE_TRACK_USAGE: false
+        NO_CUDA_EXT: 1
+        NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+        LMCACHE_LOG_LEVEL: INFO
+        PYTHONHASHSEED: 0
+
+      options: >-
+        --label owner=ci-test-runner
+        --add-host=host.docker.internal:192.168.1.1
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        -v /usr/local/dcmi:/usr/local/dcmi:ro
+        -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        --user root
+        --cap-add=SYS_PTRACE
+    
+      steps:
+      - name: 🔧 Fix Proxy Configuration
+        run: |
+          echo "Overwriting Runner Proxy Settings..."
+          echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+          echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+
+      - name: Checkout (Workflow Run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout (Dispatch or Call)
+        if: github.event_name != 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      
+      - name: 🟡 Set Status to Running
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) || 
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) || 
+                        context.sha;
+
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: 'pending',
+              description: 'Running tests... (Click Details to watch)',
+              context: '910B Unit Tests Status',
+              target_url: target_url
+            });
+
+      - name: 🔧 Fix Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 📦 Install LMCache & Build Project
+        run: |
+          
+          echo ">>> Installing LMCache Core..."
+          # TODO (gingfung): use strategy matrix for different version tests
+          pip install lmcache==0.3.12
+
+          echo ">>> Building LMCache-Ascend..."
+          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          
+          # Install in editable mode (-e) for testing
+          python3 -m pip install -v --no-build-isolation -e . 
+      
+      - name: Install Pytest Dependencies
+        run: |
+          pip install pytest pytest-benchmark pytest-cov
+          
+      - name: 🧪 Run Unit Tests
+        id: test-step
+        shell: bash
+        run: |
+          # 1. Setup Env
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          
+          # 2. Disable Exit on Error (Manual Handling)
+          set +e 
+          
+          echo ">>> Starting Pytest..."
+          echo "    - Console: Errors Only (Clean)"
+          echo "    - File:    Debug Logs (Verbose)"
+          
+          # 3. RUN PYTEST
+          # -W ignore:... : Suppress console spam from asyncio cleanup
+          # --log-cli-level=CRITICAL : Keep Console Quiet (Only real errors)
+          # --log-file=debug_logs.txt : Save Logs to File
+          python3 -u -m pytest -v tests/v1/test_npu_connector.py::test_sglang_layerwise_connector_with_npu \
+            -W "ignore:coroutine 'AsyncPQThreadPoolExecutor._worker' was never awaited" \
+            -W "ignore:coroutine 'AsyncPQExecutor._worker' was never awaited" \
+            -W "ignore:Task was destroyed but it is pending!" \
+            -W "ignore:Exception ignored in" \
+            --tb=short \
+            --junit-xml=test-results.xml \
+            --log-cli-level=CRITICAL \
+            --log-file=debug_logs.txt \
+            --log-file-level=INFO
+          
+          # Capture Exit Code
+          EXIT_CODE=$?
+          
+          # 4. Re-enable Exit on Error
+          set -e
+          
+          echo ""
+          echo "============= TEST SUMMARY ============="
+          echo "Final Exit Code: $EXIT_CODE"
+          
+          # 5. Fail if needed
+          if [ $EXIT_CODE -ne 0 ]; then
+             echo "❌ Tests Failed."
+             exit $EXIT_CODE
+          else
+             echo "✅ Tests Passed."
+             exit 0
+          fi
+
+      - name: 🧾 Publish Test Summary
+        if: always()
+        uses: ./.github/actions/junit-summary
+        with:
+          junit-path: test-results.xml
+
+      # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
+      - name: 📤 Upload Debug Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-logs-910b
+          path: debug_logs.txt
+      
+      # 📤 ARTIFACT 2: The XML Summary (For Tools)
+      - name: 📤 Upload Test Results XML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
+          path: test-results.xml
+      
+      - name: 🟢🔴 Update Hardware Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) || 
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) || 
+                        context.sha;
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: state,
+              target_url: target_url,
+              description: state === 'success' ? 'Tests Passed' : 'Tests Failed',
+              context: '910B Unit Tests Status'
+            });
