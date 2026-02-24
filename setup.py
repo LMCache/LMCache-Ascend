@@ -48,9 +48,18 @@ def _get_ascend_home_path():
 
 def _get_ascend_env_path():
     # NOTE: standard Ascend Environment variable setup path
-    env_script_path = os.path.realpath(
-        os.path.join(_get_ascend_home_path(), "..", "set_env.sh")
-    )
+
+    ascend_home = _get_ascend_home_path()
+
+    # CANN 8.5.0 path
+    env_script_path = os.path.join(ascend_home, "set_env.sh")
+
+    # Fallback to pre-8.5 path (set_env.sh in parent directory)
+    if not os.path.exists(env_script_path):
+        env_script_path = os.path.realpath(
+            os.path.join(ascend_home, "..", "set_env.sh")
+        )
+
     if not os.path.exists(env_script_path):
         raise ValueError(
             f"The file '{env_script_path}' is not found, "
@@ -210,6 +219,8 @@ class CustomAscendCmakeBuildExt(build_ext):
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
 
+        build_hccl = os.getenv("BUILD_HCCL", "ON").upper()
+
         cmake_cmd = [
             f". {env_path} && "
             f"cmake -S {ROOT_DIR} -B {BUILD_OPS_DIR}"
@@ -217,6 +228,7 @@ class CustomAscendCmakeBuildExt(build_ext):
             f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
             f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
+            f"  -DBUILD_HCCL={build_hccl}"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
             f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"
             f"  -DCMAKE_BUILD_TYPE=Release"

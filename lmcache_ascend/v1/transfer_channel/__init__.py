@@ -2,8 +2,15 @@
 # Third Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 
-# First Party
-from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+# todo：Deleted after adaptation to HCCL in 8.5.0
+try:
+    # First Party
+    from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+
+    HCCL_AVAILABLE = True
+except ImportError:
+    HCCL_AVAILABLE = False
+    HcclChannel = None
 
 
 def get_correct_device(device: str, worker_id: int) -> str:

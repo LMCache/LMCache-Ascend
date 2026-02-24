@@ -5,7 +5,11 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11")
 find_package(pybind11 REQUIRED)
 
-add_subdirectory(hccl)
+option(BUILD_HCCL "Build HCCL module" ON)
+
+if(BUILD_HCCL)
+    add_subdirectory(hccl)
+endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 

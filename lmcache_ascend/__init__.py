@@ -157,6 +157,29 @@ def _patch_sys_detection():
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
 
+def _patch_rpc_utils():
+    # Patching this to fix socket path length issues on some systems.
+    # The original socket path can exceed Unix domain socket's 107 character
+    # limit, causing ZMQ errors. The patched version uses shorter, hash-based
+    # identifiers to ensure paths are always under the limit.
+    # Third Party
+    from lmcache.v1.lookup_client import (
+        lmcache_async_lookup_client as lmc_async_lookup_client,
+    )
+    from lmcache.v1.lookup_client import lmcache_lookup_client as lmc_lookup_client
+    import lmcache.v1.offload_server.zmq_server as zmq_server
+    import lmcache.v1.rpc_utils
+
+    # First Party
+    from lmcache_ascend.v1.rpc_utils import get_zmq_rpc_path_lmcache
+
+    lmcache.v1.rpc_utils.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+
+    lmc_lookup_client.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+    lmc_async_lookup_client.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+    zmq_server.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
@@ -178,6 +201,7 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_cacheblend()
         _patch_multi_process()
         _patch_lookup_client()
+        _patch_rpc_utils()
 
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
