@@ -5,6 +5,7 @@
 #include "managed_mem.h"
 #include "mem_alloc.h"
 #include "mem_kernels.h"
+#include "pac_kernels.h"
 #include "pos_kernels.h"
 #include <iostream>
 #include <pybind11/pybind11.h>
@@ -83,4 +84,8 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
   m.def("get_gpu_pci_bus_id", &get_npu_pci_bus_id);
+
+  m.def("pac_prepare_enc_metadata", &pac_prepare_enc_metadata);
+  m.def("pac_encode", &pac_encode);
+  m.def("pac_decode", &pac_decode);
 }
