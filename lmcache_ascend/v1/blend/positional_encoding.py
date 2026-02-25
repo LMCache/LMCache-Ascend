@@ -2,6 +2,7 @@
 # Standard
 from typing import Any, Callable, Dict, Optional
 from unittest.mock import MagicMock
+import inspect
 
 # Third Party
 from lmcache.logging import init_logger
@@ -14,6 +15,48 @@ logger = init_logger(__name__)
 
 # TODO(Jiayi): Add and test more types of rope
 # (e.g., rope scaling, (non-)neox style, dtype, etc.)
+
+
+# Detect vLLM version from function signatures for multi-version API dispatching
+def get_rope_compat(
+    head_size: int,
+    rotary_dim: int,
+    max_position: int,
+    base: float,
+    is_neox_style: bool = True,
+    rope_scaling: Optional[Dict[str, Any]] = None,
+    dtype: Optional[torch.dtype] = None,
+    partial_rotary_factor: float = 1.0,
+):
+    sig = inspect.signature(vllm_get_rope)
+    if "rotary_dim" in sig.parameters:
+        return vllm_get_rope(
+            head_size,
+            rotary_dim,
+            max_position,
+            base,
+            is_neox_style,
+            rope_scaling,
+            dtype,
+            partial_rotary_factor,
+        )
+    else:
+        rope_parameters = {
+            "rope_theta": base,
+            "partial_rotary_factor": partial_rotary_factor,
+        }
+        if rope_scaling is not None:
+            rope_parameters.update(rope_scaling)
+            if "type" in rope_scaling:
+                rope_parameters["rope_type"] = rope_scaling["type"]
+        return vllm_get_rope(
+            head_size=head_size,
+            max_position=max_position,
+            is_neox_style=is_neox_style,
+            rope_parameters=rope_parameters,
+            dtype=dtype,
+            dual_chunk_attention_config=None,
+        )
 
 
 class BasicReverseRope:
@@ -165,7 +208,7 @@ def get_fused_rope(
         )
         return None
 
-    rope = vllm_get_rope(
+    rope = get_rope_compat(
         head_size,
         rotary_dim,
         max_position,
