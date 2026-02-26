@@ -147,6 +147,15 @@ def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
     return version_number
 
 
+# TODO: Remove this once HCCL adaptation for CANN 8.5.0 is finished.
+def _is_cann_8_5():
+    # The set_env.sh script of CANN 8.5.0
+    # is directly placed in the ascend_home directory.
+    ascend_home = _get_ascend_home_path()
+    env_script_path = os.path.join(ascend_home, "set_env.sh")
+    return os.path.exists(env_script_path)
+
+
 class custom_build_info(build_py):
     def run(self):
         soc_version = _get_npu_soc()
@@ -219,7 +228,14 @@ class CustomAscendCmakeBuildExt(build_ext):
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = BUILD_OPS_DIR
 
-        build_hccl = os.getenv("BUILD_HCCL", "ON").upper()
+        # TODO: Remove this once HCCL adaptation for CANN 8.5.0 is finished.
+        if _is_cann_8_5():
+            logger.info(
+                "Detected CANN 8.5 based on set_env.sh location. Forcing BUILD_HCCL=OFF"
+            )
+            build_hccl = "OFF"
+        else:
+            build_hccl = "ON"
 
         cmake_cmd = [
             f". {env_path} && "
