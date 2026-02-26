@@ -3,18 +3,18 @@
 #endif
 #define _GLIBCXX_USE_CXX11_ABI 0
 
+#include <map>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <map>
 
 #include "acl/acl.h"
-#include "runtime/mem.h"
+#include "hcomm_devva.h"
 #include "hixl/hixl.h"
 #include "hixl/hixl_types.h"
-#include "hcomm_devva.h"
+#include "runtime/mem.h"
 
 namespace py = pybind11;
 
@@ -32,24 +32,25 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
       "is_device_memory",
       [](uintptr_t ptr) -> bool {
         rtPointerAttributes_t attributes;
-        auto ret = rtPointerGetAttributes(&attributes,
-                                          reinterpret_cast<void *>(ptr));
+        auto ret =
+            rtPointerGetAttributes(&attributes, reinterpret_cast<void *>(ptr));
         if (ret != ACL_SUCCESS) {
-          return false; // fallback: assume host memory (safer for HIXL registration)
+          return false; // fallback: assume host memory (safer for HIXL
+                        // registration)
         }
         return attributes.memoryType != RT_MEMORY_TYPE_HOST &&
                attributes.memoryType != RT_MEMORY_TYPE_USER;
       },
       py::arg("ptr"),
-      "Detect whether a pointer refers to device or host memory via ACL runtime.");
+      "Detect whether a pointer refers to device or host memory via ACL "
+      "runtime.");
 
   m.def(
       "get_dev_va",
       [](int device_id, uintptr_t host_ptr, size_t size) -> py::object {
         void *dev_va = nullptr;
-        int ret = hcomm_get_dev_va(device_id,
-                                   reinterpret_cast<void *>(host_ptr),
-                                   size, &dev_va);
+        int ret = hcomm_get_dev_va(
+            device_id, reinterpret_cast<void *>(host_ptr), size, &dev_va);
         if (ret != 0) {
           return py::none();
         }
@@ -99,11 +100,11 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
       .def_readwrite("len", &hixl::MemDesc::len);
 
   py::class_<hixl::TransferOpDesc>(m, "TransferOpDesc")
-      .def(py::init([](uintptr_t local_addr, uintptr_t remote_addr,
-                       size_t len) {
-             return hixl::TransferOpDesc{local_addr, remote_addr, len};
-           }),
-           py::arg("local_addr"), py::arg("remote_addr"), py::arg("len"))
+      .def(
+          py::init([](uintptr_t local_addr, uintptr_t remote_addr, size_t len) {
+            return hixl::TransferOpDesc{local_addr, remote_addr, len};
+          }),
+          py::arg("local_addr"), py::arg("remote_addr"), py::arg("len"))
       .def_readwrite("local_addr", &hixl::TransferOpDesc::local_addr)
       .def_readwrite("remote_addr", &hixl::TransferOpDesc::remote_addr)
       .def_readwrite("len", &hixl::TransferOpDesc::len);
@@ -119,18 +120,16 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
               options[hixl::AscendString(kv.first.c_str())] =
                   hixl::AscendString(kv.second.c_str());
             }
-            check_status(
-                self.Initialize(hixl::AscendString(local_engine.c_str()),
-                                options),
-                "HIXL Initialize failed");
+            check_status(self.Initialize(
+                             hixl::AscendString(local_engine.c_str()), options),
+                         "HIXL Initialize failed");
           },
           py::arg("local_engine"),
           py::arg("options") = std::map<std::string, std::string>{})
       .def("finalize", &hixl::Hixl::Finalize)
       .def(
           "register_mem",
-          [](hixl::Hixl &self, uintptr_t addr, size_t len,
-             hixl::MemType type) {
+          [](hixl::Hixl &self, uintptr_t addr, size_t len, hixl::MemType type) {
             hixl::MemDesc desc{};
             desc.addr = addr;
             desc.len = len;
@@ -153,9 +152,8 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
           [](hixl::Hixl &self, const std::string &remote_engine,
              int32_t timeout_ms) {
             py::gil_scoped_release release;
-            check_status(self.Connect(
-                             hixl::AscendString(remote_engine.c_str()),
-                             timeout_ms),
+            check_status(self.Connect(hixl::AscendString(remote_engine.c_str()),
+                                      timeout_ms),
                          "HIXL Connect failed");
           },
           py::arg("remote_engine"), py::arg("timeout_ms") = 30000)
@@ -164,10 +162,10 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
           [](hixl::Hixl &self, const std::string &remote_engine,
              int32_t timeout_ms) {
             py::gil_scoped_release release;
-            check_status(self.Disconnect(
-                             hixl::AscendString(remote_engine.c_str()),
-                             timeout_ms),
-                         "HIXL Disconnect failed");
+            check_status(
+                self.Disconnect(hixl::AscendString(remote_engine.c_str()),
+                                timeout_ms),
+                "HIXL Disconnect failed");
           },
           py::arg("remote_engine"), py::arg("timeout_ms") = 5000)
       .def(
@@ -178,9 +176,8 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
              int32_t timeout_ms) {
             py::gil_scoped_release release;
             check_status(
-                self.TransferSync(
-                    hixl::AscendString(remote_engine.c_str()), op, op_descs,
-                    timeout_ms),
+                self.TransferSync(hixl::AscendString(remote_engine.c_str()), op,
+                                  op_descs, timeout_ms),
                 "HIXL TransferSync failed");
           },
           py::arg("remote_engine"), py::arg("op"), py::arg("op_descs"),
@@ -193,9 +190,8 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
             hixl::TransferArgs args{};
             hixl::TransferReq req = nullptr;
             check_status(
-                self.TransferAsync(
-                    hixl::AscendString(remote_engine.c_str()), op, op_descs,
-                    args, req),
+                self.TransferAsync(hixl::AscendString(remote_engine.c_str()),
+                                   op, op_descs, args, req),
                 "HIXL TransferAsync failed");
             return reinterpret_cast<uintptr_t>(req);
           },
@@ -204,12 +200,10 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
           "get_transfer_status",
           [](hixl::Hixl &self, uintptr_t req) {
             hixl::TransferStatus status;
-            check_status(
-                self.GetTransferStatus(
-                    reinterpret_cast<hixl::TransferReq>(req), status),
-                "HIXL GetTransferStatus failed");
+            check_status(self.GetTransferStatus(
+                             reinterpret_cast<hixl::TransferReq>(req), status),
+                         "HIXL GetTransferStatus failed");
             return status;
           },
-          py::arg("req"))
-      ;
+          py::arg("req"));
 }

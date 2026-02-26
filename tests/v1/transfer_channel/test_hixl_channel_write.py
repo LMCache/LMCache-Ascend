@@ -177,7 +177,10 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
         torch.npu.set_device(config.recv_device_id)
         logger.info(f"Receiver: Using device {config.recv_device_id}")
         allocator = get_allocator(
-            config.recv_device_id, config.kv_shape, config.dtype, config.receiver_use_host
+            config.recv_device_id,
+            config.kv_shape,
+            config.dtype,
+            config.receiver_use_host,
         )
         alloc_type = "cpu" if config.receiver_use_host else "gpu"
 

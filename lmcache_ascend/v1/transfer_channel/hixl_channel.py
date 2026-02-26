@@ -1,9 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass
-from typing import Any, Optional, Union
+from typing import Optional, Union
 import asyncio
-import pickle
 import threading
 import time
 
@@ -30,6 +29,7 @@ logger = init_logger(__name__)
 
 class HixlMsgBase(msgspec.Struct, tag=True):
     """Base class for all HIXL-related handshake messages"""
+
     pass
 
 
@@ -129,9 +129,7 @@ class HixlChannel(BaseTransferChannel):
         init_tmp_socket.send(msgspec.msgpack.encode(hixl_init_req))
 
         hixl_init_resp_bytes = init_tmp_socket.recv()
-        hixl_init_resp = msgspec.msgpack.decode(
-            hixl_init_resp_bytes, type=HixlMsg
-        )
+        hixl_init_resp = msgspec.msgpack.decode(hixl_init_resp_bytes, type=HixlMsg)
         remote_engine_id = hixl_init_resp.engine_id
 
         logger.info("Connecting to remote HIXL engine: %s", remote_engine_id)
@@ -151,9 +149,7 @@ class HixlChannel(BaseTransferChannel):
         )
         init_tmp_socket.send(msgspec.msgpack.encode(hixl_mem_req))
         hixl_mem_resp_bytes = init_tmp_socket.recv()
-        hixl_mem_resp = msgspec.msgpack.decode(
-            hixl_mem_resp_bytes, type=HixlMsg
-        )
+        hixl_mem_resp = msgspec.msgpack.decode(hixl_mem_resp_bytes, type=HixlMsg)
 
         addr_list = []
         with self._state_lock:
@@ -199,9 +195,7 @@ class HixlChannel(BaseTransferChannel):
         await init_tmp_socket.send(msgspec.msgpack.encode(hixl_init_req))
 
         hixl_init_resp_bytes = await init_tmp_socket.recv()
-        hixl_init_resp = msgspec.msgpack.decode(
-            hixl_init_resp_bytes, type=HixlMsg
-        )
+        hixl_init_resp = msgspec.msgpack.decode(hixl_init_resp_bytes, type=HixlMsg)
         remote_engine_id = hixl_init_resp.engine_id
 
         self.hixl_wrapper.engine.connect(remote_engine_id)
@@ -217,9 +211,7 @@ class HixlChannel(BaseTransferChannel):
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(hixl_mem_req))
         hixl_mem_resp_bytes = await init_tmp_socket.recv()
-        hixl_mem_resp = msgspec.msgpack.decode(
-            hixl_mem_resp_bytes, type=HixlMsg
-        )
+        hixl_mem_resp = msgspec.msgpack.decode(hixl_mem_resp_bytes, type=HixlMsg)
 
         addr_list = []
         with self._state_lock:
@@ -476,13 +468,12 @@ class HixlChannel(BaseTransferChannel):
                     "Sending raw bytes is not supported in HIXL channel"
                 )
 
+            # TODO: Potentially use the actual size of the object
             op_descs.append(
                 hixl_comms.TransferOpDesc(
-                    local_addr=self.hixl_wrapper.local_index_addr[
-                        mem_obj.meta.address
-                    ],
+                    local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
                     remote_addr=remote_index_addr[remote_index],
-                    len=self.page_size, #TODO: Potentially use the actual size of the object
+                    len=self.page_size,
                 )
             )
 
@@ -526,13 +517,12 @@ class HixlChannel(BaseTransferChannel):
                     "Sending raw bytes is not supported in HIXL channel"
                 )
 
+            # TODO: Potentially use the actual size of the object
             op_descs.append(
                 hixl_comms.TransferOpDesc(
-                    local_addr=self.hixl_wrapper.local_index_addr[
-                        mem_obj.meta.address
-                    ],
+                    local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
                     remote_addr=remote_index_addr[remote_index],
-                    len=self.page_size, # TODO: Potentially use the actual size of the object
+                    len=self.page_size,
                 )
             )
 
@@ -582,9 +572,7 @@ class HixlChannel(BaseTransferChannel):
 
             op_descs.append(
                 hixl_comms.TransferOpDesc(
-                    local_addr=self.hixl_wrapper.local_index_addr[
-                        mem_obj.meta.address
-                    ],
+                    local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
                     remote_addr=remote_index_addr[remote_index],
                     len=self.page_size,
                 )
@@ -632,7 +620,6 @@ class HixlEngineWrapper:
     ):
         device_id = torch.npu.current_device()
 
-
         is_device = _is_device_memory(buffer_ptr)
 
         self.engine = hixl_comms.Hixl()
@@ -641,6 +628,12 @@ class HixlEngineWrapper:
         port = _find_free_port()
         self.engine_id = f"{ip}:{port}"
 
+        # NOTE (gingfung): this option is for the buffer pool size
+        # and the number of buffers the default is 4:8,
+        # which means 4 buffers of 8MB each
+        # we currently hardcoded to 4:8 because LMCache supports H2D, H2H
+        # and these patterns require a buffer pool for now
+        # see Hixl Tests for more details.
         options = {"BufferPool": "4:8"}
         self.engine.initialize(self.engine_id, options)
 
@@ -650,19 +643,25 @@ class HixlEngineWrapper:
                 lmc_ops.unregister_ptr(buffer_ptr)
 
             self.mem_handle = self.engine.register_mem(
-                buffer_ptr, buffer_size, hixl_comms.MEM_DEVICE)
+                buffer_ptr, buffer_size, hixl_comms.MEM_DEVICE
+            )
 
             if already_registered:
-                dev_ptr = hixl_comms.get_dev_va(
-                    device_id, buffer_ptr, buffer_size)
+                dev_ptr = hixl_comms.get_dev_va(device_id, buffer_ptr, buffer_size)
                 if dev_ptr is not None:
                     lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
-                    logger.info("Re-registered lmc_ops mapping via "
-                                "MemMappingManager (devVA=0x%x) dev ptr: %s", dev_ptr, dev_ptr)
+                    logger.info(
+                        "Re-registered lmc_ops mapping via "
+                        "MemMappingManager (devVA=0x%x) dev ptr: %s",
+                        dev_ptr,
+                        dev_ptr,
+                    )
         else:
             self.mem_handle = None
-            logger.info("Host memory: skipping RegisterMem, relying on "
-                        "BufferPool for staging (H2H pattern)")
+            logger.info(
+                "Host memory: skipping RegisterMem, relying on "
+                "BufferPool for staging (H2H pattern)"
+            )
 
         self.buffer_ptr = buffer_ptr
         self.buffer_size = buffer_size
@@ -684,7 +683,9 @@ class HixlEngineWrapper:
 def _get_device_ip(device_id: int) -> str:
     """Get the RDMA-reachable IP for the given NPU device."""
     try:
+        # Standard
         import subprocess
+
         result = subprocess.run(
             ["hccn_tool", "-i", str(device_id), "-ip", "-g"],
             capture_output=True,
@@ -701,7 +702,9 @@ def _get_device_ip(device_id: int) -> str:
 
 def _find_free_port() -> int:
     """Find an available TCP port."""
+    # Standard
     import socket
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]

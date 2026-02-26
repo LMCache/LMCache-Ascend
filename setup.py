@@ -50,7 +50,9 @@ def _get_cann_version():
     """Read the CANN toolkit version from ascend_toolkit_install.info."""
     ascend_home = _get_ascend_home_path()
     arch = platform.machine()
-    info_path = os.path.join(ascend_home, f"{arch}-linux", "ascend_toolkit_install.info")
+    info_path = os.path.join(
+        ascend_home, f"{arch}-linux", "ascend_toolkit_install.info"
+    )
     if not os.path.exists(info_path):
         logger.warning(f"ascend_toolkit_install.info not found at {info_path}")
         return None
@@ -187,7 +189,10 @@ class custom_build_info(build_py):
             f.write("    import re\n")
             f.write("    parts = re.findall(r'\\d+', __cann_version__)\n")
             f.write("    return tuple(int(p) for p in parts)\n")
-        logging.info(f"Generated _build_info.py with SOC version: {soc_version}, CANN version: {cann_version}")
+        logging.info(
+            f"Generated _build_info.py with SOC version: {soc_version}, "
+            f"CANN version: {cann_version}"
+        )
         super().run()
 
 

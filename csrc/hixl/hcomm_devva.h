@@ -18,9 +18,7 @@ extern "C" {
  * Returns 0 on success, non-zero (HcclResult) on failure.
  * On success *dev_va is the device-side VA that corresponds to host_ptr.
  */
-int hcomm_get_dev_va(int device_logic_id,
-                     void *host_ptr,
-                     uint64_t size,
+int hcomm_get_dev_va(int device_logic_id, void *host_ptr, uint64_t size,
                      void **dev_va);
 
 #ifdef __cplusplus

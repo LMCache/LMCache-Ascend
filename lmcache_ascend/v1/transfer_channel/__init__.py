@@ -53,9 +53,7 @@ def CreateTransferChannel(
     :return: An instance of the specified transfer channel.
     """
 
-    assert channel_type in ["hccl", "hixl"], (
-        f"Unsupported channel type: {channel_type}"
-    )
+    assert channel_type in ["hccl", "hixl"], f"Unsupported channel type: {channel_type}"
 
     if channel_type == "hixl":
         transfer_channel = HixlChannel(
