@@ -46,11 +46,34 @@ def _get_ascend_home_path():
     return os.environ.get("ASCEND_HOME_PATH", "/usr/local/Ascend/ascend-toolkit/latest")
 
 
-def _get_ascend_env_path():
+def _get_cann_version():
+    """Read the CANN toolkit version from ascend_toolkit_install.info."""
+    ascend_home = _get_ascend_home_path()
+    arch = platform.machine()
+    info_path = os.path.join(ascend_home, f"{arch}-linux", "ascend_toolkit_install.info")
+    if not os.path.exists(info_path):
+        logger.warning(f"ascend_toolkit_install.info not found at {info_path}")
+        return None
+    with open(info_path) as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith("version="):
+                version = line.split("=", 1)[1].strip()
+                logger.info(f"Detected CANN toolkit version: {version}")
+                return version
+    logger.warning("Could not parse version from ascend_toolkit_install.info")
+    return None
+
+
+def _get_ascend_env_path(cann_version):
     # NOTE: standard Ascend Environment variable setup path
-    env_script_path = os.path.realpath(
-        os.path.join(_get_ascend_home_path(), "..", "set_env.sh")
-    )
+
+    _ascend_home_path = _get_ascend_home_path()
+    if cann_version >= (8, 5):
+        env_script_path = os.path.join(_ascend_home_path, "setenv.sh")
+    else:
+        env_script_path = os.path.join(_ascend_home_path, "..", "set_env.sh")
+
     if not os.path.exists(env_script_path):
         raise ValueError(
             f"The file '{env_script_path}' is not found, "
@@ -147,6 +170,8 @@ class custom_build_info(build_py):
                 "SOC version is not set. Please set SOC_VERSION environment variable."
             )
 
+        cann_version = _get_cann_version() or "unknown"
+
         package_dir = os.path.join(ROOT_DIR, "lmcache_ascend", "_build_info.py")
         with open(package_dir, "w+") as f:
             f.write("# Auto-generated file\n")
@@ -156,7 +181,13 @@ class custom_build_info(build_py):
             else:
                 framework_name = "pytorch"
             f.write(f"__framework_name__ = '{framework_name}'\n")
-        logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
+            f.write(f"__cann_version__ = '{cann_version}'\n")
+            f.write("\n")
+            f.write("def cann_version_tuple() -> tuple[int, ...]:\n")
+            f.write("    import re\n")
+            f.write("    parts = re.findall(r'\\d+', __cann_version__)\n")
+            f.write("    return tuple(int(p) for p in parts)\n")
+        logging.info(f"Generated _build_info.py with SOC version: {soc_version}, CANN version: {cann_version}")
         super().run()
 
 
@@ -182,13 +213,21 @@ class CustomAscendCmakeBuildExt(build_ext):
         os.makedirs(BUILD_OPS_DIR, exist_ok=True)
 
         ascend_home_path = _get_ascend_home_path()
-        env_path = _get_ascend_env_path()
+        cann_version = _get_cann_version()
+        cann_version_tuple = tuple(int(p) for p in cann_version.split("."))
+        env_path = _get_ascend_env_path(cann_version_tuple)
         _soc_version = _get_npu_soc()
         arch = platform.machine()
         _aicore_arch = _get_aicore_arch_number(ascend_home_path, _soc_version, arch)
         _cxx_compiler = os.getenv("CXX")
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
+
+        self._use_hixl = cann_version is not None and cann_version_tuple >= (8, 5)
+        if self._use_hixl:
+            logger.info(f"CANN {cann_version}: building HIXL transfer channel")
+        else:
+            logger.info(f"CANN {cann_version}: building HCCL transfer channel")
 
         try:
             # if pybind11 is installed via pip
@@ -246,6 +285,9 @@ class CustomAscendCmakeBuildExt(build_ext):
             torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
             cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
 
+        if self._use_hixl:
+            cmake_cmd += ["  -DUSE_HIXL=ON"]
+
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
 
@@ -269,7 +311,11 @@ class CustomAscendCmakeBuildExt(build_ext):
         src_dir = os.path.join(ROOT_DIR, "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
-        expected_patterns = ["c_ops*.so", "libcache_kernels.so", "hccl_npu_comms*.so"]
+        expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
+        if self._use_hixl:
+            expected_patterns.append("hixl_npu_comms*.so")
+        else:
+            expected_patterns.append("hccl_npu_comms*.so")
 
         # Search for files matching our patterns
         so_files = []

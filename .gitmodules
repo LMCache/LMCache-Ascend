@@ -2,6 +2,3 @@
 	path = third_party/kvcache-ops
 	url = https://atomgit.com/openeuler/kvcache-ops.git
 
-[submodule "third_party/hixl"]
-	path = third_party/hixl
-	url = https://gitcode.com/cann/hixl.git

@@ -5,7 +5,15 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11")
 find_package(pybind11 REQUIRED)
 
-add_subdirectory(hccl)
+option(USE_HIXL "Build HIXL transfer channel instead of HCCL (for CANN >= 8.5)" OFF)
+
+if(USE_HIXL)
+  message(STATUS "USE_HIXL=ON: building hixl_npu_comms (skipping hccl)")
+  add_subdirectory(hixl)
+else()
+  message(STATUS "USE_HIXL=OFF: building hccl_npu_comms (skipping hixl)")
+  add_subdirectory(hccl)
+endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
