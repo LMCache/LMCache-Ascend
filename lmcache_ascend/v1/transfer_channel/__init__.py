@@ -61,6 +61,13 @@ def CreateTransferChannel(
 
     assert channel_type in ["hccl"], f"Unsupported channel type: {channel_type}"
 
+    if not HCCL_AVAILABLE:
+        raise RuntimeError(
+            "HcclChannel is not available. This is likely due to CANN 8.5 "
+            "adaptation in progress. Please check your CANN version and "
+            "lmcache_ascend installation."
+        )
+
     transfer_channel = HcclChannel(
         async_mode=async_mode,
         role=role,
