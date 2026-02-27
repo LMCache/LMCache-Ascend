@@ -6,6 +6,7 @@ import glob
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -71,8 +72,8 @@ def _get_ascend_env_path(cann_version):
     # NOTE: standard Ascend Environment variable setup path
 
     _ascend_home_path = _get_ascend_home_path()
-    if cann_version >= (8, 5):
-        env_script_path = os.path.join(_ascend_home_path, "setenv.sh")
+    if cann_version >= (8, 5, 0):
+        env_script_path = os.path.join(_ascend_home_path, "set_env.sh")
     else:
         env_script_path = os.path.join(_ascend_home_path, "..", "set_env.sh")
 
@@ -219,7 +220,9 @@ class CustomAscendCmakeBuildExt(build_ext):
 
         ascend_home_path = _get_ascend_home_path()
         cann_version = _get_cann_version()
-        cann_version_tuple = tuple(int(p) for p in cann_version.split("."))
+        cann_version_tuple = tuple(
+            int(p) for p in re.findall(r"\d+", cann_version or "")
+        )
         env_path = _get_ascend_env_path(cann_version_tuple)
         _soc_version = _get_npu_soc()
         arch = platform.machine()
@@ -228,7 +231,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
 
-        self._use_hixl = cann_version is not None and cann_version_tuple >= (8, 5)
+        self._use_hixl = cann_version is not None and cann_version_tuple >= (8, 5, 0)
         if self._use_hixl:
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
         else:
