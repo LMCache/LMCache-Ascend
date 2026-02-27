@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E402
+# Standard
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 import faulthandler
@@ -9,15 +10,18 @@ import sys
 import time
 import warnings
 
+# First Party
 from tests.bootstrap import prepare_environment
 
 prepare_environment()
 
+# Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, PagedCpuGpuMemoryAllocator
 import pytest
 import torch
 
+# First Party
 from lmcache_ascend import _build_info
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
 
@@ -47,9 +51,7 @@ class HcommOsTestConfig:
             self.receiver_use_host = self.use_host_memory
 
 
-def calculate_tensor_byte_size(
-    kv_shape: Tuple[int, ...], dtype: torch.dtype
-) -> int:
+def calculate_tensor_byte_size(kv_shape: Tuple[int, ...], dtype: torch.dtype) -> int:
     num_elements = 1
     for dim_size in kv_shape:
         num_elements *= dim_size
@@ -84,9 +86,7 @@ def get_allocator(
     return allocator
 
 
-def sender_process(
-    config: HcommOsTestConfig, shared_dict: Dict[str, Any]
-) -> None:
+def sender_process(config: HcommOsTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         faulthandler.enable()
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
@@ -133,9 +133,7 @@ def sender_process(
             role="sender",
             buffer_ptr=buffer_ptr,
             buffer_size=buffer_size,
-            align_bytes=calculate_tensor_byte_size(
-                config.kv_shape, config.dtype
-            ),
+            align_bytes=calculate_tensor_byte_size(config.kv_shape, config.dtype),
             tp_rank=0,
             peer_init_url=local_url,
         )
@@ -168,9 +166,7 @@ def sender_process(
             transfer_spec["stream"] = custom_stream
             logger.info("Sender: Using custom stream for transfer")
 
-        logger.info(
-            f"Sender ({alloc_type}): Starting hcomm one-sided transfer..."
-        )
+        logger.info(f"Sender ({alloc_type}): Starting hcomm one-sided transfer...")
         start_time = time.time()
 
         channel.batched_write(
@@ -191,9 +187,7 @@ def sender_process(
         sys.exit(1)
 
 
-def receiver_process(
-    config: HcommOsTestConfig, shared_dict: Dict[str, Any]
-) -> None:
+def receiver_process(config: HcommOsTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         faulthandler.enable()
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
@@ -236,9 +230,7 @@ def receiver_process(
             role="receiver",
             buffer_ptr=buffer_ptr,
             buffer_size=buffer_size,
-            align_bytes=calculate_tensor_byte_size(
-                config.kv_shape, config.dtype
-            ),
+            align_bytes=calculate_tensor_byte_size(config.kv_shape, config.dtype),
             tp_rank=0,
             peer_init_url=local_url,
         )
@@ -260,31 +252,22 @@ def receiver_process(
                 raise TimeoutError("Timed out waiting for write completion.")
 
         expected_values = shared_dict["expected_values"]
-        logger.info(
-            f"Receiver ({alloc_type}): Verifying data integrity..."
-        )
+        logger.info(f"Receiver ({alloc_type}): Verifying data integrity...")
 
         for i, obj in enumerate(objs):
             expected_val = expected_values[i]
-            tensor_data = (
-                obj.tensor if config.receiver_use_host else obj.tensor.cpu()
-            )
+            tensor_data = obj.tensor if config.receiver_use_host else obj.tensor.cpu()
 
             is_equal = (tensor_data == expected_val).all()
 
             if not is_equal:
                 sample = tensor_data.flatten()[:5].float().numpy()
                 logger.error(
-                    f"Mismatch in object {i}. "
-                    f"Expected {expected_val}, got: {sample}"
+                    f"Mismatch in object {i}. Expected {expected_val}, got: {sample}"
                 )
-                raise AssertionError(
-                    f"Data verification failed for object {i}"
-                )
+                raise AssertionError(f"Data verification failed for object {i}")
 
-        logger.info(
-            f"Receiver: Successfully verified {config.num_objs} objects."
-        )
+        logger.info(f"Receiver: Successfully verified {config.num_objs} objects.")
         channel.close()
 
     except Exception as e:
@@ -323,17 +306,13 @@ def run_hcomm_os_test(config: HcommOsTestConfig):
             p_send.terminate()
             errors.append("Sender process timed out")
         elif p_send.exitcode != 0:
-            errors.append(
-                f"Sender process failed with exitcode {p_send.exitcode}"
-            )
+            errors.append(f"Sender process failed with exitcode {p_send.exitcode}")
 
         if p_recv.is_alive():
             p_recv.terminate()
             errors.append("Receiver process timed out")
         elif p_recv.exitcode != 0:
-            errors.append(
-                f"Receiver process failed with exitcode {p_recv.exitcode}"
-            )
+            errors.append(f"Receiver process failed with exitcode {p_recv.exitcode}")
 
         if errors:
             pytest.fail("\n".join(errors))
@@ -350,9 +329,7 @@ def run_hcomm_os_test(config: HcommOsTestConfig):
         (10, 31, 256, 8, 128),
     ],
 )
-def test_hcomm_os_write_device(
-    num_objs, num_layer, chunk_size, num_kv_head, head_size
-):
+def test_hcomm_os_write_device(num_objs, num_layer, chunk_size, num_kv_head, head_size):
     config = HcommOsTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
@@ -396,9 +373,7 @@ def test_hcomm_os_write_device_custom_stream(
         (2, 31, 256, 8, 128),
     ],
 )
-def test_hcomm_os_write_host(
-    num_objs, num_layer, chunk_size, num_kv_head, head_size
-):
+def test_hcomm_os_write_host(num_objs, num_layer, chunk_size, num_kv_head, head_size):
     config = HcommOsTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
@@ -419,9 +394,7 @@ def test_hcomm_os_write_host(
         (10, 31, 256, 8, 128),
     ],
 )
-def test_hcomm_os_write_h2d(
-    num_objs, num_layer, chunk_size, num_kv_head, head_size
-):
+def test_hcomm_os_write_h2d(num_objs, num_layer, chunk_size, num_kv_head, head_size):
     config = HcommOsTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
@@ -443,9 +416,7 @@ def test_hcomm_os_write_h2d(
         (10, 31, 256, 8, 128),
     ],
 )
-def test_hcomm_os_write_d2h(
-    num_objs, num_layer, chunk_size, num_kv_head, head_size
-):
+def test_hcomm_os_write_d2h(num_objs, num_layer, chunk_size, num_kv_head, head_size):
     config = HcommOsTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),

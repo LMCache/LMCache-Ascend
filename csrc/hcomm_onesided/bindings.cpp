@@ -4,27 +4,28 @@
 #endif
 #define _GLIBCXX_USE_CXX11_ABI 0
 
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
 #include <cstdio>
 #include <cstring>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "acl/acl.h"
 #include "acl/acl_rt.h"
-#include "hccl/hccl_types.h"
 #include "hccl/hccl_comm.h"
 #include "hccl/hccl_one_sided_services.h"
+#include "hccl/hccl_types.h"
 #include "hcomm_devva.h"
 #include "runtime/mem.h"
 #include "securec.h"
 
 extern "C" {
-HcclResult HcclCommInitClusterInfoMemConfig(
-    const char *clusterInfo, uint32_t rank, HcclCommConfig *config,
-    HcclComm *comm) __attribute__((weak));
+HcclResult
+HcclCommInitClusterInfoMemConfig(const char *clusterInfo, uint32_t rank,
+                                 HcclCommConfig *config, HcclComm *comm)
+    __attribute__((weak));
 }
 
 namespace py = pybind11;
@@ -35,7 +36,6 @@ static void check_hccl(HcclResult ret, const char *msg) {
                              " | HCCL error code: " + std::to_string(ret));
   }
 }
-
 
 PYBIND11_MODULE(hcomm_onesided, m) {
   m.doc() = "pybind11 wrapper for hcomm one-sided service API";
@@ -79,8 +79,8 @@ PYBIND11_MODULE(hcomm_onesided, m) {
       "get_device_info",
       [](int32_t logic_device_id) -> py::dict {
         int32_t phy_device_id = 0;
-        auto ret = aclrtGetPhyDevIdByLogicDevId(logic_device_id,
-                                                 &phy_device_id);
+        auto ret =
+            aclrtGetPhyDevIdByLogicDevId(logic_device_id, &phy_device_id);
         if (ret != ACL_SUCCESS) {
           throw std::runtime_error(
               "aclrtGetPhyDevIdByLogicDevId failed | code: " +
@@ -138,9 +138,9 @@ PYBIND11_MODULE(hcomm_onesided, m) {
          const std::string &comm_name) -> uintptr_t {
         std::string ri = root_info_bytes;
         if (ri.size() != HCCL_ROOT_INFO_BYTES) {
-          throw std::runtime_error(
-              "root_info_bytes must be exactly " +
-              std::to_string(HCCL_ROOT_INFO_BYTES) + " bytes");
+          throw std::runtime_error("root_info_bytes must be exactly " +
+                                   std::to_string(HCCL_ROOT_INFO_BYTES) +
+                                   " bytes");
         }
 
         HcclRootInfo info;
@@ -183,10 +183,9 @@ PYBIND11_MODULE(hcomm_onesided, m) {
         HcclComm comm = nullptr;
         {
           py::gil_scoped_release release;
-          check_hccl(
-              HcclCommInitClusterInfoMemConfig(cluster_json.c_str(), rank,
-                                               &config, &comm),
-              "HcclCommInitClusterInfoMemConfig failed");
+          check_hccl(HcclCommInitClusterInfoMemConfig(cluster_json.c_str(),
+                                                      rank, &config, &comm),
+                     "HcclCommInitClusterInfoMemConfig failed");
         }
         return reinterpret_cast<uintptr_t>(comm);
       },
@@ -211,7 +210,7 @@ PYBIND11_MODULE(hcomm_onesided, m) {
         mem.size = size;
         void *handle = nullptr;
         check_hccl(HcclRegisterGlobalMem(&mem, &handle),
-                    "HcclRegisterGlobalMem failed");
+                   "HcclRegisterGlobalMem failed");
         return reinterpret_cast<uintptr_t>(handle);
       },
       py::arg("addr"), py::arg("size"), py::arg("is_device"),
@@ -231,7 +230,7 @@ PYBIND11_MODULE(hcomm_onesided, m) {
       [](uintptr_t comm_handle, uintptr_t mem_handle) {
         HcclComm comm = reinterpret_cast<HcclComm>(comm_handle);
         check_hccl(HcclCommBindMem(comm, reinterpret_cast<void *>(mem_handle)),
-                    "HcclCommBindMem failed");
+                   "HcclCommBindMem failed");
       },
       py::arg("comm"), py::arg("mem_handle"),
       "Bind a registered memory handle to a communicator.");
@@ -267,7 +266,7 @@ PYBIND11_MODULE(hcomm_onesided, m) {
 
   py::class_<HcclOneSideOpDesc>(m, "OpDesc")
       .def(py::init([](uintptr_t local_addr, uintptr_t remote_addr,
-                        uint64_t num_bytes) {
+                       uint64_t num_bytes) {
              HcclOneSideOpDesc d;
              d.localAddr = reinterpret_cast<void *>(local_addr);
              d.remoteAddr = reinterpret_cast<void *>(remote_addr);
@@ -275,8 +274,7 @@ PYBIND11_MODULE(hcomm_onesided, m) {
              d.dataType = HCCL_DATA_TYPE_UINT8;
              return d;
            }),
-           py::arg("local_addr"), py::arg("remote_addr"),
-           py::arg("num_bytes"));
+           py::arg("local_addr"), py::arg("remote_addr"), py::arg("num_bytes"));
 
   m.def(
       "batch_put",
@@ -285,8 +283,8 @@ PYBIND11_MODULE(hcomm_onesided, m) {
         HcclComm comm = reinterpret_cast<HcclComm>(comm_handle);
         rtStream_t s = reinterpret_cast<rtStream_t>(stream);
         check_hccl(HcclBatchPut(comm, remote_rank, descs.data(),
-                                 static_cast<uint32_t>(descs.size()), s),
-                    "HcclBatchPut failed");
+                                static_cast<uint32_t>(descs.size()), s),
+                   "HcclBatchPut failed");
       },
       py::arg("comm"), py::arg("remote_rank"), py::arg("op_descs"),
       py::arg("stream"),
@@ -300,8 +298,8 @@ PYBIND11_MODULE(hcomm_onesided, m) {
         HcclComm comm = reinterpret_cast<HcclComm>(comm_handle);
         rtStream_t s = reinterpret_cast<rtStream_t>(stream);
         check_hccl(HcclBatchGet(comm, remote_rank, descs.data(),
-                                 static_cast<uint32_t>(descs.size()), s),
-                    "HcclBatchGet failed");
+                                static_cast<uint32_t>(descs.size()), s),
+                   "HcclBatchGet failed");
       },
       py::arg("comm"), py::arg("remote_rank"), py::arg("op_descs"),
       py::arg("stream"),

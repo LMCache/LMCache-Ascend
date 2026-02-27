@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# Standard
 from typing import Optional, Union
 import asyncio
 import json
@@ -8,6 +9,7 @@ import subprocess
 import threading
 import time
 
+# Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
@@ -21,6 +23,7 @@ import msgspec
 import torch
 import zmq
 
+# First Party
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hcomm_onesided as hcomm_os
 
@@ -34,14 +37,21 @@ class HcommOsMsgBase(msgspec.Struct, tag=True):
 # SoC models that require v1.2 rank table with super_device_id / super_pod_list.
 # All other SoCs use the simpler v1.0 format.
 # Reference: hixl/src/llm_datadist/common/rank_table_generator.cc (kV2Version)
-_V2_SOC_NAMES = frozenset({
-    "Ascend910_9391", "Ascend910_9381", "Ascend910_9392",
-    "Ascend910_9382", "Ascend910_9372", "Ascend910_9362",
-})
+_V2_SOC_NAMES = frozenset(
+    {
+        "Ascend910_9391",
+        "Ascend910_9381",
+        "Ascend910_9392",
+        "Ascend910_9382",
+        "Ascend910_9372",
+        "Ascend910_9362",
+    }
+)
 
 
 class HcommDeviceInfo(msgspec.Struct):
     """Device info exchanged during handshake to build the rank table."""
+
     server_id: str
     phy_device_id: str
     device_ip: str
@@ -114,7 +124,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         self.device_info = _get_local_device_info()
 
         self.mem_handle: Optional[int] = None
-        
+
         self._register_global_mem()
 
         self.local_index_addr: list[int] = []
@@ -160,8 +170,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         if dev_ptr is not None:
             lmc_ops.register_mapping(self.buffer_ptr, dev_ptr, self.buffer_size)
             logger.info(
-                "Re-registered lmc_ops mapping via "
-                "MemMappingManager (devVA=0x%x)",
+                "Re-registered lmc_ops mapping via MemMappingManager (devVA=0x%x)",
                 dev_ptr,
             )
 
@@ -202,7 +211,8 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
         logger.info(
             "Client: init comm cluster_info rank=%d comm_name=%s",
-            my_rank, resp.comm_name,
+            my_rank,
+            resp.comm_name,
         )
         comm = _init_comm_and_prepare(
             resp.cluster_json, resp.comm_name, my_rank, self.mem_handle
@@ -321,15 +331,17 @@ class HcommOneSidedChannel(BaseTransferChannel):
             remote_rank = client_rank
 
             cluster_json = _build_rank_table_json(
-                self.device_info, my_rank,
-                req.device_info, client_rank,
+                self.device_info,
+                my_rank,
+                req.device_info,
+                client_rank,
             )
             comm_name = (
-                f"lmcache_{self.device_info.device_ip}"
-                f"_{req.device_info.device_ip}"
+                f"lmcache_{self.device_info.device_ip}_{req.device_info.device_ip}"
             )
-            logger.info("Server: built rank table: %s  comm_name=%s",
-                        cluster_json, comm_name)
+            logger.info(
+                "Server: built rank table: %s  comm_name=%s", cluster_json, comm_name
+            )
 
             resp = HcommOsInitResponse(
                 cluster_json=cluster_json,
@@ -398,9 +410,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
             try:
                 req_bytes = self.init_side_channel.recv()
                 logger.info("Received init request")
-                req = msgspec.msgpack.decode(
-                    req_bytes, type=Union[HcommOsMsg, SideMsg]
-                )
+                req = msgspec.msgpack.decode(req_bytes, type=Union[HcommOsMsg, SideMsg])
                 resp = self._handle_init_msg(req)
                 self.init_side_channel.send(msgspec.msgpack.encode(resp))
                 logger.info("Sent init response")
@@ -426,9 +436,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
                     self.init_side_channel.recv(), timeout=1.0
                 )
                 logger.info("Received init request (async)")
-                req = msgspec.msgpack.decode(
-                    req_bytes, type=Union[HcommOsMsg, SideMsg]
-                )
+                req = msgspec.msgpack.decode(req_bytes, type=Union[HcommOsMsg, SideMsg])
                 resp = await loop.run_in_executor(None, self._handle_init_msg, req)
                 await self.init_side_channel.send(msgspec.msgpack.encode(resp))
                 logger.info("Sent init response (async)")
@@ -503,7 +511,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
             await asyncio.sleep(0.001)
         return len(objects)
 
-
     def batched_read(
         self,
         buffers: Union[list[bytes], list[MemoryObj]],
@@ -541,7 +548,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
             await asyncio.sleep(0.001)
         return len(buffers)
 
-
     def _resolve_transfer(self, transfer_spec: dict):
         """Return (peer_state, stream_ptr) from transfer_spec."""
         peer_id = transfer_spec["receiver_id"]
@@ -575,9 +581,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
             objects, transfer_spec["remote_indexes"], strict=True
         ):
             if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported"
-                )
+                raise NotImplementedError("Sending raw bytes is not supported")
             descs.append(
                 hcomm_os.OpDesc(
                     local_addr=self.local_index_addr[mem_obj.meta.address],
@@ -593,9 +597,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
             buffers, transfer_spec["remote_indexes"], strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported"
-                )
+                raise NotImplementedError("Sending raw bytes is not supported")
             descs.append(
                 hcomm_os.OpDesc(
                     local_addr=self.local_index_addr[mem_obj.meta.address],
@@ -623,7 +625,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 hcomm_os.deregister_global_mem(self.mem_handle)
             except Exception as e:
                 logger.warning("Error deregistering global mem: %s", e)
-
 
 
 class _PeerState:
@@ -674,7 +675,9 @@ def _get_device_ip(phy_device_id: int) -> str:
     try:
         result = subprocess.run(
             ["hccn_tool", "-i", str(phy_device_id), "-ip", "-g"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         for line in result.stdout.splitlines():
             if "ipaddr:" in line:
@@ -703,7 +706,10 @@ def _get_local_device_info() -> HcommDeviceInfo:
         result.super_pod_id = str(info["super_pod_id"])
     logger.info(
         "Local device info: soc=%s v2=%s phy_dev=%s ip=%s",
-        soc_name, use_v2, result.phy_device_id, result.device_ip,
+        soc_name,
+        use_v2,
+        result.phy_device_id,
+        result.device_ip,
     )
     return result
 
@@ -752,15 +758,15 @@ def _build_rank_table_json(
     if use_v2:
         pod_map: dict[str, set[str]] = {}
         for dev_info in (server_info, client_info):
-            pod_map.setdefault(dev_info.super_pod_id, set()).add(
-                dev_info.server_id
-            )
+            pod_map.setdefault(dev_info.super_pod_id, set()).add(dev_info.server_id)
         super_pod_list = []
         for pod_id, sids in sorted(pod_map.items()):
-            super_pod_list.append({
-                "super_pod_id": pod_id,
-                "server_list": [{"server_id": s} for s in sorted(sids)],
-            })
+            super_pod_list.append(
+                {
+                    "super_pod_id": pod_id,
+                    "server_list": [{"server_id": s} for s in sorted(sids)],
+                }
+            )
         rank_table["super_pod_list"] = super_pod_list
 
     return json.dumps(rank_table)

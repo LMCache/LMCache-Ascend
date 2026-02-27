@@ -231,7 +231,9 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
 
-        self._cann_version_no_hccl = cann_version is not None and cann_version_tuple >= (8, 5, 0)
+        self._cann_version_no_hccl = (
+            cann_version is not None and cann_version_tuple >= (8, 5, 0)
+        )
         if self._cann_version_no_hccl:
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
             logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
