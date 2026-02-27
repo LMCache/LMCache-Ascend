@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 import multiprocessing as mp
+import os
 import sys
 import time
 import warnings
@@ -83,6 +84,10 @@ def get_allocator(
 def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        if config.sender_use_host or config.receiver_use_host:
+            # NOTE (gingfung): HIXL channel requires HCCL_INTRA_ROCE_ENABLE=1
+            # if its within the same host, and for host memory transfer
+            os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.send_device_id)
         logger.info(f"Sender: Using device {config.send_device_id}")
@@ -137,7 +142,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
         wait_start = time.time()
         while "receiver_init_done" not in shared_dict:
             time.sleep(0.1)
-            if time.time() - wait_start > 30:
+            if time.time() - wait_start > int(config.timeout / 2):
                 raise TimeoutError(
                     "Sender timed out waiting for Receiver initialization"
                 )
@@ -173,6 +178,10 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
 def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        if config.sender_use_host or config.receiver_use_host:
+            # NOTE (gingfung): HIXL channel requires HCCL_INTRA_ROCE_ENABLE=1
+            # if its within the same host, and for host memory transfer
+            os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.recv_device_id)
         logger.info(f"Receiver: Using device {config.recv_device_id}")

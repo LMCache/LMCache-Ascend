@@ -78,6 +78,7 @@ class HixlChannel(BaseTransferChannel):
             buffer_ptr=kwargs["buffer_ptr"],
             buffer_size=kwargs["buffer_size"],
             page_size=kwargs["align_bytes"],
+            buffer_pool=kwargs.get("buffer_pool", "0:0"),
         )
         self.page_size = kwargs["align_bytes"]
 
@@ -617,10 +618,15 @@ class HixlEngineWrapper:
         buffer_ptr: int,
         buffer_size: int,
         page_size: int,
+        buffer_pool: str = "0:0",
     ):
         device_id = torch.npu.current_device()
 
         is_device = _is_device_memory(buffer_ptr)
+
+        already_registered = lmc_ops.get_device_ptr(buffer_ptr) is not None
+        if already_registered:
+            lmc_ops.unregister_ptr(buffer_ptr)
 
         self.engine = hixl_comms.Hixl()
 
@@ -628,40 +634,37 @@ class HixlEngineWrapper:
         port = _find_free_port()
         self.engine_id = f"{ip}:{port}"
 
-        # NOTE (gingfung): this option is for the buffer pool size
-        # and the number of buffers the default is 4:8,
-        # which means 4 buffers of 8MB each
-        # we currently hardcoded to 4:8 because LMCache supports H2D, H2H
-        # and these patterns require a buffer pool for now
-        # see Hixl Tests for more details.
-        options = {"BufferPool": "4:8"}
+        options = {"BufferPool": buffer_pool}
         self.engine.initialize(self.engine_id, options)
 
-        if is_device:
-            already_registered = lmc_ops.get_device_ptr(buffer_ptr) is not None
-            if already_registered:
-                lmc_ops.unregister_ptr(buffer_ptr)
+        mem_type = hixl_comms.MEM_DEVICE if is_device else hixl_comms.MEM_HOST
 
-            self.mem_handle = self.engine.register_mem(
-                buffer_ptr, buffer_size, hixl_comms.MEM_DEVICE
-            )
+        logger.debug(
+            "Registering HIXL memory with type: %s, "
+            "buffer_pool: %s, ptr in hex: %s, and the ptr: %s",
+            mem_type,
+            buffer_pool,
+            hex(buffer_ptr),
+            buffer_ptr,
+        )
 
-            if already_registered:
-                dev_ptr = hixl_comms.get_dev_va(device_id, buffer_ptr, buffer_size)
-                if dev_ptr is not None:
-                    lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
-                    logger.info(
-                        "Re-registered lmc_ops mapping via "
-                        "MemMappingManager (devVA=0x%x) dev ptr: %s",
-                        dev_ptr,
-                        dev_ptr,
-                    )
-        else:
-            self.mem_handle = None
-            logger.info(
-                "Host memory: skipping RegisterMem, relying on "
-                "BufferPool for staging (H2H pattern)"
-            )
+        self.mem_handle = self.engine.register_mem(buffer_ptr, buffer_size, mem_type)
+
+        logger.info(
+            "HIXL memory registered mem_handle=0x%x",
+            self.mem_handle,
+        )
+
+        if already_registered:
+            dev_ptr = hixl_comms.get_dev_va(device_id, buffer_ptr, buffer_size)
+            if dev_ptr is not None:
+                lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
+                logger.info(
+                    "Re-registered lmc_ops mapping via "
+                    "MemMappingManager (devVA=0x%x) dev ptr: %s",
+                    dev_ptr,
+                    dev_ptr,
+                )
 
         self.buffer_ptr = buffer_ptr
         self.buffer_size = buffer_size
