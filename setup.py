@@ -231,9 +231,10 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
 
-        self._use_hixl = cann_version is not None and cann_version_tuple >= (8, 5, 0)
-        if self._use_hixl:
+        self._cann_version_no_hccl = cann_version is not None and cann_version_tuple >= (8, 5, 0)
+        if self._cann_version_no_hccl:
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
+            logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
         else:
             logger.info(f"CANN {cann_version}: building HCCL transfer channel")
 
@@ -293,8 +294,9 @@ class CustomAscendCmakeBuildExt(build_ext):
             torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
             cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
 
-        if self._use_hixl:
+        if self._cann_version_no_hccl:
             cmake_cmd += ["  -DUSE_HIXL=ON"]
+            cmake_cmd += ["  -DUSE_HCOMM_ONESIDED=ON"]
 
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
@@ -320,8 +322,9 @@ class CustomAscendCmakeBuildExt(build_ext):
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
-        if self._use_hixl:
+        if self._cann_version_no_hccl:
             expected_patterns.append("hixl_npu_comms*.so")
+            expected_patterns.append("hcomm_onesided*.so")
         else:
             expected_patterns.append("hccl_npu_comms*.so")
 
