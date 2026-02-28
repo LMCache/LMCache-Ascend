@@ -336,9 +336,9 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 req.device_info,
                 client_rank,
             )
-            comm_name = (
-                f"lmcache_{self.device_info.device_ip}_{req.device_info.device_ip}"
-            )
+            local_id = self.peer_init_url.replace(":", "_")
+            remote_id = req.local_id.replace(":", "_")
+            comm_name = f"lmcache_{local_id}_{remote_id}"
             logger.info(
                 "Server: built rank table: %s  comm_name=%s", cluster_json, comm_name
             )
