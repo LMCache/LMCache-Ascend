@@ -44,13 +44,18 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 
 Please ensure your environment matches the versions below.
 
-#### for PyTorch
+#### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **main** | **v0.3.12** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
 | **v0.3.7** | **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
 | **v0.3.7** | **v0.3.7** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
 | v0.3.3 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
+
+#### For PyTorch / SGLang
+| LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **main** | **v0.3.12** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
 
 #### for MindSpore
 | LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
@@ -74,9 +79,17 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 
 ### Docker
 
+#### For vLLM Platform:
+Build the image using the provided Dockerfile:
 ```bash
 cd /workspace/LMCache-Ascend
 docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler .
+```
+
+#### For SGLang Platform:
+It is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
+```bash
+docker pull quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b
 ```
 
 Once that is built, run it with the following cmd
@@ -128,7 +141,10 @@ pip install -v --no-build-isolation -e .
 
 We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
 
-#### Online serving
+#### Using with vLLM
+LMCache-Ascend integrates with vLLM via a dynamic KVConnector.
+
+##### Online serving
 ```bash
 python \
     -m vllm.entrypoints.openai.api_server \
@@ -140,13 +156,30 @@ python \
     --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
 ```
 
-#### Offline
+##### Offline
 ```python
 ktc = KVTransferConfig(
         kv_connector="LMCacheAscendConnectorV1Dynamic",
         kv_role="kv_both",
         kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
+```
+
+#### Using with SGLang
+For SGLang, integration is simplified. You do not need to specify a kv_connector; simply enable the LMCache flag(`--enable-lmcache`).
+```bash
+python \
+    -m sglang.launch_server \
+    --model-path /data/models/Qwen/Qwen3-32B \
+    --trust-remote-code \
+    --device npu \
+    --attention-backend ascend \
+    --mem-fraction-static 0.8 \
+    --cuda-graph-max-bs 16 \
+    --tp-size 4 \
+    --host 0.0.0.0 \
+    --enable-lmcache \
+    --port 8100
 ```
 
 ## Getting Started With MindSpore

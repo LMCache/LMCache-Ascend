@@ -10,8 +10,6 @@ from lmcache_ascend.v1.npu_connector import is_310p
 
 logger = logging.getLogger(__name__)
 
-os.environ["SKIP_LMCACHE_PATCH"] = "1"
-
 
 def is_installed(package_name: str) -> bool:
     return importlib.util.find_spec(package_name) is not None
@@ -22,7 +20,7 @@ def run_integration_patches():
 
     base_path = "lmcache_ascend.integration.patch"
     patch_tasks = [
-        # TODO(niming):("sglang", f"{base_path}.sglang.sglang_patch", "SglangPatcher"),
+        ("sglang", f"{base_path}.sglang.sglang_patch", "SglangPatcher"),
         ("vllm_ascend", f"{base_path}.vllm.cacheblend_patch", "CacheBlendPatcher"),
         # ("mindspore", "...", "MindSporePatcher"),
     ]

@@ -2,12 +2,32 @@
 
 # Standard
 from typing import Callable, List
+import importlib.util
 from unittest.mock import MagicMock
 
 # Third Party
 import numpy as np
 import pytest
 import torch
+
+VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
+
+if VLLM_INSTALLED:
+    # Third Party
+    from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
+
+    # First Party
+    from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
+else:
+    # Attempt to import vLLM configuration utilities
+    try:
+        # Third Party
+        from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    except ImportError:
+        # Fallback for older versions or different paths
+        set_current_vllm_config = None
+        CompilationConfig = None
+        VllmConfig = None
 
 # First Party
 from lmcache_ascend.v1.blend.positional_encoding import (
@@ -16,15 +36,6 @@ from lmcache_ascend.v1.blend.positional_encoding import (
     get_rope_compat,
 )
 
-# Attempt to import vLLM configuration utilities
-try:
-    # Third Party
-    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-except ImportError:
-    # Fallback for older versions or different paths
-    set_current_vllm_config = None
-    CompilationConfig = None
-    VllmConfig = None
 
 # ==============================================================================
 # 1. Dummy Rope Implementation (for comparison)
@@ -305,6 +316,7 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
     return base_rope, reverse_rope, fused_rope, dummy_rope
 
 
+@pytest.mark.skipif(not VLLM_INSTALLED, reason="vLLM is not installed")
 @pytest.mark.parametrize("head_size", [64, 128])
 @pytest.mark.parametrize("max_position", [40960])
 @pytest.mark.parametrize("rope_theta", [500000.0])
@@ -321,6 +333,7 @@ def test_rope_correctness(rope_modules, head_size, test_sizes):
     assert passed, f"Accuracy test failed for head_size={head_size}, dtype={rope.dtype}"
 
 
+@pytest.mark.skipif(not VLLM_INSTALLED, reason="vLLM is not installed")
 @pytest.mark.parametrize("head_size", [64])
 @pytest.mark.parametrize("max_position", [40960])
 @pytest.mark.parametrize("rope_theta", [500000.0])

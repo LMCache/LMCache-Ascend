@@ -8,11 +8,29 @@ LMCACHE_UPSTREAM_TAG = "v0.3.12"
 LMCACHE_ASCEND_PATCHED = False
 
 
+def _is_sglang_runtime():
+    return "sglang" in sys.modules or any("sglang" in arg for arg in sys.argv)
+
+
+def _is_vllm_runtime():
+    return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
+
 def _patch_ops():
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
+
+
+def _patch_torch_capability():
+    # Third Party
+    from torch_npu.contrib import transfer_to_npu  # noqa: F401
+    import torch
+
+    capability_mock = lambda *args: (0, 0)
+    torch.npu.get_device_capability = capability_mock
+    torch.cuda.get_device_capability = capability_mock
 
 
 def _patch_transfer_channel():
@@ -157,6 +175,39 @@ def _patch_sys_detection():
     lmcache.v1.system_detection.NUMADetector._read_from_sys = _read_from_sys
 
 
+def _patch_sgl():
+    # Third Party
+    import lmcache.integration.sglang.sglang_adapter as lmc_sglang_adapter
+
+    # First Party
+    from lmcache_ascend.integration.sglang.sglang_adapter import (
+        LMCacheConnector__init__,
+        LMCacheLayerwiseConnector_global_min_tokens,
+        LMCacheLayerwiseConnector_start_load_kv,
+        sglang_init_lmcache_engine,
+    )
+
+    lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
+
+    lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
+
+    lmc_sglang_adapter.LMCacheLayerwiseConnector.global_min_tokens = (
+        LMCacheLayerwiseConnector_global_min_tokens
+    )
+
+    lmc_sglang_adapter.LMCacheLayerwiseConnector.start_load_kv = (
+        LMCacheLayerwiseConnector_start_load_kv
+    )
+
+    # Third Party
+    import lmcache.v1.memory_management as lmc_memory_management
+
+    # First Party
+    from lmcache_ascend.v1.memory_management import GPUMemoryAllocator__init__
+
+    lmc_memory_management.GPUMemoryAllocator.__init__ = GPUMemoryAllocator__init__
+
+    
 def _patch_rpc_utils():
     # Patching this to fix socket path length issues on some systems.
     # The original socket path can exceed Unix domain socket's 107 character
@@ -186,13 +237,16 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    is_sgl = _is_sglang_runtime()
+    is_vllm = _is_vllm_runtime()
+
     if _build_info.__framework_name__ == "pytorch":
         # Third Party
         # TODO (gingfung): Currently we patch all the cuda calls
         # due to effort to port all torch.cuda will disabled torch.jit
         # NOTE: this must be done early in the patch prior to the cache engine
         # to avoid falling into non_cuda_equivalent
-        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+        _patch_torch_capability()
 
     _patch_ops()
 
@@ -205,11 +259,15 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_kv_layer_group()
     _patch_mooncake_store_connector()
-    _patch_init_engine()
     _patch_hash_token()
 
-    if _build_info.__framework_name__ == "pytorch":
-        _patch_sys_detection()
+    if is_sgl:
+        _patch_sgl()
+    elif is_vllm:
+        _patch_init_engine()
+
+        if _build_info.__framework_name__ == "pytorch":
+            _patch_sys_detection()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
