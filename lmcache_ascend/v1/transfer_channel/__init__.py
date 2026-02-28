@@ -2,8 +2,15 @@
 # Third Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 
-# First Party
-from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+# todo：Deleted after adaptation to HCCL in 8.5.0
+try:
+    # First Party
+    from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+
+    HCCL_AVAILABLE = True
+except ImportError:
+    HCCL_AVAILABLE = False
+    HcclChannel = None
 
 
 def get_correct_device(device: str, worker_id: int) -> str:
@@ -53,6 +60,13 @@ def CreateTransferChannel(
     """
 
     assert channel_type in ["hccl"], f"Unsupported channel type: {channel_type}"
+
+    if not HCCL_AVAILABLE:
+        raise RuntimeError(
+            "HcclChannel is not available. This is likely due to CANN 8.5 "
+            "adaptation in progress. Please check your CANN version and "
+            "lmcache_ascend installation."
+        )
 
     transfer_channel = HcclChannel(
         async_mode=async_mode,
