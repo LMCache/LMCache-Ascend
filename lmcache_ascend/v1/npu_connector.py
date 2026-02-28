@@ -1113,7 +1113,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
-
+                logger.debug(f"Finished loading layer {layer_id}")
         yield
 
         # synchronize the last layer
@@ -1124,7 +1124,6 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
         if self.use_gpu and tmp_gpu_buffer_obj is not None:
             tmp_gpu_buffer_obj.ref_count_down()
 
-        logger.debug(f"Finished loading layer {layer_id}")
         yield
 
     def batched_from_gpu(
@@ -1245,12 +1244,11 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
+                logger.debug(f"Finished offloading layer {layer_id}")
             yield
 
             if sync:
                 self.store_stream.synchronize()
-
-            logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
         if self.use_gpu and tmp_gpu_buffer_obj is not None:

@@ -3,6 +3,7 @@
 # Standard
 from typing import Callable, List
 import importlib.util
+from unittest.mock import MagicMock
 
 # Third Party
 import numpy as np
@@ -18,9 +19,22 @@ if VLLM_INSTALLED:
     # First Party
     from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
 else:
-    vllm_get_rope = None
-    BasicReverseRope = None
-    FusedRope = None
+    # Attempt to import vLLM configuration utilities
+    try:
+        # Third Party
+        from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    except ImportError:
+        # Fallback for older versions or different paths
+        set_current_vllm_config = None
+        CompilationConfig = None
+        VllmConfig = None
+
+# First Party
+from lmcache_ascend.v1.blend.positional_encoding import (
+    BasicReverseRope,
+    FusedRope,
+    get_rope_compat,
+)
 
 
 # ==============================================================================
@@ -269,16 +283,29 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
     and DummyFusedRope modules.
     """
 
-    base_rope = vllm_get_rope(
-        head_size,
-        rotary_dim=head_size,
-        max_position=max_position,
-        base=rope_theta,
-        is_neox_style=is_neox_style,
-        rope_scaling=None,
-        dtype=dtype,
-        partial_rotary_factor=1.0,
-    )
+    def _create_rope():
+        return get_rope_compat(
+            head_size,
+            rotary_dim=head_size,
+            max_position=max_position,
+            base=rope_theta,
+            is_neox_style=is_neox_style,
+            rope_scaling=None,
+            dtype=dtype,
+            partial_rotary_factor=1.0,
+        )
+
+    if set_current_vllm_config is not None:
+        c_config = CompilationConfig()
+        c_config.custom_ops = ["all"]
+        if getattr(c_config, "level", None) is None:
+            c_config.level = 0
+        mock_config = MagicMock(spec=VllmConfig)
+        mock_config.compilation_config = c_config
+        with set_current_vllm_config(mock_config):
+            base_rope = _create_rope()
+    else:
+        base_rope = _create_rope()
 
     base_rope.cos_sin_cache = base_rope.cos_sin_cache.to("npu")
 
