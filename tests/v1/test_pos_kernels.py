@@ -287,6 +287,8 @@ def rope_modules(head_size, max_position, rope_theta, is_neox_style, dtype):
     if set_current_vllm_config is not None:
         c_config = CompilationConfig()
         c_config.custom_ops = ["all"]
+        if getattr(c_config, "level", None) is None:
+            c_config.level = 0
         mock_config = MagicMock(spec=VllmConfig)
         mock_config.compilation_config = c_config
         with set_current_vllm_config(mock_config):
