@@ -4,6 +4,7 @@ from typing import Optional, Union
 import asyncio
 import json
 import os
+import random
 import socket
 import subprocess
 import threading
@@ -214,6 +215,14 @@ class HcommOneSidedChannel(BaseTransferChannel):
             my_rank,
             resp.comm_name,
         )
+        torch.npu.set_device(self.handle_device)
+        old_peer = self._pop_stale_peer(peer_id)
+        if old_peer is not None:
+            logger.info(
+                "Client: destroying stale comm for peer %s before reconnect",
+                peer_id,
+            )
+            self._destroy_peer_comm(old_peer, peer_id)
         comm = _init_comm_and_prepare(
             resp.cluster_json, resp.comm_name, my_rank, self.mem_handle
         )
@@ -273,13 +282,26 @@ class HcommOneSidedChannel(BaseTransferChannel):
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
 
+        old_peer = self._pop_stale_peer(peer_id)
+
         loop = asyncio.get_running_loop()
-        comm = await loop.run_in_executor(
-            None,
-            lambda: _init_comm_and_prepare(
-                resp.cluster_json, resp.comm_name, my_rank, self.mem_handle
-            ),
-        )
+        device = self.handle_device
+        mem_handle = self.mem_handle
+
+        def _client_init_comm():
+            torch.npu.set_device(device)
+            if old_peer is not None:
+                logger.info(
+                    "Client: destroying stale comm for peer %s "
+                    "before reconnect",
+                    peer_id,
+                )
+                self._destroy_peer_comm(old_peer, peer_id)
+            return _init_comm_and_prepare(
+                resp.cluster_json, resp.comm_name, my_rank, mem_handle
+            )
+
+        comm = await loop.run_in_executor(None, _client_init_comm)
 
         remote_addrs = _build_remote_index_addr(
             resp.buffer_ptr, resp.buffer_size, resp.page_size
@@ -354,9 +376,18 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 is_device=self.is_device,
             )
 
+            old_peer = self._pop_stale_peer(req.local_id)
+
             def _setup_server_comm():
                 torch.npu.set_device(self.handle_device)
                 try:
+                    if old_peer is not None:
+                        logger.info(
+                            "Server: destroying stale comm for peer %s "
+                            "before reconnect",
+                            req.local_id,
+                        )
+                        self._destroy_peer_comm(old_peer, req.local_id)
                     comm = _init_comm_and_prepare(
                         cluster_json, comm_name, my_rank, self.mem_handle
                     )
@@ -482,7 +513,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         assert transfer_spec is not None
         peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
 
-        op_descs = self._build_put_descs(objects, peer_state, transfer_spec)
+        op_descs = self._build_op_descs(objects, peer_state, transfer_spec)
         hcomm_os.batch_put(
             peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
         )
@@ -499,7 +530,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         assert transfer_spec is not None
         peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
 
-        op_descs = self._build_put_descs(objects, peer_state, transfer_spec)
+        op_descs = self._build_op_descs(objects, peer_state, transfer_spec)
         hcomm_os.batch_put(
             peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
         )
@@ -519,7 +550,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         assert transfer_spec is not None
         peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
 
-        op_descs = self._build_get_descs(buffers, peer_state, transfer_spec)
+        op_descs = self._build_op_descs(buffers, peer_state, transfer_spec)
         hcomm_os.batch_get(
             peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
         )
@@ -536,7 +567,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         assert transfer_spec is not None
         peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
 
-        op_descs = self._build_get_descs(buffers, peer_state, transfer_spec)
+        op_descs = self._build_op_descs(buffers, peer_state, transfer_spec)
         hcomm_os.batch_get(
             peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
         )
@@ -548,9 +579,20 @@ class HcommOneSidedChannel(BaseTransferChannel):
             await asyncio.sleep(0.001)
         return len(buffers)
 
+    def _destroy_peer_comm(self, peer: "_PeerState", peer_id: str) -> None:
+        try:
+            hcomm_os.unbind_mem(peer.comm, self.mem_handle)
+            hcomm_os.destroy_comm(peer.comm)
+        except Exception as e:
+            logger.warning("Failed to destroy comm for peer %s: %s", peer_id, e)
+
+    def _pop_stale_peer(self, peer_id: str) -> Optional["_PeerState"]:
+        with self._state_lock:
+            return self._peers.pop(peer_id, None)
+
     def _resolve_transfer(self, transfer_spec: dict):
         """Return (peer_state, stream_ptr) from transfer_spec."""
-        peer_id = transfer_spec["receiver_id"]
+        peer_id = transfer_spec.get("receiver_id") or transfer_spec["sender_id"]
         with self._state_lock:
             peer_state = self._peers[peer_id]
         stream_ptr = self._get_stream_ptr(transfer_spec)
@@ -575,26 +617,10 @@ class HcommOneSidedChannel(BaseTransferChannel):
             return stream
         return self.transport_stream
 
-    def _build_put_descs(self, objects, peer_state, transfer_spec):
+    def _build_op_descs(self, objects, peer_state, transfer_spec):
         descs = []
         for mem_obj, remote_index in zip(
             objects, transfer_spec["remote_indexes"], strict=True
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError("Sending raw bytes is not supported")
-            descs.append(
-                hcomm_os.OpDesc(
-                    local_addr=self.local_index_addr[mem_obj.meta.address],
-                    remote_addr=peer_state.remote_index_addr[remote_index],
-                    num_bytes=self.page_size,
-                )
-            )
-        return descs
-
-    def _build_get_descs(self, buffers, peer_state, transfer_spec):
-        descs = []
-        for mem_obj, remote_index in zip(
-            buffers, transfer_spec["remote_indexes"], strict=False
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError("Sending raw bytes is not supported")
@@ -614,11 +640,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         self.zmq_context.term()
 
         for peer_id, ps in self._peers.items():
-            try:
-                hcomm_os.unbind_mem(ps.comm, self.mem_handle)
-                hcomm_os.destroy_comm(ps.comm)
-            except Exception as e:
-                logger.warning("Error closing peer %s: %s", peer_id, e)
+            self._destroy_peer_comm(ps, peer_id)
 
         if self.mem_handle is not None:
             try:
@@ -649,11 +671,49 @@ def _build_remote_index_addr(
     return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
 
 
+_HCCL_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCCL_INIT_MAX_RETRIES", "5"))
+_HCCL_INIT_BASE_DELAY = 0.1
+_HCCL_INIT_MAX_DELAY = 5.0
+
+
 def _init_comm_and_prepare(
     cluster_json: str, comm_name: str, rank: int, mem_handle: int
 ) -> int:
-    """Blocking helper: init comm via cluster-info JSON, bind mem, prepare."""
-    comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
+    """Blocking helper: init comm via cluster-info JSON, bind mem, prepare.
+
+    Retries ``init_comm_cluster_info`` with exponential back-off because
+    concurrent calls to HcclCommInitClusterInfoMemConfig from different
+    processes on the same node can transiently fail (HCCL error 7).
+    """
+    last_err: Optional[RuntimeError] = None
+    for attempt in range(_HCCL_INIT_MAX_RETRIES):
+        try:
+            comm = hcomm_os.init_comm_cluster_info(
+                cluster_json, rank, comm_name
+            )
+            break
+        except RuntimeError as e:
+            last_err = e
+            delay = min(
+                _HCCL_INIT_BASE_DELAY * (2 ** attempt),
+                _HCCL_INIT_MAX_DELAY,
+            )
+            delay *= random.uniform(0.5, 1.5)
+            logger.warning(
+                "init_comm_cluster_info failed (attempt %d/%d): %s  "
+                "retrying in %.2fs",
+                attempt + 1,
+                _HCCL_INIT_MAX_RETRIES,
+                e,
+                delay,
+            )
+            time.sleep(delay)
+    else:
+        raise RuntimeError(
+            f"init_comm_cluster_info failed after "
+            f"{_HCCL_INIT_MAX_RETRIES} attempts"
+        ) from last_err
+
     hcomm_os.bind_mem(comm, mem_handle)
     hcomm_os.prepare(comm, timeout=120)
     return comm
