@@ -7,7 +7,6 @@ import socket
 import threading
 import time
 
-
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
@@ -152,12 +151,17 @@ class HixlChannel(BaseTransferChannel):
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
         init_tmp_socket = get_zmq_socket(
-            self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect",
+            self.zmq_context,
+            peer_init_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
         )
 
         # Step 1: exchange engine IDs
         init_req = HixlInitRequest(
-            local_id=local_id, engine_id=self.hixl_wrapper.engine_id,
+            local_id=local_id,
+            engine_id=self.hixl_wrapper.engine_id,
         )
         init_tmp_socket.send(msgspec.msgpack.encode(init_req))
         resp = msgspec.msgpack.decode(init_tmp_socket.recv(), type=HixlMsg)
@@ -180,7 +184,8 @@ class HixlChannel(BaseTransferChannel):
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = self.send_init_side_msg(
-                init_tmp_socket, init_side_msg,
+                init_tmp_socket,
+                init_side_msg,
             )
 
         init_tmp_socket.close()
@@ -194,17 +199,20 @@ class HixlChannel(BaseTransferChannel):
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
         init_tmp_socket = get_zmq_socket(
-            self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect",
+            self.zmq_context,
+            peer_init_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
         )
 
         # Step 1: exchange engine IDs
         init_req = HixlInitRequest(
-            local_id=local_id, engine_id=self.hixl_wrapper.engine_id,
+            local_id=local_id,
+            engine_id=self.hixl_wrapper.engine_id,
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
-        resp = msgspec.msgpack.decode(
-            await init_tmp_socket.recv(), type=HixlMsg
-        )
+        resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
         self._connect_to_peer(peer_id, resp.engine_id)
 
         # Step 2: signal ready so server knows connect() finished
@@ -217,16 +225,15 @@ class HixlChannel(BaseTransferChannel):
         await init_tmp_socket.send(
             msgspec.msgpack.encode(self._make_mem_info_request(local_id))
         )
-        mem_resp = msgspec.msgpack.decode(
-            await init_tmp_socket.recv(), type=HixlMsg
-        )
+        mem_resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
         self._store_remote_mem_info(peer_id, mem_resp)
 
         # Step 4: optional side message
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = await self.async_send_init_side_msg(
-                init_tmp_socket, init_side_msg,
+                init_tmp_socket,
+                init_side_msg,
             )
 
         init_tmp_socket.close()
@@ -304,9 +311,7 @@ class HixlChannel(BaseTransferChannel):
         elif isinstance(req, HixlMemInfoRequest):
             logger.info("Processing HixlMemInfoRequest from %s", req.local_id)
 
-            addr_list = _build_addr_list(
-                req.buffer_ptr, req.buffer_size, req.page_size
-            )
+            addr_list = _build_addr_list(req.buffer_ptr, req.buffer_size, req.page_size)
             with self._state_lock:
                 self.remote_index_addr_dict[req.local_id] = addr_list
 
@@ -502,9 +507,7 @@ class HixlChannel(BaseTransferChannel):
     ) -> int:
         assert transfer_spec is not None
         remote_engine, op_descs = self._build_op_descs(buffers, transfer_spec)
-        self.hixl_wrapper.engine.transfer_sync(
-            remote_engine, hixl_comms.READ, op_descs
-        )
+        self.hixl_wrapper.engine.transfer_sync(remote_engine, hixl_comms.READ, op_descs)
         return len(buffers)
 
     async def async_batched_write(
@@ -597,8 +600,7 @@ class HixlEngineWrapper:
         if dev_ptr is not None:
             lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
             logger.info(
-                "Re-registered lmc_ops mapping via "
-                "MemMappingManager (devVA=0x%x)",
+                "Re-registered lmc_ops mapping via MemMappingManager (devVA=0x%x)",
                 dev_ptr,
             )
 
@@ -617,9 +619,7 @@ class HixlEngineWrapper:
         self.engine.finalize()
 
 
-def _build_addr_list(
-    buffer_ptr: int, buffer_size: int, page_size: int
-) -> list[int]:
+def _build_addr_list(buffer_ptr: int, buffer_size: int, page_size: int) -> list[int]:
     return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
 
 

@@ -292,8 +292,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
             torch.npu.set_device(device)
             if old_peer is not None:
                 logger.info(
-                    "Client: destroying stale comm for peer %s "
-                    "before reconnect",
+                    "Client: destroying stale comm for peer %s before reconnect",
                     peer_id,
                 )
                 self._destroy_peer_comm(old_peer, peer_id)
@@ -688,20 +687,17 @@ def _init_comm_and_prepare(
     last_err: Optional[RuntimeError] = None
     for attempt in range(_HCCL_INIT_MAX_RETRIES):
         try:
-            comm = hcomm_os.init_comm_cluster_info(
-                cluster_json, rank, comm_name
-            )
+            comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
             break
         except RuntimeError as e:
             last_err = e
             delay = min(
-                _HCCL_INIT_BASE_DELAY * (2 ** attempt),
+                _HCCL_INIT_BASE_DELAY * (2**attempt),
                 _HCCL_INIT_MAX_DELAY,
             )
             delay *= random.uniform(0.5, 1.5)
             logger.warning(
-                "init_comm_cluster_info failed (attempt %d/%d): %s  "
-                "retrying in %.2fs",
+                "init_comm_cluster_info failed (attempt %d/%d): %s  retrying in %.2fs",
                 attempt + 1,
                 _HCCL_INIT_MAX_RETRIES,
                 e,
@@ -710,8 +706,7 @@ def _init_comm_and_prepare(
             time.sleep(delay)
     else:
         raise RuntimeError(
-            f"init_comm_cluster_info failed after "
-            f"{_HCCL_INIT_MAX_RETRIES} attempts"
+            f"init_comm_cluster_info failed after {_HCCL_INIT_MAX_RETRIES} attempts"
         ) from last_err
 
     hcomm_os.bind_mem(comm, mem_handle)

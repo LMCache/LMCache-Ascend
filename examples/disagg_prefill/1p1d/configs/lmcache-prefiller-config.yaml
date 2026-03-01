@@ -1,7 +1,7 @@
 local_cpu: False # Enable local CPU RAM cache for fast access
 
 enable_pd: True
-transfer_channel: "hccl"
+transfer_channel: "hcomm_onesided"
 pd_role: "sender"
 pd_proxy_host: "localhost"
 pd_proxy_port: 7500
