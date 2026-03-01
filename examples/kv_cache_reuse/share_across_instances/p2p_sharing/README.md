@@ -86,7 +86,7 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTHONHASHSEED=123
 export VLLM_VERSION=0.11.0
-export LMCACHE_MAX_LOCAL_CPU_SIZE=72
+export LMCACHE_MAX_LOCAL_CPU_SIZE=16
 python \
     -m vllm.entrypoints.openai.api_server \
     --port 8010 \
@@ -110,7 +110,7 @@ export VLLM_ENABLE_V1_MULTIPROCESSING=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 export PYTHONHASHSEED=123
 export VLLM_VERSION=0.11.0
-export LMCACHE_MAX_LOCAL_CPU_SIZE=72
+export LMCACHE_MAX_LOCAL_CPU_SIZE=16
 python \
     -m vllm.entrypoints.openai.api_server \
     --port 8011 \
