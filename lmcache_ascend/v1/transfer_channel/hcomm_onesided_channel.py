@@ -205,11 +205,15 @@ class HcommOneSidedChannel(BaseTransferChannel):
         init_tmp_socket.send(msgspec.msgpack.encode(req))
         resp_bytes = init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
-        assert isinstance(resp, HcommOsInitResponse)
-        assert resp.page_size > 0, (
-            f"Peer returned invalid page_size={resp.page_size}; "
-            "expected a positive value"
-        )
+        if not isinstance(resp, HcommOsInitResponse):
+            raise ValueError(
+                f"Expected HcommOsInitResponse, got {type(resp).__name__}"
+            )
+        if resp.page_size <= 0:
+            raise ValueError(
+                f"Peer returned invalid page_size={resp.page_size}; "
+                "expected a positive value"
+            )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -249,7 +253,12 @@ class HcommOneSidedChannel(BaseTransferChannel):
         # Step 2: signal ready so server knows prepare finished
         ready_req = HcommOsReadyRequest(local_id=local_id)
         init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
-        init_tmp_socket.recv()  # ack
+        ready_bytes = init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcommOsMsg)
+        if isinstance(ready_resp, HcommOsReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
 
         # Step 3: optional side message
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -281,11 +290,15 @@ class HcommOneSidedChannel(BaseTransferChannel):
         await init_tmp_socket.send(msgspec.msgpack.encode(req))
         resp_bytes = await init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
-        assert isinstance(resp, HcommOsInitResponse)
-        assert resp.page_size > 0, (
-            f"Peer returned invalid page_size={resp.page_size}; "
-            "expected a positive value"
-        )
+        if not isinstance(resp, HcommOsInitResponse):
+            raise ValueError(
+                f"Expected HcommOsInitResponse, got {type(resp).__name__}"
+            )
+        if resp.page_size <= 0:
+            raise ValueError(
+                f"Peer returned invalid page_size={resp.page_size}; "
+                "expected a positive value"
+            )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -324,7 +337,12 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
         ready_req = HcommOsReadyRequest(local_id=local_id)
         await init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
-        await init_tmp_socket.recv()
+        ready_bytes = await init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcommOsMsg)
+        if isinstance(ready_resp, HcommOsReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
 
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
@@ -354,10 +372,11 @@ class HcommOneSidedChannel(BaseTransferChannel):
     ) -> Union[HcommOsMsg, InitSideRetMsgBase]:
         if isinstance(req, HcommOsInitRequest):
             logger.info("Server: HcommOsInitRequest from %s", req.local_id)
-            assert req.page_size > 0, (
-                f"Peer sent invalid page_size={req.page_size}; "
-                "expected a positive value"
-            )
+            if req.page_size <= 0:
+                raise ValueError(
+                    f"Peer sent invalid page_size={req.page_size}; "
+                    "expected a positive value"
+                )
 
             my_rank = self.SERVER_RANK
             client_rank = self.CLIENT_RANK
@@ -460,6 +479,12 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 continue
             except Exception as e:
                 logger.error("Init loop error: %s", e)
+                try:
+                    self.init_side_channel.send(
+                        msgspec.msgpack.encode(HcommOsReadyResponse(ok=False))
+                    )
+                except Exception:
+                    logger.error("Failed to send HcommOsReadyResponse: %s", e)
                 if self.running:
                     time.sleep(0.01)
         self.init_side_channel.close()
@@ -486,6 +511,12 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 continue
             except Exception as e:
                 logger.error("Async init loop error: %s", e)
+                try:
+                    await self.init_side_channel.send(
+                        msgspec.msgpack.encode(HcommOsReadyResponse(ok=False))
+                    )
+                except Exception:
+                    logger.error("Failed to send HcommOsReadyResponse: %s", e)
                 if self.running:
                     time.sleep(0.01)
         self.init_side_channel.close()
