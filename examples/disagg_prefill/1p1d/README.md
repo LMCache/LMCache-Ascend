@@ -113,7 +113,7 @@ python \
 Launch proxy server to coordinate prefill and decode
 
 ```bash
-python3 /workspace/LMCache/examples/disagg_prefill/disagg_proxy_server.py \
+python3 /workspace/LMCache-Ascend/examples/disagg_prefill/disagg_proxy_server.py \
   --host localhost \
   --port 9100 \
   --prefiller-host localhost \
