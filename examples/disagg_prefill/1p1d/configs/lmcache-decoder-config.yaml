@@ -1,7 +1,7 @@
 local_cpu: False # Enable local CPU RAM cache for fast access
 
 enable_pd: True
-transfer_channel: "hccl"
+transfer_channel: "hcomm_onesided"
 pd_role: "receiver"
 pd_peer_host: "localhost"
 pd_peer_init_port: [7300, 7301] #7300 # Need to have 1 for each TP instance
