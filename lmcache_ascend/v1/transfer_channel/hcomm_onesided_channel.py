@@ -716,9 +716,9 @@ def _build_remote_index_addr(
     return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
 
 
-_HCCL_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCCL_INIT_MAX_RETRIES", "5"))
-_HCCL_INIT_BASE_DELAY = 0.1
-_HCCL_INIT_MAX_DELAY = 5.0
+_HCOMM_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCOMM_INIT_MAX_RETRIES", "5"))
+_HCOMM_INIT_BASE_DELAY = 0.1
+_HCOMM_INIT_MAX_DELAY = 5.0
 
 
 def _init_comm_and_prepare(
@@ -731,28 +731,28 @@ def _init_comm_and_prepare(
     processes on the same node can transiently fail (HCCL error 7).
     """
     last_err: Optional[RuntimeError] = None
-    for attempt in range(_HCCL_INIT_MAX_RETRIES):
+    for attempt in range(_HCOMM_INIT_MAX_RETRIES):
         try:
             comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
             break
         except RuntimeError as e:
             last_err = e
             delay = min(
-                _HCCL_INIT_BASE_DELAY * (2**attempt),
-                _HCCL_INIT_MAX_DELAY,
+                _HCOMM_INIT_BASE_DELAY * (2**attempt),
+                _HCOMM_INIT_MAX_DELAY,
             )
             delay *= random.uniform(0.5, 1.5)
             logger.warning(
                 "init_comm_cluster_info failed (attempt %d/%d): %s  retrying in %.2fs",
                 attempt + 1,
-                _HCCL_INIT_MAX_RETRIES,
+                _HCOMM_INIT_MAX_RETRIES,
                 e,
                 delay,
             )
             time.sleep(delay)
     else:
         raise RuntimeError(
-            f"init_comm_cluster_info failed after {_HCCL_INIT_MAX_RETRIES} attempts"
+            f"init_comm_cluster_info failed after {_HCOMM_INIT_MAX_RETRIES} attempts"
         ) from last_err
 
     hcomm_os.bind_mem(comm, mem_handle)
