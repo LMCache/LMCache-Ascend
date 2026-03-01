@@ -23,9 +23,10 @@ import torch
 from lmcache_ascend import _build_info
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
 
+_cann_ver = _build_info.cann_version_tuple()
 pytestmark = pytest.mark.skipif(
-    _build_info.cann_version_tuple() >= (8, 5),
-    reason="HCCL agent is removed in CANN 8.5.0; use HIXL channel instead",
+    not _cann_ver or _cann_ver >= (8, 5),
+    reason="HCCL agent is removed in CANN 8.5+; skipped when version is unknown or >= 8.5",
 )
 
 
