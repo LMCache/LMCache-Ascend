@@ -3,13 +3,15 @@
 from dataclasses import dataclass
 from typing import Optional, Union
 import asyncio
+import socket
 import threading
 import time
+
 
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
+from lmcache.v1.rpc_utils import get_ip, get_zmq_context, get_zmq_socket
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
@@ -42,6 +44,14 @@ class HixlInitResponse(HixlMsgBase):
     engine_id: str  # ip:port of the responding side
 
 
+class HixlReadyRequest(HixlMsgBase):
+    local_id: str
+
+
+class HixlReadyResponse(HixlMsgBase):
+    ok: bool
+
+
 class HixlMemInfoRequest(HixlMsgBase):
     local_id: str
     buffer_ptr: int
@@ -56,7 +66,12 @@ class HixlMemInfoResponse(HixlMsgBase):
 
 
 HixlMsg = Union[
-    HixlInitRequest, HixlInitResponse, HixlMemInfoRequest, HixlMemInfoResponse
+    HixlInitRequest,
+    HixlInitResponse,
+    HixlReadyRequest,
+    HixlReadyResponse,
+    HixlMemInfoRequest,
+    HixlMemInfoResponse,
 ]
 
 
@@ -107,6 +122,28 @@ class HixlChannel(BaseTransferChannel):
 
         self._init_side_channels()
 
+    def _connect_to_peer(self, peer_id: str, remote_engine_id: str) -> None:
+        logger.info("Connecting to remote HIXL engine: %s", remote_engine_id)
+        self.hixl_wrapper.engine.connect(remote_engine_id)
+        with self._state_lock:
+            self.remote_engine_dict[peer_id] = remote_engine_id
+        logger.info("Connected to remote HIXL engine: %s", remote_engine_id)
+
+    def _store_remote_mem_info(self, peer_id: str, mem_resp) -> None:
+        addr_list = _build_addr_list(
+            mem_resp.buffer_ptr, mem_resp.buffer_size, mem_resp.page_size
+        )
+        with self._state_lock:
+            self.remote_index_addr_dict[peer_id] = addr_list
+
+    def _make_mem_info_request(self, local_id: str) -> HixlMemInfoRequest:
+        return HixlMemInfoRequest(
+            local_id=local_id,
+            buffer_ptr=self.hixl_wrapper.buffer_ptr,
+            buffer_size=self.hixl_wrapper.buffer_size,
+            page_size=self.hixl_wrapper.page_size,
+        )
+
     def lazy_init_peer_connection(
         self,
         local_id: str,
@@ -115,59 +152,35 @@ class HixlChannel(BaseTransferChannel):
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
         init_tmp_socket = get_zmq_socket(
-            self.zmq_context,
-            peer_init_url,
-            "tcp",
-            zmq.REQ,
-            "connect",
+            self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect",
         )
 
         # Step 1: exchange engine IDs
-        hixl_init_req = HixlInitRequest(
-            local_id=local_id,
-            engine_id=self.hixl_wrapper.engine_id,
+        init_req = HixlInitRequest(
+            local_id=local_id, engine_id=self.hixl_wrapper.engine_id,
         )
-        init_tmp_socket.send(msgspec.msgpack.encode(hixl_init_req))
+        init_tmp_socket.send(msgspec.msgpack.encode(init_req))
+        resp = msgspec.msgpack.decode(init_tmp_socket.recv(), type=HixlMsg)
+        self._connect_to_peer(peer_id, resp.engine_id)
 
-        hixl_init_resp_bytes = init_tmp_socket.recv()
-        hixl_init_resp = msgspec.msgpack.decode(hixl_init_resp_bytes, type=HixlMsg)
-        remote_engine_id = hixl_init_resp.engine_id
-
-        logger.info("Connecting to remote HIXL engine: %s", remote_engine_id)
-        self.hixl_wrapper.engine.connect(remote_engine_id)
-
-        with self._state_lock:
-            self.remote_engine_dict[peer_id] = remote_engine_id
-
-        logger.info("Connected to remote HIXL engine: %s", remote_engine_id)
-
-        # Step 2: exchange buffer layout info
-        hixl_mem_req = HixlMemInfoRequest(
-            local_id=local_id,
-            buffer_ptr=self.hixl_wrapper.buffer_ptr,
-            buffer_size=self.hixl_wrapper.buffer_size,
-            page_size=self.hixl_wrapper.page_size,
+        # Step 2: signal ready so server knows connect() finished
+        init_tmp_socket.send(
+            msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
         )
-        init_tmp_socket.send(msgspec.msgpack.encode(hixl_mem_req))
-        hixl_mem_resp_bytes = init_tmp_socket.recv()
-        hixl_mem_resp = msgspec.msgpack.decode(hixl_mem_resp_bytes, type=HixlMsg)
+        init_tmp_socket.recv()  # ack
 
-        addr_list = []
-        with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = addr_list
-        for base_addr in range(
-            hixl_mem_resp.buffer_ptr,
-            hixl_mem_resp.buffer_ptr + hixl_mem_resp.buffer_size,
-            hixl_mem_resp.page_size,
-        ):
-            addr_list.append(base_addr)
+        # Step 3: exchange buffer layout info
+        init_tmp_socket.send(
+            msgspec.msgpack.encode(self._make_mem_info_request(local_id))
+        )
+        mem_resp = msgspec.msgpack.decode(init_tmp_socket.recv(), type=HixlMsg)
+        self._store_remote_mem_info(peer_id, mem_resp)
 
-        # Step 3: optional side message
+        # Step 4: optional side message
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = self.send_init_side_msg(
-                init_tmp_socket,
-                init_side_msg,
+                init_tmp_socket, init_side_msg,
             )
 
         init_tmp_socket.close()
@@ -181,55 +194,39 @@ class HixlChannel(BaseTransferChannel):
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
         init_tmp_socket = get_zmq_socket(
-            self.zmq_context,
-            peer_init_url,
-            "tcp",
-            zmq.REQ,
-            "connect",
+            self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect",
         )
 
         # Step 1: exchange engine IDs
-        hixl_init_req = HixlInitRequest(
-            local_id=local_id,
-            engine_id=self.hixl_wrapper.engine_id,
+        init_req = HixlInitRequest(
+            local_id=local_id, engine_id=self.hixl_wrapper.engine_id,
         )
-        await init_tmp_socket.send(msgspec.msgpack.encode(hixl_init_req))
-
-        hixl_init_resp_bytes = await init_tmp_socket.recv()
-        hixl_init_resp = msgspec.msgpack.decode(hixl_init_resp_bytes, type=HixlMsg)
-        remote_engine_id = hixl_init_resp.engine_id
-
-        self.hixl_wrapper.engine.connect(remote_engine_id)
-        with self._state_lock:
-            self.remote_engine_dict[peer_id] = remote_engine_id
-
-        # Step 2: exchange buffer layout info
-        hixl_mem_req = HixlMemInfoRequest(
-            local_id=local_id,
-            buffer_ptr=self.hixl_wrapper.buffer_ptr,
-            buffer_size=self.hixl_wrapper.buffer_size,
-            page_size=self.hixl_wrapper.page_size,
+        await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
+        resp = msgspec.msgpack.decode(
+            await init_tmp_socket.recv(), type=HixlMsg
         )
-        await init_tmp_socket.send(msgspec.msgpack.encode(hixl_mem_req))
-        hixl_mem_resp_bytes = await init_tmp_socket.recv()
-        hixl_mem_resp = msgspec.msgpack.decode(hixl_mem_resp_bytes, type=HixlMsg)
+        self._connect_to_peer(peer_id, resp.engine_id)
 
-        addr_list = []
-        with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = addr_list
-        for base_addr in range(
-            hixl_mem_resp.buffer_ptr,
-            hixl_mem_resp.buffer_ptr + hixl_mem_resp.buffer_size,
-            hixl_mem_resp.page_size,
-        ):
-            addr_list.append(base_addr)
+        # Step 2: signal ready so server knows connect() finished
+        await init_tmp_socket.send(
+            msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
+        )
+        await init_tmp_socket.recv()  # ack
 
-        # Step 3: optional side message
+        # Step 3: exchange buffer layout info
+        await init_tmp_socket.send(
+            msgspec.msgpack.encode(self._make_mem_info_request(local_id))
+        )
+        mem_resp = msgspec.msgpack.decode(
+            await init_tmp_socket.recv(), type=HixlMsg
+        )
+        self._store_remote_mem_info(peer_id, mem_resp)
+
+        # Step 4: optional side message
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = await self.async_send_init_side_msg(
-                init_tmp_socket,
-                init_side_msg,
+                init_tmp_socket, init_side_msg,
             )
 
         init_tmp_socket.close()
@@ -293,19 +290,25 @@ class HixlChannel(BaseTransferChannel):
 
             logger.info("Replying initialization response")
 
+        elif isinstance(req, HixlReadyRequest):
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                with self._state_lock:
+                    if req.local_id in self.remote_engine_dict:
+                        break
+                time.sleep(0.05)
+            resp = HixlReadyResponse(
+                ok=req.local_id in self.remote_engine_dict,
+            )
+
         elif isinstance(req, HixlMemInfoRequest):
             logger.info("Processing HixlMemInfoRequest from %s", req.local_id)
 
-            addr_list = []
+            addr_list = _build_addr_list(
+                req.buffer_ptr, req.buffer_size, req.page_size
+            )
             with self._state_lock:
                 self.remote_index_addr_dict[req.local_id] = addr_list
-
-            for base_addr in range(
-                req.buffer_ptr,
-                req.buffer_ptr + req.buffer_size,
-                req.page_size,
-            ):
-                addr_list.append(base_addr)
 
             resp = HixlMemInfoResponse(
                 buffer_ptr=self.hixl_wrapper.buffer_ptr,
@@ -442,34 +445,24 @@ class HixlChannel(BaseTransferChannel):
     ) -> int:
         raise NotImplementedError
 
-    def batched_write(
+    def _build_op_descs(
         self,
-        objects: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        """
-        Write a batch of data through the HIXL channel (synchronous).
-        """
-        assert transfer_spec is not None
-
-        remote_engine = ""
-        remote_index_addr: list[int] = []
+        items: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: dict,
+    ) -> tuple[str, list]:
+        peer_id = transfer_spec.get("receiver_id") or transfer_spec["sender_id"]
         with self._state_lock:
-            remote_engine = self.remote_engine_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
+            remote_engine = self.remote_engine_dict[peer_id]
+            remote_index_addr = self.remote_index_addr_dict[peer_id]
 
         op_descs = []
         for mem_obj, remote_index in zip(
-            objects, transfer_spec["remote_indexes"], strict=False
+            items, transfer_spec["remote_indexes"], strict=True
         ):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError(
                     "Sending raw bytes is not supported in HIXL channel"
                 )
-
-            # TODO: Potentially use the actual size of the object
             op_descs.append(
                 hixl_comms.TransferOpDesc(
                     local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
@@ -477,7 +470,26 @@ class HixlChannel(BaseTransferChannel):
                     len=self.page_size,
                 )
             )
+        return remote_engine, op_descs
 
+    async def _poll_transfer(self, req, op_name: str) -> None:
+        while True:
+            status = self.hixl_wrapper.engine.get_transfer_status(req)
+            if status == hixl_comms.TransferStatus.COMPLETED:
+                return
+            if status == hixl_comms.TransferStatus.FAILED:
+                raise RuntimeError(f"HIXL async {op_name} transfer failed")
+            if status == hixl_comms.TransferStatus.TIMEOUT:
+                raise TimeoutError(f"HIXL async {op_name} transfer timed out")
+            await asyncio.sleep(0.001)
+
+    def batched_write(
+        self,
+        objects: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: Optional[dict] = None,
+    ) -> int:
+        assert transfer_spec is not None
+        remote_engine, op_descs = self._build_op_descs(objects, transfer_spec)
         self.hixl_wrapper.engine.transfer_sync(
             remote_engine, hixl_comms.WRITE, op_descs
         )
@@ -488,59 +500,24 @@ class HixlChannel(BaseTransferChannel):
         buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        raise NotImplementedError
+        assert transfer_spec is not None
+        remote_engine, op_descs = self._build_op_descs(buffers, transfer_spec)
+        self.hixl_wrapper.engine.transfer_sync(
+            remote_engine, hixl_comms.READ, op_descs
+        )
+        return len(buffers)
 
     async def async_batched_write(
         self,
         objects: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        """
-        Write a batch of data through the HIXL channel (asynchronous).
-        Uses TransferAsync + polling GetTransferStatus.
-        """
         assert transfer_spec is not None
-
-        remote_engine = ""
-        remote_index_addr: list[int] = []
-        with self._state_lock:
-            remote_engine = self.remote_engine_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
-
-        op_descs = []
-        for mem_obj, remote_index in zip(
-            objects, transfer_spec["remote_indexes"], strict=False
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported in HIXL channel"
-                )
-
-            # TODO: Potentially use the actual size of the object
-            op_descs.append(
-                hixl_comms.TransferOpDesc(
-                    local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
-                    remote_addr=remote_index_addr[remote_index],
-                    len=self.page_size,
-                )
-            )
-
+        remote_engine, op_descs = self._build_op_descs(objects, transfer_spec)
         req = self.hixl_wrapper.engine.transfer_async(
             remote_engine, hixl_comms.WRITE, op_descs
         )
-
-        while True:
-            status = self.hixl_wrapper.engine.get_transfer_status(req)
-            if status == hixl_comms.TransferStatus.COMPLETED:
-                break
-            if status == hixl_comms.TransferStatus.FAILED:
-                raise RuntimeError("HIXL async write transfer failed")
-            if status == hixl_comms.TransferStatus.TIMEOUT:
-                raise TimeoutError("HIXL async write transfer timed out")
-            await asyncio.sleep(0.001)
-
+        await self._poll_transfer(req, "write")
         return len(objects)
 
     async def async_batched_read(
@@ -548,51 +525,12 @@ class HixlChannel(BaseTransferChannel):
         buffers: Union[list[bytes], list[MemoryObj]],
         transfer_spec: Optional[dict] = None,
     ) -> int:
-        """
-        Read a batch of data through the HIXL channel (asynchronous).
-        Uses TransferAsync + polling GetTransferStatus.
-        """
         assert transfer_spec is not None
-
-        remote_engine = ""
-        remote_index_addr: list[int] = []
-        with self._state_lock:
-            remote_engine = self.remote_engine_dict[transfer_spec["receiver_id"]]
-            remote_index_addr = self.remote_index_addr_dict[
-                transfer_spec["receiver_id"]
-            ]
-
-        op_descs = []
-        for mem_obj, remote_index in zip(
-            buffers, transfer_spec["remote_indexes"], strict=False
-        ):
-            if not isinstance(mem_obj, MemoryObj):
-                raise NotImplementedError(
-                    "Sending raw bytes is not supported in HIXL channel"
-                )
-
-            op_descs.append(
-                hixl_comms.TransferOpDesc(
-                    local_addr=self.hixl_wrapper.local_index_addr[mem_obj.meta.address],
-                    remote_addr=remote_index_addr[remote_index],
-                    len=self.page_size,
-                )
-            )
-
+        remote_engine, op_descs = self._build_op_descs(buffers, transfer_spec)
         req = self.hixl_wrapper.engine.transfer_async(
             remote_engine, hixl_comms.READ, op_descs
         )
-
-        while True:
-            status = self.hixl_wrapper.engine.get_transfer_status(req)
-            if status == hixl_comms.TransferStatus.COMPLETED:
-                break
-            if status == hixl_comms.TransferStatus.FAILED:
-                raise RuntimeError("HIXL async read transfer failed")
-            if status == hixl_comms.TransferStatus.TIMEOUT:
-                raise TimeoutError("HIXL async read transfer timed out")
-            await asyncio.sleep(0.001)
-
+        await self._poll_transfer(req, "read")
         return len(buffers)
 
     def close(self):
@@ -630,7 +568,7 @@ class HixlEngineWrapper:
 
         self.engine = hixl_comms.Hixl()
 
-        ip = _get_device_ip(device_id)
+        ip = get_ip()
         port = _find_free_port()
         self.engine_id = f"{ip}:{port}"
 
@@ -655,24 +593,20 @@ class HixlEngineWrapper:
             self.mem_handle,
         )
 
-        if already_registered:
-            dev_ptr = hixl_comms.get_dev_va(device_id, buffer_ptr, buffer_size)
-            if dev_ptr is not None:
-                lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
-                logger.info(
-                    "Re-registered lmc_ops mapping via "
-                    "MemMappingManager (devVA=0x%x) dev ptr: %s",
-                    dev_ptr,
-                    dev_ptr,
-                )
+        dev_ptr = hixl_comms.get_dev_va(device_id, buffer_ptr, buffer_size)
+        if dev_ptr is not None:
+            lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
+            logger.info(
+                "Re-registered lmc_ops mapping via "
+                "MemMappingManager (devVA=0x%x)",
+                dev_ptr,
+            )
 
         self.buffer_ptr = buffer_ptr
         self.buffer_size = buffer_size
         self.page_size = page_size
 
-        self.local_index_addr = []
-        for base_addr in range(buffer_ptr, buffer_ptr + buffer_size, page_size):
-            self.local_index_addr.append(base_addr)
+        self.local_index_addr = _build_addr_list(buffer_ptr, buffer_size, page_size)
 
     def close(self):
         if self.mem_handle is not None:
@@ -683,31 +617,13 @@ class HixlEngineWrapper:
         self.engine.finalize()
 
 
-def _get_device_ip(device_id: int) -> str:
-    """Get the RDMA-reachable IP for the given NPU device."""
-    try:
-        # Standard
-        import subprocess
-
-        result = subprocess.run(
-            ["hccn_tool", "-i", str(device_id), "-ip", "-g"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        for line in result.stdout.strip().splitlines():
-            if "ipaddr" in line:
-                return line.split(":")[-1].strip()
-    except Exception:
-        pass
-    return "127.0.0.1"
+def _build_addr_list(
+    buffer_ptr: int, buffer_size: int, page_size: int
+) -> list[int]:
+    return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
 
 
 def _find_free_port() -> int:
-    """Find an available TCP port."""
-    # Standard
-    import socket
-
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
