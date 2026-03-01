@@ -681,7 +681,10 @@ class HcommOneSidedChannel(BaseTransferChannel):
             thread.join()
         self.zmq_context.term()
 
-        for peer_id, ps in self._peers.items():
+        with self._state_lock:
+            peers_snapshot = list(self._peers.items())
+            self._peers.clear()
+        for peer_id, ps in peers_snapshot:
             self._destroy_peer_comm(ps, peer_id)
 
         if self.mem_handle is not None:
