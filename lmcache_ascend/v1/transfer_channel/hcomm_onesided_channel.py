@@ -206,6 +206,10 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp_bytes = init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         assert isinstance(resp, HcommOsInitResponse)
+        assert resp.page_size > 0, (
+            f"Peer returned invalid page_size={resp.page_size}; "
+            "expected a positive value"
+        )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -278,6 +282,10 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp_bytes = await init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         assert isinstance(resp, HcommOsInitResponse)
+        assert resp.page_size > 0, (
+            f"Peer returned invalid page_size={resp.page_size}; "
+            "expected a positive value"
+        )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -346,6 +354,10 @@ class HcommOneSidedChannel(BaseTransferChannel):
     ) -> Union[HcommOsMsg, InitSideRetMsgBase]:
         if isinstance(req, HcommOsInitRequest):
             logger.info("Server: HcommOsInitRequest from %s", req.local_id)
+            assert req.page_size > 0, (
+                f"Peer sent invalid page_size={req.page_size}; "
+                "expected a positive value"
+            )
 
             my_rank = self.SERVER_RANK
             client_rank = self.CLIENT_RANK
