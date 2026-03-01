@@ -3,6 +3,7 @@
 #endif
 #define _GLIBCXX_USE_CXX11_ABI 0
 
+#include <cstdio>
 #include <map>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -35,8 +36,11 @@ PYBIND11_MODULE(hixl_npu_comms, m) {
         auto ret =
             rtPointerGetAttributes(&attributes, reinterpret_cast<void *>(ptr));
         if (ret != ACL_SUCCESS) {
-          return false; // fallback: assume host memory (safer for HIXL
-                        // registration)
+          fprintf(stderr,
+                  "[hixl] rtPointerGetAttributes(0x%lx) failed "
+                  "with code %d, assuming host\n",
+                  static_cast<unsigned long>(ptr), static_cast<int>(ret));
+          return false;
         }
         return attributes.memoryType != RT_MEMORY_TYPE_HOST &&
                attributes.memoryType != RT_MEMORY_TYPE_USER;
