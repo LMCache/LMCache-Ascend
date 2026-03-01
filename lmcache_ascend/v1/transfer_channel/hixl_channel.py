@@ -129,6 +129,15 @@ class HixlChannel(BaseTransferChannel):
         logger.info("Connected to remote HIXL engine: %s", remote_engine_id)
 
     def _store_remote_mem_info(self, peer_id: str, mem_resp) -> None:
+        if not isinstance(mem_resp, HixlMemInfoResponse):
+            raise ValueError(
+                f"Expected HixlMemInfoResponse, got {type(mem_resp).__name__}"
+            )
+        if mem_resp.page_size <= 0:
+            raise ValueError(
+                f"Peer returned invalid page_size={mem_resp.page_size}; "
+                "expected a positive value"
+            )
         addr_list = _build_addr_list(
             mem_resp.buffer_ptr, mem_resp.buffer_size, mem_resp.page_size
         )
@@ -165,13 +174,22 @@ class HixlChannel(BaseTransferChannel):
         )
         init_tmp_socket.send(msgspec.msgpack.encode(init_req))
         resp = msgspec.msgpack.decode(init_tmp_socket.recv(), type=HixlMsg)
+        if not isinstance(resp, HixlInitResponse):
+            raise ValueError(
+                f"Expected HixlInitResponse, got {type(resp).__name__}"
+            )
         self._connect_to_peer(peer_id, resp.engine_id)
 
         # Step 2: signal ready so server knows connect() finished
         init_tmp_socket.send(
             msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
         )
-        init_tmp_socket.recv()  # ack
+        ready_bytes = init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HixlMsg)
+        if isinstance(ready_resp, HixlReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
 
         # Step 3: exchange buffer layout info
         init_tmp_socket.send(
@@ -213,13 +231,22 @@ class HixlChannel(BaseTransferChannel):
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
         resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
+        if not isinstance(resp, HixlInitResponse):
+            raise ValueError(
+                f"Expected HixlInitResponse, got {type(resp).__name__}"
+            )
         self._connect_to_peer(peer_id, resp.engine_id)
 
         # Step 2: signal ready so server knows connect() finished
         await init_tmp_socket.send(
             msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
         )
-        await init_tmp_socket.recv()  # ack
+        ready_bytes = await init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HixlMsg)
+        if isinstance(ready_resp, HixlReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
 
         # Step 3: exchange buffer layout info
         await init_tmp_socket.send(
@@ -310,6 +337,11 @@ class HixlChannel(BaseTransferChannel):
 
         elif isinstance(req, HixlMemInfoRequest):
             logger.info("Processing HixlMemInfoRequest from %s", req.local_id)
+            if req.page_size <= 0:
+                raise ValueError(
+                    f"Peer sent invalid page_size={req.page_size}; "
+                    "expected a positive value"
+                )
 
             addr_list = _build_addr_list(req.buffer_ptr, req.buffer_size, req.page_size)
             with self._state_lock:
@@ -361,6 +393,12 @@ class HixlChannel(BaseTransferChannel):
 
             except Exception as e:
                 logger.error("Failed to process initialization loop: %s", str(e))
+                try:
+                    self.init_side_channel.send(
+                        msgspec.msgpack.encode(HixlReadyResponse(ok=False))
+                    )
+                except Exception:
+                    logger.error("Failed to send HixlReadyResponse: %s", e)
                 if self.running:
                     time.sleep(0.01)
 
@@ -403,6 +441,12 @@ class HixlChannel(BaseTransferChannel):
 
             except Exception as e:
                 logger.error("Failed to process initialization loop: %s", str(e))
+                try:
+                    await self.init_side_channel.send(
+                        msgspec.msgpack.encode(HixlReadyResponse(ok=False))
+                    )
+                except Exception:
+                    logger.error("Failed to send HixlReadyResponse: %s", e)
                 if self.running:
                     time.sleep(0.01)
 
