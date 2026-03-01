@@ -68,11 +68,47 @@ def _get_cann_version():
     return None
 
 
-def _get_ascend_env_path(cann_version):
-    # NOTE: standard Ascend Environment variable setup path
+def _is_cann_85_or_later(cann_version_tuple):
+    """Determine whether the CANN environment is 8.5+.
 
+    Checks (in order):
+      1. Env var override: USE_HIXL=1 forces 8.5+ mode.
+      2. Parsed version tuple from ascend_toolkit_install.info.
+      3. Secondary heuristic: set_env.sh lives directly under
+         ASCEND_HOME_PATH on CANN 8.5+ vs one level up on older versions.
+    """
+    env_override = os.getenv("USE_HIXL", "").strip()
+    if env_override.lower() in ("1", "true", "on"):
+        logger.info("USE_HIXL env var set — forcing CANN >= 8.5 build mode")
+        return True
+    if env_override.lower() in ("0", "false", "off"):
+        logger.info("USE_HIXL env var explicitly disabled — forcing CANN < 8.5 build mode")
+        return False
+
+    if cann_version_tuple:
+        return cann_version_tuple >= (8, 5, 0)
+
+    ascend_home = _get_ascend_home_path()
+    new_path = os.path.join(ascend_home, "set_env.sh")
+    old_path = os.path.join(ascend_home, "..", "set_env.sh")
+    if os.path.exists(new_path) and not os.path.exists(old_path):
+        logger.warning(
+            "CANN version detection failed but set_env.sh location "
+            "suggests CANN >= 8.5 — building with HIXL/hcomm_onesided. "
+            "Set USE_HIXL=0 to override."
+        )
+        return True
+
+    logger.warning(
+        "CANN version detection failed — defaulting to HCCL (pre-8.5) build. "
+        "Set USE_HIXL=1 to force CANN >= 8.5 mode."
+    )
+    return False
+
+
+def _get_ascend_env_path(cann_85_or_later):
     _ascend_home_path = _get_ascend_home_path()
-    if cann_version >= (8, 5, 0):
+    if cann_85_or_later:
         env_script_path = os.path.join(_ascend_home_path, "set_env.sh")
     else:
         env_script_path = os.path.join(_ascend_home_path, "..", "set_env.sh")
@@ -223,7 +259,10 @@ class CustomAscendCmakeBuildExt(build_ext):
         cann_version_tuple = tuple(
             int(p) for p in re.findall(r"\d+", cann_version or "")
         )
-        env_path = _get_ascend_env_path(cann_version_tuple)
+
+        self._cann_version_no_hccl = _is_cann_85_or_later(cann_version_tuple)
+        env_path = _get_ascend_env_path(self._cann_version_no_hccl)
+
         _soc_version = _get_npu_soc()
         arch = platform.machine()
         _aicore_arch = _get_aicore_arch_number(ascend_home_path, _soc_version, arch)
@@ -231,9 +270,6 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
 
-        self._cann_version_no_hccl = (
-            cann_version is not None and cann_version_tuple >= (8, 5, 0)
-        )
         if self._cann_version_no_hccl:
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
             logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
