@@ -26,7 +26,8 @@ from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
 _cann_ver = _build_info.cann_version_tuple()
 pytestmark = pytest.mark.skipif(
     not _cann_ver or _cann_ver >= (8, 5),
-    reason="HCCL agent is removed in CANN 8.5+; skipped when version is unknown or >= 8.5",
+    reason="HCCL agent is removed in CANN 8.5+; "
+    "skipped when version is unknown or >= 8.5",
 )
 
 

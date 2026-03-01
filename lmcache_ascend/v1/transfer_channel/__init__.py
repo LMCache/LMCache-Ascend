@@ -57,6 +57,7 @@ def CreateTransferChannel(
     ], f"Unsupported channel type: {channel_type}"
 
     if channel_type == "hixl":
+        # First Party
         from lmcache_ascend.v1.transfer_channel.hixl_channel import (
             HixlChannel,
         )
@@ -88,6 +89,7 @@ def CreateTransferChannel(
             **kwargs,
         )
     else:
+        # First Party
         from lmcache_ascend.v1.transfer_channel.hccl_channel import (
             HcclChannel,
         )

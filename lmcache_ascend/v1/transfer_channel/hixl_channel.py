@@ -175,9 +175,7 @@ class HixlChannel(BaseTransferChannel):
         init_tmp_socket.send(msgspec.msgpack.encode(init_req))
         resp = msgspec.msgpack.decode(init_tmp_socket.recv(), type=HixlMsg)
         if not isinstance(resp, HixlInitResponse):
-            raise ValueError(
-                f"Expected HixlInitResponse, got {type(resp).__name__}"
-            )
+            raise ValueError(f"Expected HixlInitResponse, got {type(resp).__name__}")
         self._connect_to_peer(peer_id, resp.engine_id)
 
         # Step 2: signal ready so server knows connect() finished
@@ -232,9 +230,7 @@ class HixlChannel(BaseTransferChannel):
         await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
         resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
         if not isinstance(resp, HixlInitResponse):
-            raise ValueError(
-                f"Expected HixlInitResponse, got {type(resp).__name__}"
-            )
+            raise ValueError(f"Expected HixlInitResponse, got {type(resp).__name__}")
         self._connect_to_peer(peer_id, resp.engine_id)
 
         # Step 2: signal ready so server knows connect() finished

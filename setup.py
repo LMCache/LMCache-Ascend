@@ -82,7 +82,9 @@ def _is_cann_85_or_later(cann_version_tuple):
         logger.info("USE_HIXL env var set — forcing CANN >= 8.5 build mode")
         return True
     if env_override.lower() in ("0", "false", "off"):
-        logger.info("USE_HIXL env var explicitly disabled — forcing CANN < 8.5 build mode")
+        logger.info(
+            "USE_HIXL env var explicitly disabled — forcing CANN < 8.5 build mode"
+        )
         return False
 
     if cann_version_tuple:

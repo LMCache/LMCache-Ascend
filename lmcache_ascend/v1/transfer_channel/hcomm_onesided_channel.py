@@ -206,9 +206,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp_bytes = init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         if not isinstance(resp, HcommOsInitResponse):
-            raise ValueError(
-                f"Expected HcommOsInitResponse, got {type(resp).__name__}"
-            )
+            raise ValueError(f"Expected HcommOsInitResponse, got {type(resp).__name__}")
         if resp.page_size <= 0:
             raise ValueError(
                 f"Peer returned invalid page_size={resp.page_size}; "
@@ -291,9 +289,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp_bytes = await init_tmp_socket.recv()
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         if not isinstance(resp, HcommOsInitResponse):
-            raise ValueError(
-                f"Expected HcommOsInitResponse, got {type(resp).__name__}"
-            )
+            raise ValueError(f"Expected HcommOsInitResponse, got {type(resp).__name__}")
         if resp.page_size <= 0:
             raise ValueError(
                 f"Peer returned invalid page_size={resp.page_size}; "
