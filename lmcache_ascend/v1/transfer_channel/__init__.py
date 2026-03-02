@@ -7,12 +7,8 @@ from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
 import torch
 import torch_npu  # noqa: F401
 
-# First Party
-from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
-
 # Local
 from .hccl_agent import BufferConfig, BufferType
-
 
 def get_correct_device(device: str, worker_id: int) -> str:
     """
@@ -60,7 +56,8 @@ def CreateTransferChannel(
     """
     Create a transfer channel based on the specified channel type.
 
-    :param channel_type: Type of the transfer channel (e.g., "hccl").
+    :param channel_type: Type of the transfer channel
+        (e.g., "hccl", "hixl", "hcomm_onesided").
     :param async_mode: Whether to operate in asynchronous mode.
     :param role: Role of the channel (e.g., "both", "sender" or "receiver").
     :param buffer_ptr: Pointer to the pre-allocated buffer.
@@ -73,7 +70,49 @@ def CreateTransferChannel(
     :return: An instance of the specified transfer channel.
     """
 
-    assert channel_type in ["hccl"], f"Unsupported channel type: {channel_type}"
+    assert channel_type in [
+        "hccl",
+        "hixl",
+        "hcomm_onesided",
+    ], f"Unsupported channel type: {channel_type}"
+
+    if channel_type == "hixl":
+        # First Party
+        from lmcache_ascend.v1.transfer_channel.hixl_channel import (
+            HixlChannel,
+        )
+
+        transfer_channel = HixlChannel(
+            async_mode=async_mode,
+            role=role,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            align_bytes=align_bytes,
+            tp_rank=tp_rank,
+            peer_init_url=peer_init_url,
+            **kwargs,
+        )
+    elif channel_type == "hcomm_onesided":
+        # First Party
+        from lmcache_ascend.v1.transfer_channel.hcomm_onesided_channel import (
+            HcommOneSidedChannel,
+        )
+
+        transfer_channel = HcommOneSidedChannel(
+            async_mode=async_mode,
+            role=role,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            align_bytes=align_bytes,
+            tp_rank=tp_rank,
+            peer_init_url=peer_init_url,
+            **kwargs,
+        )
+    else:
+        # First Party
+        from lmcache_ascend.v1.transfer_channel.hccl_channel import (
+            HcclChannel,
+        )
 
     # construct the buffer config here
     buffer_type = kwargs.get("buffer_type", [])

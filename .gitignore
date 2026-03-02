@@ -6,7 +6,6 @@ build
 .pytest_cache
 .env
 _build_info.py
-.vscode
 *.pt
 
 # Ascend Specific
@@ -16,3 +15,8 @@ kernel_meta
 output
 schedule.log
 
+# PyCharm
+.idea/
+
+# Visual Studio Code
+.vscode/

@@ -4,6 +4,7 @@ from enum import Enum, auto
 from typing import Any, List, Optional, Set, Tuple, Union
 
 # Third Party
+from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
@@ -508,6 +509,43 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
 
+    @classmethod
+    def from_metadata(
+        cls,
+        metadata: LMCacheEngineMetadata,
+        use_gpu: bool = False,
+        device: Optional[torch.device] = None,
+    ) -> "VLLMPagedMemGPUConnectorV2":
+        """Create a connector from LMCacheEngineMetadata.
+
+        Args:
+            metadata: The LMCache engine metadata containing model configuration.
+            use_gpu: Whether to use GPU intermediate buffer.
+            device: The device to use for the connector.
+
+        Returns:
+            A new instance of VLLMPagedMemGPUConnectorV2.
+        """
+        # Extract parameters from metadata
+        # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
+        num_layers = metadata.kv_shape[0]
+        chunk_size = metadata.kv_shape[2]
+        num_kv_head = metadata.kv_shape[3]
+        head_size = metadata.kv_shape[4]
+        hidden_dim_size = num_kv_head * head_size
+
+        return cls(
+            hidden_dim_size=hidden_dim_size,
+            num_layers=num_layers,
+            use_gpu=use_gpu,
+            chunk_size=chunk_size,
+            dtype=metadata.kv_dtype,
+            device=device,
+            use_mla=metadata.use_mla,
+            num_kv_head=num_kv_head,
+            head_size=head_size,
+        )
+
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
 
@@ -563,18 +601,26 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             # kv_caches[0].shape: [1, num_pages, page_size, head_size] (vllm-Ascend)
             self.page_buffer_size = kv_caches[0].shape[-3] * kv_caches[0].shape[-2]
         else:
-            # vllm 0.9.2 ...
-            # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
-            # 310P: [2, num_blocks, num_kv_heads * head_size // 16, block_size, 16]
-            # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
-                # kv_caches[0]: [tuple(k,v)，tuple(k,v)]
+                # kv_caches[0]: [tuple(k,v)]
+                # 310P: [num_blocks, num_kv_heads * head_size // 16, block_size, 16]
+                # 910B: [num_blocks, block_size, num_kv_heads, head_size]
                 assert first_tensor.dim() >= 2
-                self.page_buffer_size = first_tensor.shape[0] * first_tensor.shape[1]
-            else:
+                if is_310p():
+                    self.block_size = first_tensor.shape[-2]
+                    self.page_buffer_size = first_tensor.shape[0] * self.block_size
+                else:
+                    self.page_buffer_size = (
+                        first_tensor.shape[0] * first_tensor.shape[1]
+                    )
+
+            elif self.kv_format == KVCacheFormat.MERGED_KV:
+                # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
+                # 310P: [2, num_blocks, num_kv_heads * head_size // 16, block_size, 16]
+                # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
                 assert first_tensor.dim() == 5
                 if is_310p():
-                    self.block_size = first_tensor.shape[3]
+                    self.block_size = first_tensor.shape[-2]
                     self.page_buffer_size = first_tensor.shape[1] * self.block_size
                 else:
                     self.page_buffer_size = (
@@ -1212,7 +1258,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
-
+                logger.debug(f"Finished loading layer {layer_id}")
         yield
 
         # synchronize the last layer
@@ -1223,7 +1269,6 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
         if self.use_gpu and tmp_gpu_buffer_obj is not None:
             tmp_gpu_buffer_obj.ref_count_down()
 
-        logger.debug(f"Finished loading layer {layer_id}")
         yield
 
     def batched_from_gpu(
@@ -1344,12 +1389,11 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
+                logger.debug(f"Finished offloading layer {layer_id}")
             yield
 
             if sync:
                 self.store_stream.synchronize()
-
-            logger.debug(f"Finished offloading layer {layer_id}")
 
         # free the buffer memory
         if self.use_gpu and tmp_gpu_buffer_obj is not None:

@@ -8,7 +8,7 @@ enable_p2p: True
 p2p_host: "localhost" # replace with the host ip
 p2p_init_ports: [9964, 9965] # per TP instance
 p2p_lookup_ports: [9966, 9967] # per TP instance
-transfer_channel: "hccl"
+transfer_channel: "hcomm_onesided"
 p2p_use_npu: False
 p2p_pull_mode: False
 p2p_delay_pull: False

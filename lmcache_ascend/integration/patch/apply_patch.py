@@ -5,6 +5,9 @@ import importlib.util
 import logging
 import os
 
+# First Party
+from lmcache_ascend.v1.npu_connector import is_310p
+
 logger = logging.getLogger(__name__)
 
 os.environ["SKIP_LMCACHE_PATCH"] = "1"
@@ -23,6 +26,15 @@ def run_integration_patches():
         ("vllm_ascend", f"{base_path}.vllm.cacheblend_patch", "CacheBlendPatcher"),
         # ("mindspore", "...", "MindSporePatcher"),
     ]
+
+    if is_310p():
+        patch_tasks.append(
+            (
+                "vllm_ascend",
+                f"{base_path}.vllm.vllm_ascend_0_10_0_rc1_310p_patch",
+                "VllmAscend0100rc1Patcher",
+            )
+        )
 
     for package_name, module_path, class_name in patch_tasks:
         if is_installed(package_name):
