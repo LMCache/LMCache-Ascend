@@ -98,9 +98,11 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
         alloc_type = "cpu" if config.sender_use_host else "gpu"
 
         if config.sender_use_host:
+            buffer_type = "cpu"
             buffer_ptr = allocator.cpu_allocator.buffer_ptr
             buffer_size = allocator.cpu_allocator.buffer_size
         else:
+            buffer_type = "npu"
             buffer_ptr = allocator.gpu_allocator.buffer_ptr
             buffer_size = allocator.gpu_allocator.buffer_size
 
@@ -127,6 +129,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
             role="sender",
             buffer_ptr=buffer_ptr,
             buffer_size=buffer_size,
+            buffer_type=buffer_type,
             align_bytes=calculate_tensor_byte_size(config.kv_shape, config.dtype),
             tp_rank=0,
             peer_init_url=local_url,
@@ -195,9 +198,11 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
         alloc_type = "cpu" if config.receiver_use_host else "gpu"
 
         if config.receiver_use_host:
+            buffer_type = "cpu"
             buffer_ptr = allocator.cpu_allocator.buffer_ptr
             buffer_size = allocator.cpu_allocator.buffer_size
         else:
+            buffer_type = "npu"
             buffer_ptr = allocator.gpu_allocator.buffer_ptr
             buffer_size = allocator.gpu_allocator.buffer_size
 
@@ -220,6 +225,7 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
             role="receiver",
             buffer_ptr=buffer_ptr,
             buffer_size=buffer_size,
+            buffer_type=buffer_type,
             align_bytes=calculate_tensor_byte_size(config.kv_shape, config.dtype),
             tp_rank=0,
             peer_init_url=local_url,

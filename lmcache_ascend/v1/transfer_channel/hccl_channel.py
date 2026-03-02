@@ -24,7 +24,8 @@ import zmq
 import lmcache_ascend.hccl_npu_comms as hcomm
 
 # Local
-from .hccl_agent import BufferConfig, BufferType, HcclAgentWrapper, HcclMemHandleMeta
+from .buffer_config import BufferConfig, BufferType, RemotePeerBufferList, resolve_buffer_ref
+from .hccl_agent import HcclAgentWrapper
 
 logger = init_logger(__name__)
 
@@ -55,52 +56,6 @@ class HcclMemRegResponse(HcclMsgBase):
     server_mem_handle_bytes: (
         bytes  # Handle of server (receiver) memory to register to client
     )
-
-
-class PeerMemHandle:
-    def __init__(self, mem_handle: HcclMemHandleMeta):
-        self.mem_handle = mem_handle
-        self.uuid = mem_handle.uuid
-        self.buffer_ptr = mem_handle.buffer_ptr
-        self.buffer_size = mem_handle.buffer_size
-        self.page_size = mem_handle.page_size
-        self.num_pages = self.buffer_size // self.page_size
-
-
-class PeerMemHandleList:
-    def __init__(self, mem_handles: List[HcclMemHandleMeta]):
-        self.peer_mem_handles = [PeerMemHandle(handle) for handle in mem_handles]
-        self._uuid_to_handle = {h.uuid: h for h in self.peer_mem_handles}
-
-    def extend_handles(self, mem_handles: List[HcclMemHandleMeta]):
-        for handle in mem_handles:
-            peer_handle = PeerMemHandle(handle)
-            self.peer_mem_handles.append(peer_handle)
-            self._uuid_to_handle[peer_handle.uuid] = peer_handle
-
-    def get_handle_by_uuid(self, buffer_uuid: str) -> PeerMemHandle:
-        """Look up a peer mem handle by its UUID.
-
-        Raises ValueError if UUID is not found.
-        """
-        handle = self._uuid_to_handle.get(buffer_uuid)
-        if handle is None:
-            raise ValueError(f"Buffer UUID {buffer_uuid} not found in peer mem handles")
-        return handle
-
-    def resolve_addr(self, buffer_uuid: str, page_index: int) -> int:
-        """Resolve a (buffer_uuid, page_index) to an actual remote memory address.
-
-        Performs bounds checking: page_index must be in [0, num_pages).
-        Raises ValueError for unknown UUID, IndexError for out-of-range page.
-        """
-        handle = self.get_handle_by_uuid(buffer_uuid)
-        if not (0 <= page_index < handle.num_pages):
-            raise IndexError(
-                f"page_index {page_index} out of range [0, {handle.num_pages}) "
-                f"for remote buffer {buffer_uuid}"
-            )
-        return handle.buffer_ptr + page_index * handle.page_size
 
 
 HcclMsg = Union[
@@ -155,7 +110,7 @@ class HcclChannel(BaseTransferChannel):
         self.conn_handles_dict = {}
 
         self._state_lock = threading.Lock()
-        self.remote_index_addr_dict: Dict[str, PeerMemHandleList] = {}
+        self.remote_index_addr_dict: Dict[str, RemotePeerBufferList] = {}
 
         self.side_channels: list[zmq.Socket] = []
         self.running_threads: list[threading.Thread] = []
@@ -235,7 +190,7 @@ class HcclChannel(BaseTransferChannel):
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = PeerMemHandleList(server_mem_handles)
+            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(server_mem_handles)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -301,7 +256,7 @@ class HcclChannel(BaseTransferChannel):
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = PeerMemHandleList(server_mem_handles)
+            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(server_mem_handles)
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -395,7 +350,7 @@ class HcclChannel(BaseTransferChannel):
 
             with self._state_lock:
                 if req.local_id not in self.remote_index_addr_dict:
-                    self.remote_index_addr_dict[req.local_id] = PeerMemHandleList(
+                    self.remote_index_addr_dict[req.local_id] = RemotePeerBufferList(
                         client_mem_handles
                     )
                 else:
@@ -539,8 +494,10 @@ class HcclChannel(BaseTransferChannel):
                 assert mem_obj is not None and isinstance(mem_obj, MemoryObj), (
                     "Expected MemoryObj, got {}".format(type(mem_obj))
                 )
-                buf_uuid, mem_idx = self.hccl_wrapper.get_buffer_ref(
-                    mem_obj.data_ptr, mem_obj.meta.address
+                buf_uuid, mem_idx = resolve_buffer_ref(
+                    self.hccl_wrapper.mem_handles,
+                    mem_obj.data_ptr,
+                    mem_obj.meta.address,
                 )
                 buffer_uuids.append(buf_uuid)
                 mem_indexes.append(mem_idx)

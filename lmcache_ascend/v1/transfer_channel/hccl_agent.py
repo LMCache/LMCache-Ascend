@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from dataclasses import dataclass, field
-from enum import Enum, auto
 from typing import Dict, List, Optional
 import uuid as _uuid
 
@@ -13,22 +12,10 @@ import torch
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
 
+# Local
+from .buffer_config import BufferConfig, BufferType, resolve_buffer_ref, resolve_local_addr
+
 logger = init_logger(__name__)
-
-
-class BufferType(Enum):
-    CPU = auto()
-    NPU = auto()
-
-
-@dataclass
-class BufferConfig:
-    ptr: int
-    size: int
-    device_id: int
-    device_type: BufferType
-    # ????
-    align_bytes: int
 
 
 @dataclass
@@ -140,32 +127,11 @@ class HcclAgentWrapper:
         return meta.local_buffer_addrs[page_index]
 
     def get_buffer_ref(self, data_ptr: int, page_index: int) -> tuple:
-        """Find the buffer UUID for a given data pointer and return (uuid, page_index).
-
-        The page_index is passed through (it comes from the memory allocator's
-        meta.address) and validated against the buffer's local_buffer_addrs.
-        """
-        for meta in self.mem_handles:
-            if meta.buffer_ptr <= data_ptr < meta.buffer_ptr + meta.buffer_size:
-                if meta.local_buffer_addrs is not None:
-                    num_pages = len(meta.local_buffer_addrs)
-                    if not (0 <= page_index < num_pages):
-                        raise IndexError(
-                            f"page_index {page_index} out of range [0, {num_pages}) "
-                            f"for buffer {meta.uuid}"
-                        )
-                return (meta.uuid, page_index)
-        raise ValueError(
-            f"Pointer {data_ptr} not found in any registered memory handle."
-        )
+        """Find the buffer UUID for a given data pointer and return (uuid, page_index)."""
+        return resolve_buffer_ref(self.mem_handles, data_ptr, page_index)
 
     def get_local_addr(self, ptr: int, idx: int) -> int:
-        # we need to first check whether this is in our mem_handles
-        # if it is, then we obtain the local address
-        for meta in self.mem_handles:
-            if meta.buffer_ptr <= ptr < meta.buffer_ptr + meta.buffer_size:
-                return meta.local_buffer_addrs[idx]
-        raise ValueError(f"Pointer {ptr} not found in any registered memory handle.")
+        return resolve_local_addr(self.mem_handles, ptr, idx)
 
     def close(self):
         for meta in self.mem_handles:
