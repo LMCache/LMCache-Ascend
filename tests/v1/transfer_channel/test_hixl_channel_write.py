@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple
 import multiprocessing as mp
+import os
 import sys
 import time
 import warnings
@@ -25,14 +26,13 @@ from lmcache_ascend.v1.transfer_channel import CreateTransferChannel
 
 _cann_ver = _build_info.cann_version_tuple()
 pytestmark = pytest.mark.skipif(
-    not _cann_ver or _cann_ver >= (8, 5),
-    reason="HCCL agent is removed in CANN 8.5+; "
-    "skipped when version is unknown or >= 8.5",
+    not _cann_ver or _cann_ver < (8, 5),
+    reason="HIXL channel requires CANN 8.5+; skipped when version is unknown or < 8.5",
 )
 
 
 @dataclass
-class HcclTestConfig:
+class HixlTestConfig:
     num_objs: int
     kv_shape: Tuple[int, ...]
     dtype: torch.dtype = torch.bfloat16
@@ -40,6 +40,14 @@ class HcclTestConfig:
     recv_device_id: int = 1
     timeout: int = 60
     use_host_memory: bool = False
+    sender_use_host: bool | None = None
+    receiver_use_host: bool | None = None
+
+    def __post_init__(self):
+        if self.sender_use_host is None:
+            self.sender_use_host = self.use_host_memory
+        if self.receiver_use_host is None:
+            self.receiver_use_host = self.use_host_memory
 
 
 def calculate_tensor_byte_size(kv_shape: Tuple[int, ...], dtype: torch.dtype) -> int:
@@ -74,25 +82,28 @@ def get_allocator(
     return allocator
 
 
-def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
+def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        if config.sender_use_host or config.receiver_use_host:
+            # NOTE (gingfung): HIXL channel requires HCCL_INTRA_ROCE_ENABLE=1
+            # if its within the same host, and for host memory transfer
+            os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.send_device_id)
-
+        logger.info(f"Sender: Using device {config.send_device_id}")
         allocator = get_allocator(
-            config.send_device_id, config.kv_shape, config.dtype, config.use_host_memory
+            config.send_device_id, config.kv_shape, config.dtype, config.sender_use_host
         )
-        alloc_type = "cpu" if config.use_host_memory else "gpu"
+        alloc_type = "cpu" if config.sender_use_host else "gpu"
 
-        if config.use_host_memory:
+        if config.sender_use_host:
             buffer_ptr = allocator.cpu_allocator.buffer_ptr
             buffer_size = allocator.cpu_allocator.buffer_size
         else:
             buffer_ptr = allocator.gpu_allocator.buffer_ptr
             buffer_size = allocator.gpu_allocator.buffer_size
 
-        # Generate Data
         objs = []
         expected_sums = []
         for i in range(config.num_objs):
@@ -107,11 +118,11 @@ def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
             objs.append(obj)
             expected_sums.append(fill_val)
 
-        local_url = f"0.0.0.0:377{config.send_device_id}"
-        remote_url = f"0.0.0.0:377{config.recv_device_id}"
+        local_url = f"0.0.0.0:378{config.send_device_id}"
+        remote_url = f"0.0.0.0:378{config.recv_device_id}"
 
         channel = CreateTransferChannel(
-            channel_type="hccl",
+            channel_type="hixl",
             async_mode=False,
             role="sender",
             buffer_ptr=buffer_ptr,
@@ -127,15 +138,12 @@ def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
             peer_init_url=remote_url,
         )
 
-        # Signal that Sender has initialized its channel
         shared_dict["sender_init_done"] = True
 
-        # Wait for Receiver to also be initialized. This prevents the Sender from
-        # writing before the Receiver's background thread is ready
         wait_start = time.time()
         while "receiver_init_done" not in shared_dict:
             time.sleep(0.1)
-            if time.time() - wait_start > 30:
+            if time.time() - wait_start > int(config.timeout / 2):
                 raise TimeoutError(
                     "Sender timed out waiting for Receiver initialization"
                 )
@@ -147,7 +155,7 @@ def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
             "remote_indexes": list(range(len(objs))),
         }
 
-        logger.info(f"Sender ({alloc_type}): Starting transfer...")
+        logger.info(f"Sender ({alloc_type}): Starting HIXL transfer...")
         start_time = time.time()
 
         channel.batched_write(
@@ -156,7 +164,7 @@ def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
         )
 
         duration = time.time() - start_time
-        logger.info(f"Sender: Transfer finished in {duration:.4f}s")
+        logger.info(f"Sender: HIXL Transfer finished in {duration:.4f}s")
 
         shared_dict["expected_values"] = expected_sums
         shared_dict["write_complete"] = True
@@ -168,18 +176,25 @@ def sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
         sys.exit(1)
 
 
-def receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
+def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
     try:
         warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        if config.sender_use_host or config.receiver_use_host:
+            # NOTE (gingfung): HIXL channel requires HCCL_INTRA_ROCE_ENABLE=1
+            # if its within the same host, and for host memory transfer
+            os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.recv_device_id)
-
+        logger.info(f"Receiver: Using device {config.recv_device_id}")
         allocator = get_allocator(
-            config.recv_device_id, config.kv_shape, config.dtype, config.use_host_memory
+            config.recv_device_id,
+            config.kv_shape,
+            config.dtype,
+            config.receiver_use_host,
         )
-        alloc_type = "cpu" if config.use_host_memory else "gpu"
+        alloc_type = "cpu" if config.receiver_use_host else "gpu"
 
-        if config.use_host_memory:
+        if config.receiver_use_host:
             buffer_ptr = allocator.cpu_allocator.buffer_ptr
             buffer_size = allocator.cpu_allocator.buffer_size
         else:
@@ -197,10 +212,10 @@ def receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> Non
             obj.tensor.zero_()
             objs.append(obj)
 
-        local_url = f"0.0.0.0:377{config.recv_device_id}"
+        local_url = f"0.0.0.0:378{config.recv_device_id}"
 
         channel = CreateTransferChannel(
-            channel_type="hccl",
+            channel_type="hixl",
             async_mode=False,
             role="receiver",
             buffer_ptr=buffer_ptr,
@@ -210,10 +225,8 @@ def receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> Non
             peer_init_url=local_url,
         )
 
-        # Signal that Receiver is up and listening
         shared_dict["receiver_init_done"] = True
 
-        # Wait for Sender to be initialized
         wait_start = time.time()
         while "sender_init_done" not in shared_dict:
             time.sleep(0.1)
@@ -233,7 +246,7 @@ def receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> Non
 
         for i, obj in enumerate(objs):
             expected_val = expected_values[i]
-            tensor_data = obj.tensor if config.use_host_memory else obj.tensor.cpu()
+            tensor_data = obj.tensor if config.receiver_use_host else obj.tensor.cpu()
 
             is_equal = (tensor_data == expected_val).all()
 
@@ -252,7 +265,7 @@ def receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> Non
         sys.exit(1)
 
 
-def run_hccl_test(config: HcclTestConfig):
+def run_hixl_test(config: HixlTestConfig):
     try:
         mp.set_start_method("spawn", force=True)
     except RuntimeError:
@@ -306,14 +319,14 @@ def run_hccl_test(config: HcclTestConfig):
         (10, 31, 256, 8, 128),
     ],
 )
-def test_hccl_write_device(num_objs, num_layer, chunk_size, num_kv_head, head_size):
-    config = HcclTestConfig(
+def test_hixl_write_device(num_objs, num_layer, chunk_size, num_kv_head, head_size):
+    config = HixlTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
-        timeout=120 if num_objs > 10 else 60,
+        timeout=120 if num_objs >= 10 else 60,
         use_host_memory=False,
     )
-    run_hccl_test(config)
+    run_hixl_test(config)
 
 
 @pytest.mark.skipif(
@@ -327,11 +340,55 @@ def test_hccl_write_device(num_objs, num_layer, chunk_size, num_kv_head, head_si
         (10, 31, 256, 8, 128),
     ],
 )
-def test_hccl_write_host(num_objs, num_layer, chunk_size, num_kv_head, head_size):
-    config = HcclTestConfig(
+def test_hixl_write_host(num_objs, num_layer, chunk_size, num_kv_head, head_size):
+    config = HixlTestConfig(
         num_objs=num_objs,
         kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
-        timeout=60,
+        timeout=120 if num_objs >= 10 else 60,
         use_host_memory=True,
     )
-    run_hccl_test(config)
+    run_hixl_test(config)
+
+
+@pytest.mark.skipif(
+    not torch.npu.is_available() or torch.npu.device_count() < 2,
+    reason="Requires at least 2 NPU devices",
+)
+@pytest.mark.parametrize(
+    "num_objs, num_layer, chunk_size, num_kv_head, head_size",
+    [
+        (2, 31, 256, 8, 128),
+        (10, 31, 256, 8, 128),
+    ],
+)
+def test_hixl_write_h2d(num_objs, num_layer, chunk_size, num_kv_head, head_size):
+    config = HixlTestConfig(
+        num_objs=num_objs,
+        kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
+        timeout=120 if num_objs >= 10 else 60,
+        sender_use_host=True,
+        receiver_use_host=False,
+    )
+    run_hixl_test(config)
+
+
+@pytest.mark.skipif(
+    not torch.npu.is_available() or torch.npu.device_count() < 2,
+    reason="Requires at least 2 NPU devices",
+)
+@pytest.mark.parametrize(
+    "num_objs, num_layer, chunk_size, num_kv_head, head_size",
+    [
+        (2, 31, 256, 8, 128),
+        (10, 31, 256, 8, 128),
+    ],
+)
+def test_hixl_write_d2h(num_objs, num_layer, chunk_size, num_kv_head, head_size):
+    config = HixlTestConfig(
+        num_objs=num_objs,
+        kv_shape=(num_layer, 2, chunk_size, num_kv_head, head_size),
+        timeout=120 if num_objs >= 10 else 60,
+        sender_use_host=False,
+        receiver_use_host=True,
+    )
+    run_hixl_test(config)

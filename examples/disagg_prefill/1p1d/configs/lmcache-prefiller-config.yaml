@@ -1,9 +1,14 @@
 local_cpu: False # Enable local CPU RAM cache for fast access
 
 enable_pd: True
-transfer_channel: "hccl"
+transfer_channel: "hcomm_onesided"
 pd_role: "sender"
 pd_proxy_host: "localhost"
 pd_proxy_port: 7500
 pd_buffer_size: 2415919104 #1207959552 # 1.xxGB
 pd_buffer_device: "npu" # Use npu memory for buffering
+
+# For LMCache 0.3.12, we see that for small prompt
+# prefill would not send the unfull chunk to the decoder.
+# setting this to true will ensure the pd transfer occurs even for small prompts.
+save_unfull_chunk: True # Save unfull chunk to disk,

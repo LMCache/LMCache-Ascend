@@ -8,7 +8,7 @@ enable_p2p: True
 p2p_host: "localhost"
 p2p_init_ports: [9964, 9965]
 p2p_lookup_ports: [9966, 9967]
-transfer_channel: "hccl"
+transfer_channel: "hcomm_onesided"
 
 # Controller configurations
 enable_controller: True
