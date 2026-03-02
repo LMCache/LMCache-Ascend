@@ -20,7 +20,12 @@ import torch
 import zmq
 
 # Local
-from .buffer_config import BufferConfig, BufferType, RemotePeerBufferList, resolve_buffer_ref
+from .buffer_config import (
+    BufferConfig,
+    BufferType,
+    RemotePeerBufferList,
+    resolve_buffer_ref,
+)
 
 logger = init_logger(__name__)
 
@@ -162,7 +167,9 @@ class BaseMultiBufferChannel(BaseTransferChannel):
                         msgspec.msgpack.encode(self._make_error_response())
                     )
                 except Exception:
-                    logger.error("Failed to send %s error response: %s", self._channel_name, e)
+                    logger.error(
+                        "Failed to send %s error response: %s", self._channel_name, e
+                    )
                 if self.running:
                     time.sleep(0.01)
 
@@ -202,7 +209,9 @@ class BaseMultiBufferChannel(BaseTransferChannel):
                         msgspec.msgpack.encode(self._make_error_response())
                     )
                 except Exception:
-                    logger.error("Failed to send %s error response: %s", self._channel_name, e)
+                    logger.error(
+                        "Failed to send %s error response: %s", self._channel_name, e
+                    )
                 if self.running:
                     time.sleep(0.01)
 
@@ -272,7 +281,9 @@ class BaseMultiBufferChannel(BaseTransferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
-        raise NotImplementedError("Subclasses must implement async_lazy_init_peer_connection")
+        raise NotImplementedError(
+            "Subclasses must implement async_lazy_init_peer_connection"
+        )
 
     @abstractmethod
     async def async_lazy_init_peer_connection(
@@ -282,4 +293,6 @@ class BaseMultiBufferChannel(BaseTransferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
-        raise NotImplementedError("Subclasses must implement async_lazy_init_peer_connection")
+        raise NotImplementedError(
+            "Subclasses must implement async_lazy_init_peer_connection"
+        )

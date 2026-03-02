@@ -536,13 +536,17 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
 
     def _build_op_descs(self, objects, peer_state, transfer_spec):
         descs = []
-        remote_addrs = self._resolve_transfer_addrs(peer_state.remote_buffers, transfer_spec)
+        remote_addrs = self._resolve_transfer_addrs(
+            peer_state.remote_buffers, transfer_spec
+        )
         for mem_obj, remote_addr in zip(objects, remote_addrs, strict=True):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError("Sending raw bytes is not supported")
             descs.append(
                 hcomm_os.OpDesc(
-                    local_addr=self._get_local_addr(mem_obj.data_ptr, mem_obj.meta.address),
+                    local_addr=self._get_local_addr(
+                        mem_obj.data_ptr, mem_obj.meta.address
+                    ),
                     remote_addr=remote_addr,
                     num_bytes=self.page_size,
                 )

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Dict, List, Optional, Union
+from typing import Dict, Optional, Union
 import asyncio
 import pickle
 import threading
@@ -24,7 +24,12 @@ import zmq
 import lmcache_ascend.hccl_npu_comms as hcomm
 
 # Local
-from .buffer_config import BufferConfig, BufferType, RemotePeerBufferList, resolve_buffer_ref
+from .buffer_config import (
+    BufferConfig,
+    BufferType,
+    RemotePeerBufferList,
+    resolve_buffer_ref,
+)
 from .hccl_agent import HcclAgentWrapper
 
 logger = init_logger(__name__)
@@ -190,7 +195,9 @@ class HcclChannel(BaseTransferChannel):
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(server_mem_handles)
+            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(
+                server_mem_handles
+            )
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None
@@ -256,7 +263,9 @@ class HcclChannel(BaseTransferChannel):
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
 
         with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(server_mem_handles)
+            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(
+                server_mem_handles
+            )
 
         # Send side message if any
         init_ret_msg: Optional[InitSideRetMsgBase] = None

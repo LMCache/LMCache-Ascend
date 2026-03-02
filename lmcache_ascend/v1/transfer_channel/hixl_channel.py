@@ -9,7 +9,7 @@ import time
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.rpc_utils import get_ip, get_zmq_context, get_zmq_socket
+from lmcache.v1.rpc_utils import get_ip, get_zmq_socket
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
@@ -83,6 +83,7 @@ HixlMsg = Union[
 class HixlChannel(BaseMultiBufferChannel):
     _init_msg_type = Union[HixlMsg, SideMsg]
     _channel_name = "hixl"
+
     def __init__(
         self,
         async_mode: bool = False,
@@ -505,11 +506,9 @@ class HixlEngineWrapper:
         )
 
     def get_buffer_ref(self, data_ptr: int, page_index: int) -> tuple:
-        """Find the buffer UUID for a given data pointer and return (uuid, page_index)."""
         return resolve_buffer_ref(self.mem_handles, data_ptr, page_index)
 
     def get_local_addr(self, ptr: int, idx: int) -> int:
-        """Resolve a pointer + page index to a local buffer address."""
         return resolve_local_addr(self.mem_handles, ptr, idx)
 
     def close(self):

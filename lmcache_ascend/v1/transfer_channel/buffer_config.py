@@ -77,7 +77,9 @@ class RemotePeerBufferList:
     def get_handle_by_uuid(self, buffer_uuid: str) -> RemotePeerBufferHandle:
         handle = self._uuid_to_handle.get(buffer_uuid)
         if handle is None:
-            raise ValueError(f"Buffer UUID {buffer_uuid} not found in remote peer buffers")
+            raise ValueError(
+                f"Buffer UUID {buffer_uuid} not found in remote peer buffers"
+            )
         return handle
 
     def resolve_addr(self, buffer_uuid: str, page_index: int) -> int:

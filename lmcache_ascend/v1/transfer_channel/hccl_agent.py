@@ -13,7 +13,12 @@ import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hccl_npu_comms as hcomm
 
 # Local
-from .buffer_config import BufferConfig, BufferType, resolve_buffer_ref, resolve_local_addr
+from .buffer_config import (
+    BufferConfig,
+    BufferType,
+    resolve_buffer_ref,
+    resolve_local_addr,
+)
 
 logger = init_logger(__name__)
 
@@ -127,7 +132,6 @@ class HcclAgentWrapper:
         return meta.local_buffer_addrs[page_index]
 
     def get_buffer_ref(self, data_ptr: int, page_index: int) -> tuple:
-        """Find the buffer UUID for a given data pointer and return (uuid, page_index)."""
         return resolve_buffer_ref(self.mem_handles, data_ptr, page_index)
 
     def get_local_addr(self, ptr: int, idx: int) -> int:

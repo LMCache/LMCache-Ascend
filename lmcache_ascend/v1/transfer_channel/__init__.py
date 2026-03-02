@@ -58,7 +58,9 @@ def _build_buffer_configs(
     else:
         assert isinstance(buffer_ptr, list), "buffer_ptr must be int or list of int"
         assert isinstance(buffer_size, list), "buffer_size must be int or list of int"
-        assert isinstance(align_bytes, list), f"align_bytes must be int or list of int, but got {align_bytes}"
+        assert isinstance(align_bytes, list), (
+            f"align_bytes must be int or list of int, but got {align_bytes}"
+        )
         assert len(buffer_ptr) == len(buffer_size), (
             "buffer_ptr and buffer_size must have the same length"
         )
@@ -76,9 +78,7 @@ def _build_buffer_configs(
         buffer_ptr, buffer_size, buffer_type, align_bytes, strict=True
     ):
         device_type = get_device_buffer_type(b_type)
-        device_id = (
-            -1 if device_type == BufferType.CPU else torch.npu.current_device()
-        )
+        device_id = -1 if device_type == BufferType.CPU else torch.npu.current_device()
         buffer_configs.append(
             BufferConfig(
                 ptr=ptr,
@@ -131,6 +131,7 @@ def CreateTransferChannel(
     )
 
     if channel_type == "hixl":
+        # First Party
         from lmcache_ascend.v1.transfer_channel.hixl_channel import (
             HixlChannel,
         )
@@ -144,6 +145,7 @@ def CreateTransferChannel(
             **kwargs,
         )
     elif channel_type == "hcomm_onesided":
+        # First Party
         from lmcache_ascend.v1.transfer_channel.hcomm_onesided_channel import (
             HcommOneSidedChannel,
         )
@@ -157,6 +159,7 @@ def CreateTransferChannel(
             **kwargs,
         )
     else:
+        # First Party
         from lmcache_ascend.v1.transfer_channel.hccl_channel import (
             HcclChannel,
         )
