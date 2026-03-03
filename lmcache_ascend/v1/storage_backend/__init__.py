@@ -63,7 +63,12 @@ def CreateStorageBackends(
         # First Party
         from lmcache_ascend.v1.storage_backend.pd import AscendPDBackend
 
-        assert not config.use_layerwise, "Layerwise is not supported for PD"
+        if config.use_layerwise:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_pd=true` is not compatible "
+                "with `use_layerwise=true`. PD backend does not support layerwise "
+                "mode (including pull/delay-pull paths). Disable one of them."
+            )
         storage_backends["PDBackend"] = AscendPDBackend(config, metadata)
 
     # TODO(Jiayi): The hierarchy is fixed for now
@@ -87,6 +92,12 @@ def CreateStorageBackends(
             logger.info("No cpu memory is allocated as max_local_cpu_size <= 0")
 
     if config.enable_p2p:
+        if config.use_layerwise:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_p2p=true` is not compatible "
+                "with `use_layerwise=true`. The Ascend P2P backend does not support "
+                "layerwise mode in current implementation. Disable one of them."
+            )
         assert local_cpu_backend is not None
         assert lmcache_worker is not None
         p2p_backend = AscendP2PBackend(

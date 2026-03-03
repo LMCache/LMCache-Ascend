@@ -425,10 +425,6 @@ class AscendPDSenderMixin:
             notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
             self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
 
-    # ──────────────────────────────────────────────────────────
-    # Pull mode
-    # ──────────────────────────────────────────────────────────
-
     def _batched_submit_put_task_pull(
         self,
         keys: Sequence[CacheEngineKey],

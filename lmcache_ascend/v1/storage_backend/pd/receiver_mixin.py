@@ -51,10 +51,6 @@ class AscendPDReceiverMixin:
     ``self.transfer_channel``, ``self.memory_allocator``, ``self.data``).
     """
 
-    # ──────────────────────────────────────────────────────────
-    # Receiver initialisation
-    # ──────────────────────────────────────────────────────────
-
     def _init_receiver(self):
         """Extend receiver init with done-socket URL tracking for pull mode."""
         super()._init_receiver()
@@ -64,10 +60,6 @@ class AscendPDReceiverMixin:
             # PullDoneSignal back to the correct sender.
             self._sender_done_urls: dict[str, str] = {}
             self._pull_done_sockets: dict[str, zmq.Socket] = {}
-
-    # ──────────────────────────────────────────────────────────
-    # Push-mode allocation handler
-    # ──────────────────────────────────────────────────────────
 
     def _allocate_and_put(self, alloc_request: AllocRequest) -> AscendAllocResponse:
         """Allocate memory for incoming chunks and return UUID-based refs.
@@ -144,9 +136,6 @@ class AscendPDReceiverMixin:
             remote_indexes=remote_mem_indexes,
         )
 
-    # ──────────────────────────────────────────────────────────
-    # Pull-mode receiver handlers
-    # ──────────────────────────────────────────────────────────
 
     def _handle_pull_ready(
         self, msg: PullReadyNotif, sender_id: str
@@ -362,9 +351,6 @@ class AscendPDReceiverMixin:
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 
-    # ──────────────────────────────────────────────────────────
-    # Done-signal sender (receiver → sender)
-    # ──────────────────────────────────────────────────────────
 
     def _send_pull_done_to_sender(self, sender_id: str, pull_id: str) -> None:
         """Send a ``PullDoneSignal`` to the sender on its done-listener socket.
@@ -405,9 +391,6 @@ class AscendPDReceiverMixin:
                 e,
             )
 
-    # ──────────────────────────────────────────────────────────
-    # Receiver message loop
-    # ──────────────────────────────────────────────────────────
 
     def _mem_alloc_loop(self):
         """Message loop for the receiver side.
