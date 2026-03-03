@@ -136,7 +136,6 @@ class AscendPDReceiverMixin:
             remote_indexes=remote_mem_indexes,
         )
 
-
     def _handle_pull_ready(
         self, msg: PullReadyNotif, sender_id: str
     ) -> tuple[PullReadyDoneAck, Optional[Callable]]:
@@ -351,7 +350,6 @@ class AscendPDReceiverMixin:
 
         return PullReadyDoneAck(already_sent_indexes=already_sent_indexes), None
 
-
     def _send_pull_done_to_sender(self, sender_id: str, pull_id: str) -> None:
         """Send a ``PullDoneSignal`` to the sender on its done-listener socket.
 
@@ -390,7 +388,6 @@ class AscendPDReceiverMixin:
                 pull_id,
                 e,
             )
-
 
     def _mem_alloc_loop(self):
         """Message loop for the receiver side.
