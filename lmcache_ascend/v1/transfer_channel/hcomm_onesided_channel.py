@@ -75,7 +75,7 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
         # peer_id -> PeerState.
         self._peers: dict[str, _PeerState] = {}
         super().__init__(async_mode=async_mode, buffers=buffers, **kwargs)
-        self.transport_stream = torch.npu.Stream(torch.npu.current_device())
+        self.transport_stream = torch.npu.Stream()
 
     def _register_buffers(self, buffers: list[BufferConfig]) -> None:
         self.mem_handles = []
@@ -448,6 +448,29 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
         while not event.query():
             await asyncio.sleep(0.001)
         return len(buffers)
+
+    def submit_batched_read(
+        self,
+        buffers: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: Optional[dict] = None,
+    ) -> torch.npu.Event:
+        """Submit a batched read without waiting for completion.
+
+        The returned event is recorded on the read stream and can be used
+        by callers for cross-stream synchronization.
+        """
+        assert transfer_spec is not None
+        peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
+
+        op_descs = self._build_op_descs(buffers, peer_state, transfer_spec)
+        hcomm_os.batch_get(
+            peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
+        )
+
+        stream = self._get_torch_stream(transfer_spec)
+        event = torch.npu.Event()
+        event.record(stream)
+        return event
 
     def _destroy_peer_comm(self, peer: "_PeerState", peer_id: str) -> None:
         try:

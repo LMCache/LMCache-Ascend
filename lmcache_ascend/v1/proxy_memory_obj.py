@@ -289,8 +289,18 @@ class ProxyMemoryObj(MemoryObj):
         channel = first._transfer_channel
 
         if not hasattr(channel, "submit_batched_read"):
-            # Channel doesn't support non-blocking submission; fall back
-            ProxyMemoryObj.resolve_batch(proxies)
+            # Channel doesn't support non-blocking submission.
+            # Fall back to synchronous batched_read without requiring
+            # transfer_context._loop.
+            buffers, channel_transfer_spec = ProxyMemoryObj._collect_batch_read_args(
+                unresolved
+            )
+            channel.batched_read(
+                buffers=buffers,
+                transfer_spec=channel_transfer_spec,
+            )
+            for p in unresolved:
+                p._resolved = True
             return None
 
         buffers, channel_transfer_spec = ProxyMemoryObj._collect_batch_read_args(

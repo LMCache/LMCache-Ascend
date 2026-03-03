@@ -499,6 +499,113 @@ class TestAscendPDBackend:
             _, mem_obj = call.args
             assert isinstance(mem_obj, ProxyMemoryObj)
 
+    def test_pull_delay_transfer_context_done_callback_is_idempotent(self):
+        """Delay-pull transfer context sends done signal at most once."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
+            AscendPDReceiverMixin,
+        )
+
+        backend = _make_pd_backend_stub(
+            delay_pull=True,
+            buffer_device="npu",
+            kv_shape=DEFAULT_SHAPE,
+            kv_dtype=torch.bfloat16,
+            chunk_size=256,
+            pull_mode=True,
+            use_cpu_offload=True,
+        )
+        backend.put = MagicMock()
+        backend._send_pull_done_to_sender = MagicMock()
+
+        msg = PullReadyNotif(
+            pull_id="pull_delay_done_once",
+            keys=[_make_key("k1").to_string()],
+            sender_buffer_uuids=["suuid-0"],
+            sender_mem_indexes=[0],
+            sender_id="sender_1",
+            sender_done_url="tcp://sender:9999",
+            fmt=MemoryFormat.KV_2LTD.value,
+            shape=[2, 2, 256, 512],
+            dtype="bfloat16",
+            last_chunk_toks=256,
+        )
+
+        ack, post_ack_fn = AscendPDReceiverMixin._handle_pull_delay(
+            backend, msg, "sender_1"
+        )
+        assert isinstance(ack, PullReadyDoneAck)
+        assert post_ack_fn is None
+        assert backend.put.call_count == 1
+
+        proxy_obj = backend.put.call_args.args[1]
+        assert isinstance(proxy_obj, ProxyMemoryObj)
+
+        transfer_ctx = proxy_obj.transfer_context
+        transfer_ctx.send_done_now()
+        transfer_ctx.send_done_now()
+        backend._send_pull_done_to_sender.assert_called_once_with(
+            "sender_1", "pull_delay_done_once"
+        )
+
+    def test_proxy_submit_resolve_batch_fallback_uses_sync_batched_read(self):
+        """No submit_batched_read: fallback uses synchronous batched_read."""
+        class _NoSubmitChannel:
+            def __init__(self):
+                self.batched_read = MagicMock(return_value=1)
+
+        transfer_channel = _NoSubmitChannel()
+
+        proxy = ProxyMemoryObj(
+            backing_obj=None,
+            transfer_channel=transfer_channel,
+            target_peer_url="sender_1",
+            remote_buffer_uuid="suuid-0",
+            remote_mem_index=0,
+            transfer_context=MagicMock(_loop=None),
+            chunk_index=0,
+            shapes=[DEFAULT_SHAPE],
+            dtypes=[DEFAULT_DTYPE],
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        backing_obj = _make_mock_mem_obj()
+        proxy.set_backing_obj(backing_obj)
+
+        event = ProxyMemoryObj.submit_resolve_batch([proxy])
+
+        assert event is None
+        assert proxy.resolved is True
+        transfer_channel.batched_read.assert_called_once()
+
+    def test_proxy_submit_resolve_batch_uses_submit_when_supported(self):
+        """submit_batched_read path returns event and marks proxies resolved."""
+        transfer_channel = MagicMock()
+        expected_event = MagicMock()
+        transfer_channel.submit_batched_read = MagicMock(return_value=expected_event)
+        transfer_channel.batched_read = MagicMock()
+
+        proxy = ProxyMemoryObj(
+            backing_obj=None,
+            transfer_channel=transfer_channel,
+            target_peer_url="sender_1",
+            remote_buffer_uuid="suuid-0",
+            remote_mem_index=0,
+            transfer_context=MagicMock(_loop=None),
+            chunk_index=0,
+            shapes=[DEFAULT_SHAPE],
+            dtypes=[DEFAULT_DTYPE],
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        backing_obj = _make_mock_mem_obj()
+        proxy.set_backing_obj(backing_obj)
+
+        event = ProxyMemoryObj.submit_resolve_batch([proxy])
+
+        assert event is expected_event
+        assert proxy.resolved is True
+        transfer_channel.submit_batched_read.assert_called_once()
+        transfer_channel.batched_read.assert_not_called()
+
     def test_circuit_breaker_skips_backed_off_peer(self):
         """When peer is backed off, put task is skipped."""
         # First Party
