@@ -550,6 +550,7 @@ class TestAscendPDBackend:
 
     def test_proxy_submit_resolve_batch_fallback_uses_sync_batched_read(self):
         """No submit_batched_read: fallback uses synchronous batched_read."""
+
         class _NoSubmitChannel:
             def __init__(self):
                 self.batched_read = MagicMock(return_value=1)
