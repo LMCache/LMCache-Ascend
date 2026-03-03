@@ -10,11 +10,17 @@ import numpy as np
 import pytest
 import torch
 
+# First Party
+from lmcache_ascend.v1.blend.positional_encoding import (
+    BasicReverseRope,
+    FusedRope,
+    get_rope_compat,
+)
+
 VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
 if VLLM_INSTALLED:
     # Third Party
-    from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
 
     # First Party
     from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
@@ -28,13 +34,6 @@ else:
         set_current_vllm_config = None
         CompilationConfig = None
         VllmConfig = None
-
-# First Party
-from lmcache_ascend.v1.blend.positional_encoding import (
-    BasicReverseRope,
-    FusedRope,
-    get_rope_compat,
-)
 
 
 # ==============================================================================
