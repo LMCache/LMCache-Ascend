@@ -24,6 +24,11 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
+from lmcache_ascend.v1.transfer_channel.transfer_spec import (
+    TS_RECEIVER_ID,
+    TS_REMOTE_BUFFER_UUIDS,
+    TS_REMOTE_MEM_INDEXES,
+)
 
 logger = init_logger(__name__)
 
@@ -171,9 +176,9 @@ class ProxyMemoryObj(MemoryObj):
         )
 
         channel_transfer_spec = {
-            "receiver_id": self._target_peer_url,
-            "remote_buffer_uuids": [self._remote_buffer_uuid],
-            "remote_mem_indexes": [self._remote_mem_index],
+            TS_RECEIVER_ID: self._target_peer_url,
+            TS_REMOTE_BUFFER_UUIDS: [self._remote_buffer_uuid],
+            TS_REMOTE_MEM_INDEXES: [self._remote_mem_index],
         }
 
         future = asyncio.run_coroutine_threadsafe(
@@ -212,9 +217,9 @@ class ProxyMemoryObj(MemoryObj):
             remote_mem_indexes.append(p._remote_mem_index)
 
         channel_transfer_spec = {
-            "receiver_id": unresolved[0]._target_peer_url,
-            "remote_buffer_uuids": remote_buffer_uuids,
-            "remote_mem_indexes": remote_mem_indexes,
+            TS_RECEIVER_ID: unresolved[0]._target_peer_url,
+            TS_REMOTE_BUFFER_UUIDS: remote_buffer_uuids,
+            TS_REMOTE_MEM_INDEXES: remote_mem_indexes,
         }
         return buffers, channel_transfer_spec
 

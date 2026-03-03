@@ -31,6 +31,11 @@ from .buffer_config import (
     resolve_buffer_ref,
 )
 from .hccl_agent import HcclAgentWrapper
+from .transfer_spec import (
+    TS_RECEIVER_ID,
+    TS_REMOTE_BUFFER_UUIDS,
+    TS_REMOTE_MEM_INDEXES,
+)
 
 logger = init_logger(__name__)
 
@@ -568,17 +573,17 @@ class HcclChannel(BaseTransferChannel):
             List of resolved remote memory addresses for RDMA operations.
         """
         if (
-            "remote_buffer_uuids" in transfer_spec
-            and "remote_mem_indexes" in transfer_spec
+            TS_REMOTE_BUFFER_UUIDS in transfer_spec
+            and TS_REMOTE_MEM_INDEXES in transfer_spec
         ):
-            peer_id = transfer_spec["receiver_id"]
+            peer_id = transfer_spec[TS_RECEIVER_ID]
             with self._state_lock:
                 remote_mem_handles = self.remote_index_addr_dict[peer_id]
             return [
                 remote_mem_handles.resolve_addr(buf_uuid, page_idx)
                 for buf_uuid, page_idx in zip(
-                    transfer_spec["remote_buffer_uuids"],
-                    transfer_spec["remote_mem_indexes"],
+                    transfer_spec[TS_REMOTE_BUFFER_UUIDS],
+                    transfer_spec[TS_REMOTE_MEM_INDEXES],
                     strict=True,
                 )
             ]
@@ -598,7 +603,7 @@ class HcclChannel(BaseTransferChannel):
         Returns (conn_handle, write_ops) for use by write methods.
         """
         with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
+            conn_handle = self.conn_handles_dict[transfer_spec[TS_RECEIVER_ID]]
 
         remote_addrs = self._resolve_remote_addrs(transfer_spec)
 
@@ -698,7 +703,7 @@ class HcclChannel(BaseTransferChannel):
         """
         conn_handle = None
         with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec["receiver_id"]]
+            conn_handle = self.conn_handles_dict[transfer_spec[TS_RECEIVER_ID]]
 
         remote_addrs = self._resolve_remote_addrs(transfer_spec)
 

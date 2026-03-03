@@ -15,6 +15,13 @@ from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 import torch
 
+# First Party
+from lmcache_ascend.v1.transfer_channel.transfer_spec import (
+    TS_RECEIVER_ID,
+    TS_REMOTE_BUFFER_UUIDS,
+    TS_REMOTE_MEM_INDEXES,
+)
+
 logger = init_logger(__name__)
 
 
@@ -28,11 +35,11 @@ def build_channel_transfer_spec(
     remote_buffer_uuids: list[str],
     remote_mem_indexes: list[int],
 ) -> dict[str, Any]:
-    """Build a transfer-spec dict consumed by the HCCL transfer channel."""
+    """Build a transfer-spec dict consumed by the transfer channel."""
     return {
-        "receiver_id": receiver_id,
-        "remote_buffer_uuids": remote_buffer_uuids,
-        "remote_mem_indexes": remote_mem_indexes,
+        TS_RECEIVER_ID: receiver_id,
+        TS_REMOTE_BUFFER_UUIDS: remote_buffer_uuids,
+        TS_REMOTE_MEM_INDEXES: remote_mem_indexes,
     }
 
 

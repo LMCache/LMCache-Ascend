@@ -138,10 +138,6 @@ class AscendPDSenderMixin:
                 self._pull_pending_hwm,
             )
 
-    # ──────────────────────────────────────────────────────────
-    # Pull-done listener (daemon thread)
-    # ──────────────────────────────────────────────────────────
-
     def _pull_done_listener_loop(self):
         """Listen for PullDoneSignal from receivers and release pinned
         resources.  Also sweeps expired entries on every poll cycle."""
@@ -258,10 +254,6 @@ class AscendPDSenderMixin:
             pull_id,
         )
 
-    # ──────────────────────────────────────────────────────────
-    # Peer connection & remote allocation
-    # ──────────────────────────────────────────────────────────
-
     def _ensure_peer_connection(
         self,
         receiver_id: str,
@@ -291,10 +283,6 @@ class AscendPDSenderMixin:
         )
         return alloc_response
 
-    # ──────────────────────────────────────────────────────────
-    # Main put-task entry point
-    # ──────────────────────────────────────────────────────────
-
     def batched_submit_put_task(
         self,
         keys: Sequence[CacheEngineKey],
@@ -303,7 +291,7 @@ class AscendPDSenderMixin:
     ) -> None:
         """Send KV chunks to the remote decoder.
 
-        In **push mode** (default): HCCL-writes data into pre-allocated
+        In **push mode** (default): writes data into pre-allocated
         remote NPU memory.
 
         In **pull mode** (``pd_pull_mode=True``): advertises the sender's
@@ -350,10 +338,6 @@ class AscendPDSenderMixin:
             self._batched_submit_put_task_pull(keys, memory_objs, transfer_spec)
         else:
             self._batched_submit_put_task_push(keys, memory_objs, transfer_spec)
-
-    # ──────────────────────────────────────────────────────────
-    # Push mode
-    # ──────────────────────────────────────────────────────────
 
     def _batched_submit_put_task_push(
         self,

@@ -47,11 +47,11 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
       offload KV caches to CPU first (pd_use_cpu_offload) and
       transfer via RDMA from host memory,
       while the receiver allocates directly on NPU (pd_buffer_device),
-    * create an HCCL transfer channel via
+    * create a transfer channel via
       :func:`lmcache_ascend.v1.transfer_channel.CreateTransferChannel`
       with both CPU and NPU buffers registered (multi-buffer pattern),
     * use UUID-based buffer references in alloc responses and transfer specs
-      (required by the HCCL channel's ``_resolve_remote_addrs``).
+      (required by the channel's ``_resolve_remote_addrs``).
     """
 
     def __init__(
@@ -172,15 +172,11 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         self._kv_shapes = [torch.Size(metadata.kv_shape)]
         self._kv_dtypes = [metadata.kv_dtype]
 
-    # ──────────────────────────────────────────────────────────
-    # Allocator setup
-    # ──────────────────────────────────────────────────────────
-
     def initialize_allocator(
         self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         npu_corrected_device = get_correct_device("npu", metadata.worker_id)
-        logger.info("Setting NPU device to %s", npu_corrected_device)
+        logger.debug("Setting NPU device to %s", npu_corrected_device)
         torch.npu.set_device(npu_corrected_device)
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
@@ -224,10 +220,6 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
 
         return paged_mem_allocator
 
-    # ──────────────────────────────────────────────────────────
-    # Memory allocation
-    # ──────────────────────────────────────────────────────────
-
     def allocate(
         self,
         shapes: Union[torch.Size, list[torch.Size]],
@@ -247,6 +239,8 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
           KV data lands directly on the accelerator.
         """
         if fmt is None:
+            # NOTE (gingfung): this currently can happen
+            # because we don't have a default fmt in the config
             fmt = MemoryFormat.KV_2LTD
         # Sender + cpu_offload: offload to CPU first  ->  RDMA from CPU
         # Otherwise (receiver, or sender without offload): allocate on NPU

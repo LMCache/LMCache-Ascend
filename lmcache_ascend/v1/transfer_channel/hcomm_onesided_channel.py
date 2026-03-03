@@ -46,6 +46,7 @@ from .hcomm_onesided_runtime import (
     _get_local_device_info,
     _init_comm_and_prepare,
 )
+from .transfer_spec import TS_STREAM, resolve_peer_id
 
 logger = init_logger(__name__)
 
@@ -462,14 +463,14 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
 
     def _resolve_transfer(self, transfer_spec: dict):
         """Return (peer_state, stream_ptr) from transfer_spec."""
-        peer_id = transfer_spec.get("receiver_id") or transfer_spec["sender_id"]
+        peer_id = resolve_peer_id(transfer_spec)
         with self._state_lock:
             peer_state = self._peers[peer_id]
         stream_ptr = self._get_stream_ptr(transfer_spec)
         return peer_state, stream_ptr
 
     def _get_stream_ptr(self, transfer_spec: dict) -> int:
-        stream = transfer_spec.get("stream", None)
+        stream = transfer_spec.get(TS_STREAM, None)
         if stream is not None:
             if isinstance(stream, int):
                 return stream
@@ -477,7 +478,7 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
         return self.transport_stream.npu_stream
 
     def _get_torch_stream(self, transfer_spec: dict) -> torch.npu.Stream:
-        stream = transfer_spec.get("stream", None)
+        stream = transfer_spec.get(TS_STREAM, None)
         if stream is not None and isinstance(stream, torch.npu.Stream):
             return stream
         return self.transport_stream

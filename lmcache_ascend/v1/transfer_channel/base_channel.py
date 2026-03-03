@@ -26,6 +26,11 @@ from .buffer_config import (
     RemotePeerBufferList,
     resolve_buffer_ref,
 )
+from .transfer_spec import (
+    TS_REMOTE_BUFFER_UUIDS,
+    TS_REMOTE_INDEXES,
+    TS_REMOTE_MEM_INDEXES,
+)
 
 logger = init_logger(__name__)
 
@@ -221,23 +226,23 @@ class BaseMultiBufferChannel(BaseTransferChannel):
         self, remote_buffers: RemotePeerBufferList, transfer_spec: dict
     ) -> list[int]:
         if (
-            "remote_buffer_uuids" in transfer_spec
-            and "remote_mem_indexes" in transfer_spec
+            TS_REMOTE_BUFFER_UUIDS in transfer_spec
+            and TS_REMOTE_MEM_INDEXES in transfer_spec
         ):
             return [
                 remote_buffers.resolve_addr(buf_uuid, page_idx)
                 for buf_uuid, page_idx in zip(
-                    transfer_spec["remote_buffer_uuids"],
-                    transfer_spec["remote_mem_indexes"],
+                    transfer_spec[TS_REMOTE_BUFFER_UUIDS],
+                    transfer_spec[TS_REMOTE_MEM_INDEXES],
                     strict=True,
                 )
             ]
 
-        if "remote_indexes" in transfer_spec:
+        if TS_REMOTE_INDEXES in transfer_spec:
             first_handle = remote_buffers.handles[0]
             return [
                 first_handle.buffer_ptr + remote_index * first_handle.page_size
-                for remote_index in transfer_spec["remote_indexes"]
+                for remote_index in transfer_spec[TS_REMOTE_INDEXES]
             ]
 
         raise ValueError(

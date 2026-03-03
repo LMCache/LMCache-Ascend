@@ -40,6 +40,7 @@ from .hixl_protocol import (
     HixlReadyRequest,
     HixlReadyResponse,
 )
+from .transfer_spec import resolve_peer_id
 
 logger = init_logger(__name__)
 
@@ -304,7 +305,7 @@ class HixlChannel(BaseMultiBufferChannel):
         items: Union[list[bytes], list[MemoryObj]],
         transfer_spec: dict,
     ) -> tuple[str, list]:
-        peer_id = transfer_spec.get("receiver_id") or transfer_spec["sender_id"]
+        peer_id = resolve_peer_id(transfer_spec)
         with self._state_lock:
             remote_engine = self.remote_engine_dict[peer_id]
 
