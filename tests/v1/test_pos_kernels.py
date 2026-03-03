@@ -2,8 +2,8 @@
 
 # Standard
 from typing import Callable, List
-import importlib.util
 from unittest.mock import MagicMock
+import importlib.util
 
 # Third Party
 import numpy as np
