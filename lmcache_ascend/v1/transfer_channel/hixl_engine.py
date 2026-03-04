@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Dict, List
-import socket
 
 # Third Party
 from lmcache.logging import init_logger
@@ -9,6 +8,7 @@ from lmcache.v1.rpc_utils import get_ip
 import torch
 
 # First Party
+from lmcache_ascend.v1.rpc_utils import _find_free_port
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hixl_npu_comms as hixl_comms
 
@@ -114,12 +114,6 @@ class HixlEngineWrapper:
 
 def _build_addr_list(buffer_ptr: int, buffer_size: int, page_size: int) -> list[int]:
     return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
-
-
-def _find_free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
 
 
 def _is_device_memory(ptr: int) -> bool:

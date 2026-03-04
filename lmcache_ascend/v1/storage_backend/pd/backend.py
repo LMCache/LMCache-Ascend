@@ -30,6 +30,7 @@ import zmq
 
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
+from lmcache_ascend.v1.rpc_utils import _find_free_port
 from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import AscendPDReceiverMixin
 from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
 from lmcache_ascend.v1.storage_backend.utils import resolve_memory_format
@@ -118,6 +119,11 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             self.local_id = self.pd_config.peer_host + str(
                 self.pd_config.peer_init_port
             )
+        else:
+            port = _find_free_port()
+            # generate a random port and obtain ip
+            peer_init_url = f"{self.pd_config.peer_host}:{port}"
+            self.local_id = self.pd_config.peer_host + str(port)
 
         # Register both CPU and NPU buffers with the transfer channel
         # so that RDMA can operate on either memory region.
@@ -251,10 +257,6 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         return self.memory_allocator.allocate(
             shapes, dtypes, fmt=fmt, allocator_type=alloc_type
         )
-
-    # ──────────────────────────────────────────────────────────
-    # Key lookup / partitioning
-    # ──────────────────────────────────────────────────────────
 
     def _lookup(self, key: CacheEngineKey, pin: bool = False) -> Optional[MemoryObj]:
         """Look up *key*, optionally pin it, and return the :class:`MemoryObj`.
