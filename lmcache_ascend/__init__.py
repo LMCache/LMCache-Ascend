@@ -10,7 +10,7 @@ LMCACHE_ASCEND_PATCHED = False
 
 def _patch_config():
     # Third Party
-    from lmcache.v1.config_base import _to_bool, create_config_class
+    from lmcache.v1.config_base import _to_bool, _to_int_list, create_config_class
     import lmcache.v1.config
 
     # Add new config item for p2p npu usage
@@ -26,6 +26,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["p2p_npu_buffer_size"] = {
         "type": int,
         "default": 1 * 1024 * 1024 * 1024,
+        "env_converter": int,
         "description": "The total buffer size in bytes for P2P transfers. "
         "This config is only used when p2p_use_npu is set to True.",
     }
@@ -56,6 +57,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["p2p_pull_pending_ttl"] = {
         "type": float,
         "default": 360.0,
+        "env_converter": float,
         "description": "TTL in seconds for pull-pending entries on the sender side. "
         "If a receiver crashes and never sends PullDoneSignal, "
         "pinned MemObjs are released after this timeout. "
@@ -93,6 +95,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_done_port"] = {
         "type": list,
         "default": None,
+        "env_converter": _to_int_list,
         "description": "List of ports (one per TP rank) on which the sender "
         "binds a ZMQ PULL socket to receive Done signals from the receiver "
         "in PD pull mode.  If not set, the port is derived as "
@@ -115,6 +118,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_cpu_buffer_size"] = {
         "type": int,
         "default": None,
+        "env_converter": int,
         "description": "The total buffer size in bytes for PD CPU offload. "
         "This config is used when the role is `sender`, "
         "because the kvcaches can be offloaded to cpu first, "
@@ -126,6 +130,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_alloc_fail_backoff_ttl"] = {
         "type": float,
         "default": 2.0,
+        "env_converter": float,
         "description": "The timeout in seconds for the allocation failure backoff. "
         "This config is used to avoid infinite loop for memory allocation.",
     }
@@ -134,6 +139,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_pending_ttl"] = {
         "type": float,
         "default": 360.0,
+        "env_converter": float,
         "description": "TTL in seconds for pull-pending entries on the sender side. "
         "If a receiver crashes and never sends PullDoneSignal, "
         "pinned MemObjs are released after this timeout. "
@@ -144,6 +150,7 @@ def _patch_config():
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_backpressure_reserve_pct"] = {
         "type": float,
         "default": 2.0,
+        "env_converter": float,
         "description": "Percentage of the sender buffer pool to reserve as free "
         "headroom in pull mode. New put tasks block when pinned pages "
         "exceed (1 - reserve_pct/100) * total_pages. "
