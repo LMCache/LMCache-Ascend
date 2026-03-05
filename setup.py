@@ -145,38 +145,43 @@ def _get_npu_soc():
             else _soc_version
         )
 
-    try:
-        npu_smi_cmd = ["npu-smi", "info", "-t", "board", "-i", "0", "-c", "0"]
-        full_output = subprocess.check_output(npu_smi_cmd, text=True)
-
-        npu_info = {}
-        for line in full_output.strip().splitlines():
-            if ":" in line:
-                key, value = line.split(":", 1)
-                npu_info[key.strip()] = value.strip()
-
-        chip_name = npu_info.get("Chip Name", None)
-        npu_name = npu_info.get("NPU Name", None)
-
-        if not chip_name:
-            raise RuntimeError("Could not find 'Chip Name' in npu-smi output.")
-
-        if npu_name:
-            # New Format for npu-smi info on 910C machines: "Ascend910_9392"
-            _soc_version = f"{chip_name}_{npu_name}"
-        else:
-            # Old Format for npu-smi info on 910B machines: "Ascend910B4"
-            if chip_name.startswith("Ascend"):
-                _soc_version = chip_name
-            else:
-                _soc_version = "Ascend" + chip_name
-
-        return _soc_version
-
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        raise RuntimeError(
-            f"Failed to execute npu-smi command and retrieve SoC version: {e}"
-        ) from e
+    # Iterate through common NPU IDs (0-7) to find an available one.
+    for npu_id in [0, 1, 2, 3, 4, 5, 6, 7]:
+        try:
+            npu_smi_cmd = [
+                "npu-smi",
+                "info",
+                "-t",
+                "board",
+                "-i",
+                str(npu_id),
+                "-c",
+                "0",
+            ]
+            full_output = subprocess.check_output(npu_smi_cmd, text=True)
+            npu_info = {}
+            for line in full_output.strip().splitlines():
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    npu_info[key.strip()] = value.strip()
+            chip_name = npu_info.get("Chip Name", None)
+            if chip_name:
+                npu_name = npu_info.get("NPU Name", None)
+                if npu_name:
+                    _soc_version = f"{chip_name}_{npu_name}"
+                else:
+                    if chip_name.startswith("Ascend"):
+                        _soc_version = chip_name
+                    else:
+                        _soc_version = "Ascend" + chip_name
+                return _soc_version
+        except subprocess.CalledProcessError:
+            continue
+        except FileNotFoundError as e:
+            raise RuntimeError(
+                f"Failed to execute npu-smi command and retrieve SoC version: {e}"
+            ) from e
+    raise RuntimeError("No available NPU found, please check npu-smi info")
 
 
 def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
