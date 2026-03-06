@@ -77,9 +77,8 @@ cd /workspace
 git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 ```
 
-### Docker
+### Docker(for vLLM)
 
-#### For vLLM Platform:
 Build the image using the provided Dockerfile:
 ```bash
 cd /workspace/LMCache-Ascend
@@ -116,7 +115,7 @@ For further info about deployment notes, please refer to the [guide about deploy
 ### Manual Installation
 Assuming your working directory is ```/workspace``` and base environment(vllm/vllm-ascend or sglang) have already been installed.
 
-1.Prepare Base Environment
+1. Prepare Base Environment
 
 If you are using SGLang, it is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
 
