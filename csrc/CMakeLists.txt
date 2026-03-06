@@ -5,10 +5,20 @@ find_package(Python3 COMPONENTS Interpreter Development REQUIRED)
 set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11")
 find_package(pybind11 REQUIRED)
 
-option(BUILD_HCCL "Build HCCL module" ON)
+option(USE_HIXL "Build HIXL transfer channel instead of HCCL (for CANN >= 8.5)" OFF)
+option(USE_HCOMM_ONESIDED "Build hcomm one-sided transfer channel (stream-aware)" OFF)
 
-if(BUILD_HCCL)
-    add_subdirectory(hccl)
+if(USE_HIXL)
+  message(STATUS "USE_HIXL=ON: building hixl_npu_comms (skipping hccl)")
+  add_subdirectory(hixl)
+else()
+  message(STATUS "USE_HIXL=OFF: building hccl_npu_comms (skipping hixl)")
+  add_subdirectory(hccl)
+endif()
+
+if(USE_HCOMM_ONESIDED)
+  message(STATUS "USE_HCOMM_ONESIDED=ON: building hcomm_onesided module")
+  add_subdirectory(hcomm_onesided)
 endif()
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")

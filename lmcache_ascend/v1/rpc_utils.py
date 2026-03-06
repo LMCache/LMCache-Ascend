@@ -3,6 +3,7 @@
 from typing import TYPE_CHECKING, Literal, Optional
 import hashlib
 import os
+import socket
 
 # Third Party
 from lmcache.logging import init_logger
@@ -68,3 +69,9 @@ def get_zmq_rpc_path_lmcache(
     )
 
     return socket_path
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
