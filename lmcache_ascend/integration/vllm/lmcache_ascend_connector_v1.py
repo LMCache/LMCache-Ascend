@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Third Party
+# First Party
+from lmcache_ascend import _build_info
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.logger import init_logger
-
-# First Party
-from lmcache_ascend import _build_info
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party
@@ -18,7 +17,8 @@ else:
     raise ValueError("Unsupported Framework")
 
 # Third Party
-from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
+from lmcache.integration.vllm.lmcache_connector_v1 import \
+    LMCacheConnectorV1Dynamic
 
 logger = init_logger(__name__)
 

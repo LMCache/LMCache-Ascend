@@ -1,37 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Dict, Optional, Union
 import asyncio
 import pickle
 import threading
 import time
+from typing import Dict, Optional, Union
 
+# First Party
+import lmcache_ascend.hccl_npu_comms as hcomm
+import msgspec
+import torch
+import zmq
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import (
-    InitSideMsgBase,
-    InitSideRetMsgBase,
-    SideMsg,
-)
-import msgspec
-import torch
-import zmq
-
-# First Party
-import lmcache_ascend.hccl_npu_comms as hcomm
+from lmcache.v1.transfer_channel.transfer_utils import (InitSideMsgBase,
+                                                        InitSideRetMsgBase,
+                                                        SideMsg)
 
 # Local
-from .buffer_config import (
-    BufferConfig,
-    BufferType,
-    RemotePeerBufferList,
-    resolve_buffer_ref,
-)
+from .buffer_config import (BufferConfig, BufferType, RemotePeerBufferList,
+                            resolve_buffer_ref)
 from .hccl_agent import HcclAgentWrapper
-from .transfer_spec import TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_MEM_INDEXES
+from .transfer_spec import (TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS,
+                            TS_REMOTE_MEM_INDEXES)
 
 logger = init_logger(__name__)
 

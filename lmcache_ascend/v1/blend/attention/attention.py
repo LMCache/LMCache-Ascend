@@ -2,18 +2,17 @@
 # Standard
 from typing import Optional
 
+import torch
 # Third Party
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
 from torch import nn
 from torch_npu import npu_fused_infer_attention_score
-from transformers.integrations.npu_flash_attention import (
-    npu_flash_attn_varlen_func as flash_attn_varlen_func,
-)
+from transformers.integrations.npu_flash_attention import \
+    npu_flash_attn_varlen_func as flash_attn_varlen_func
 from vllm.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-import torch
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:

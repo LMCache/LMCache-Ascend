@@ -32,8 +32,8 @@ def setup_npu_backend():
 
         if _build_info.__framework_name__ == "pytorch":
             # Third Party
-            from torch_npu.contrib import transfer_to_npu  # noqa: F401
             import torch
+            from torch_npu.contrib import transfer_to_npu  # noqa: F401
 
             # Sanity check
             _ = torch.randn((10), device="npu")

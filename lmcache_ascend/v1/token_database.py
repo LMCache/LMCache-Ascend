@@ -2,10 +2,10 @@
 # Standard
 from typing import Iterable, List, Optional, Tuple, Union
 
+import torch
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-import torch
 
 logger = init_logger(__name__)
 

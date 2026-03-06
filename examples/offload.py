@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from dataclasses import asdict
 import argparse
 import contextlib
 import os
 import time
+from dataclasses import asdict
 
 # Third Party
 from vllm import LLM, SamplingParams

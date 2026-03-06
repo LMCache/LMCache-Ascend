@@ -11,11 +11,9 @@ always uses the default initialization path(NZ).
 from pathlib import Path
 
 # First Party
-from lmcache_ascend.integration.patch.base_patcher import (
-    BasePatcher,
-    VersionRange,
-    logger,
-)
+from lmcache_ascend.integration.patch.base_patcher import (BasePatcher,
+                                                           VersionRange,
+                                                           logger)
 
 
 class VllmAscend0100rc1Patcher(BasePatcher):

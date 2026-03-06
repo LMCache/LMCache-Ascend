@@ -1,21 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
+import importlib.util
 from typing import Callable, List
 from unittest.mock import MagicMock
-import importlib.util
 
 # Third Party
 import numpy as np
 import pytest
 import torch
-
 # First Party
-from lmcache_ascend.v1.blend.positional_encoding import (
-    BasicReverseRope,
-    FusedRope,
-    get_rope_compat,
-)
+from lmcache_ascend.v1.blend.positional_encoding import (BasicReverseRope,
+                                                         FusedRope,
+                                                         get_rope_compat)
 
 VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
@@ -23,12 +20,14 @@ if VLLM_INSTALLED:
     # Third Party
 
     # First Party
-    from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
+    from lmcache_ascend.v1.blend.positional_encoding import (BasicReverseRope,
+                                                             FusedRope)
 else:
     # Attempt to import vLLM configuration utilities
     try:
         # Third Party
-        from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+        from vllm.config import (CompilationConfig, VllmConfig,
+                                 set_current_vllm_config)
     except ImportError:
         # Fallback for older versions or different paths
         set_current_vllm_config = None

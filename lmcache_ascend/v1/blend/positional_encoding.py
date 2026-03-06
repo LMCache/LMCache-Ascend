@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import inspect
 from typing import Any, Callable, Dict, Optional
 from unittest.mock import MagicMock
-import inspect
 
+import lmcache.c_ops as lmc_ops
+import torch
 # Third Party
 from lmcache.logging import init_logger
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
-import lmcache.c_ops as lmc_ops
-import torch
+from vllm.model_executor.layers.rotary_embedding import \
+    get_rope as vllm_get_rope
 
 logger = init_logger(__name__)
 

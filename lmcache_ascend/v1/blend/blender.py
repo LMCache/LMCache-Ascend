@@ -2,12 +2,12 @@
 # Standard
 from typing import Optional, Union
 
+import torch
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
+from lmcache.v1.compute.blend.metadata import (LMCBlendCommonMetadata,
+                                               LMCBlendMetadata)
 from lmcache.v1.config import LMCacheEngineConfig
-import torch
-
 # First Party
 from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
 

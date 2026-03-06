@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared buffer configuration types used by all transfer channels."""
 
+import uuid as _uuid
 # Standard
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Iterable, List, Optional
-import uuid as _uuid
 
 # Third Party
 import msgspec

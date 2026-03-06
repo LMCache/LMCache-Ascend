@@ -6,21 +6,17 @@ Extracts common patterns used by both ``pd_backend.py`` and
 ``p2p_backend.py`` to reduce code duplication.
 """
 
+import time
 # Standard
 from typing import Any, Callable, List, Optional
-import time
 
+import torch
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
-import torch
-
 # First Party
 from lmcache_ascend.v1.transfer_channel.transfer_spec import (
-    TS_RECEIVER_ID,
-    TS_REMOTE_BUFFER_UUIDS,
-    TS_REMOTE_MEM_INDEXES,
-)
+    TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_MEM_INDEXES)
 
 logger = init_logger(__name__)
 

@@ -3,9 +3,9 @@
 import re
 import subprocess
 
+import torch
 # Third Party
 from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper
-import torch
 
 
 class AscendIPCWrapper(CudaIPCWrapper):

@@ -2,10 +2,10 @@
 # Standard
 from collections import defaultdict
 
+import torch
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
-import torch
 
 logger = init_logger(__name__)
 

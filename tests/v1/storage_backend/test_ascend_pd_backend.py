@@ -6,34 +6,32 @@ Unit tests use mocks (no NPU required).  Integration tests require NPU
 hardware and are gated behind ``@pytest.mark.skipif``.
 """
 
+import threading
+import time
 # Standard
 from typing import Tuple
 from unittest.mock import MagicMock, patch
-import threading
-import time
 
 # First Party
 from tests.bootstrap import prepare_environment
 
 prepare_environment()
 
+import msgspec
+import torch
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
+from lmcache.v1.memory_management import (MemoryFormat, MemoryObj,
+                                          MemoryObjMetadata)
 from lmcache.v1.storage_backend.pd_backend import AllocRequest
-import msgspec
-import torch
-
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
-from lmcache_ascend.v1.storage_backend.pd.messages import (
-    AscendAllocResponse,
-    AscendPDMsg,
-    PullDoneSignal,
-    PullReadyDoneAck,
-    PullReadyNotif,
-)
+from lmcache_ascend.v1.storage_backend.pd.messages import (AscendAllocResponse,
+                                                           AscendPDMsg,
+                                                           PullDoneSignal,
+                                                           PullReadyDoneAck,
+                                                           PullReadyNotif)
 
 logger = init_logger(__name__)
 
@@ -178,7 +176,8 @@ class TestAscendPDBackend:
     def test_allocate_receiver_uses_gpu(self):
         """Receiver allocates on GPU (NPU)."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub(
             role="receiver",
@@ -207,7 +206,8 @@ class TestAscendPDBackend:
     def test_allocate_sender_with_offload_uses_cpu(self):
         """Sender with cpu_offload allocates on CPU."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub(
             role="sender",
@@ -235,7 +235,8 @@ class TestAscendPDBackend:
     def test_contains_evicts_consumed_proxy(self):
         """Consumed ProxyMemoryObj is evicted from data on contains()."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub()
         key = _make_key("consumed_key")
@@ -249,7 +250,8 @@ class TestAscendPDBackend:
     def test_contains_normal_obj_returns_true(self):
         """Regular MemoryObj is found by contains()."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub()
         key = _make_key("normal_key")
@@ -261,7 +263,8 @@ class TestAscendPDBackend:
     def test_contains_missing_key(self):
         """Missing key returns False."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub()
         key = _make_key("missing")
@@ -272,7 +275,8 @@ class TestAscendPDBackend:
     def test_contains_pin_calls_ref_count_up(self):
         """Pinning a key calls ref_count_up on the object."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub()
         key = _make_key("pin_key")
@@ -287,7 +291,8 @@ class TestAscendPDBackend:
     def test_partition_keys(self):
         """Keys are partitioned into already-sent and new indexes."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.backend import \
+            AscendPDBackend
 
         backend = _make_pd_backend_stub()
         key0 = _make_key("k0")
@@ -312,9 +317,8 @@ class TestAscendPDBackend:
     def test_push_mode_allocate_and_put(self):
         """Push-mode allocate_and_put returns UUID-based refs."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub()
         mock_obj = _make_mock_mem_obj()
@@ -345,9 +349,8 @@ class TestAscendPDBackend:
     def test_push_mode_alloc_failure(self):
         """Push-mode allocation failure returns alloc_failed=True."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub()
         backend.allocate = MagicMock(return_value=None)
@@ -374,9 +377,8 @@ class TestAscendPDBackend:
     def test_pull_eager_flow(self):
         """Pull-eager: allocates, reads from sender, returns ack + callback."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub()
         mock_obj = _make_mock_mem_obj()
@@ -422,9 +424,8 @@ class TestAscendPDBackend:
     def test_pull_eager_alloc_failure(self):
         """Pull-eager with alloc failure returns alloc_failed=True."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub()
         backend.allocate = MagicMock(return_value=None)
@@ -457,9 +458,8 @@ class TestAscendPDBackend:
     def test_pull_delay_flow(self):
         """Pull-delay creates ProxyMemoryObj instances in data store."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub(
             delay_pull=True,
@@ -502,9 +502,8 @@ class TestAscendPDBackend:
     def test_pull_delay_transfer_context_done_callback_is_idempotent(self):
         """Delay-pull transfer context sends done signal at most once."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub(
             delay_pull=True,
@@ -610,9 +609,8 @@ class TestAscendPDBackend:
     def test_circuit_breaker_skips_backed_off_peer(self):
         """When peer is backed off, put task is skipped."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import (
-            AscendPDSenderMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
+            AscendPDSenderMixin
 
         backend = _make_pd_backend_stub(role="sender")
         backend._peer_alloc_backoff = {
@@ -645,9 +643,8 @@ class TestAscendPDBackend:
     def test_handle_pull_done_releases_resources(self):
         """_handle_pull_done releases pinned MemObjs."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import (
-            AscendPDSenderMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
+            AscendPDSenderMixin
 
         backend = MagicMock()
         mock_obj = _make_mock_mem_obj()
@@ -665,9 +662,8 @@ class TestAscendPDBackend:
     def test_handle_pull_done_early_signal(self):
         """Early Done signal is buffered for later processing."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import (
-            AscendPDSenderMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
+            AscendPDSenderMixin
 
         backend = MagicMock()
         backend._pull_pending = {}
@@ -682,9 +678,8 @@ class TestAscendPDBackend:
     def test_backpressure_blocks_when_above_hwm(self):
         """_wait_for_backpressure blocks until count drops below HWM."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import (
-            AscendPDSenderMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
+            AscendPDSenderMixin
 
         backend = MagicMock()
         backend._pull_pending_lock = threading.Lock()
@@ -712,9 +707,8 @@ class TestAscendPDBackend:
     def test_sweep_expired_pull_pending(self):
         """Expired entries are released by the sweep."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import (
-            AscendPDSenderMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
+            AscendPDSenderMixin
 
         backend = MagicMock()
         backend._pull_pending_lock = threading.Lock()
@@ -737,9 +731,8 @@ class TestAscendPDBackend:
     def test_allocate_and_put_with_already_sent(self):
         """Already-sent keys are identified and not re-allocated."""
         # First Party
-        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
-            AscendPDReceiverMixin,
-        )
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
+            AscendPDReceiverMixin
 
         backend = _make_pd_backend_stub()
 

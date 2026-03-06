@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
-from lmcache_tests.v1.utils import *
 import torch
-
 # First Party
 from lmcache_ascend.v1.npu_connector import VLLMPagedMemNPUConnectorV2
+from lmcache_tests.v1.utils import *
 
 
 def create_npu_connector(hidden_dim, num_layers):

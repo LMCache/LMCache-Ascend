@@ -1,36 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from abc import abstractmethod
-from typing import Optional, Union
 import asyncio
 import threading
 import time
+from abc import abstractmethod
+from typing import Optional, Union
 
+import msgspec
+import torch
+import zmq
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
-from lmcache.v1.transfer_channel.transfer_utils import (
-    InitSideMsgBase,
-    InitSideRetMsgBase,
-)
-import msgspec
-import torch
-import zmq
+from lmcache.v1.transfer_channel.transfer_utils import (InitSideMsgBase,
+                                                        InitSideRetMsgBase)
 
 # Local
-from .buffer_config import (
-    BufferConfig,
-    BufferType,
-    RemotePeerBufferList,
-    resolve_buffer_ref,
-)
-from .transfer_spec import (
-    TS_REMOTE_BUFFER_UUIDS,
-    TS_REMOTE_INDEXES,
-    TS_REMOTE_MEM_INDEXES,
-)
+from .buffer_config import (BufferConfig, BufferType, RemotePeerBufferList,
+                            resolve_buffer_ref)
+from .transfer_spec import (TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_INDEXES,
+                            TS_REMOTE_MEM_INDEXES)
 
 logger = init_logger(__name__)
 
