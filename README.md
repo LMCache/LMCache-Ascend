@@ -117,6 +117,16 @@ Assuming your working directory is ```/workspace``` and base environment(vllm/vl
 
 1. Prepare Base Environment
 
+** For vLLM-Ascend **
+If you are using vllm-ascend, it is recommended to use the official [vLLM-Ascend image](https://quay.io/repository/ascend/vllm-ascend?tab=tags) as a base:
+
+```bash
+# Pull and run the official vLLM-Ascend image
+docker pull quay.io/ascend/vllm-ascend:v0.11.0rc0
+docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.11.0rc0 /bin/bash
+```
+
+** For SGLang **
 If you are using SGLang, it is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
 
 ```bash
