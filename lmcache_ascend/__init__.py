@@ -195,29 +195,11 @@ def _patch_config():
         _utils_mod.LMCacheEngineConfig = lmcache.v1.config.LMCacheEngineConfig
 
 
-def _is_sglang_runtime():
-    return "sglang" in sys.modules or any("sglang" in arg for arg in sys.argv)
-
-
-def _is_vllm_runtime():
-    return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
-
-
 def _patch_ops():
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
-
-
-def _patch_torch_capability():
-    # Third Party
-    import torch
-    from torch_npu.contrib import transfer_to_npu  # noqa: F401
-
-    capability_mock = lambda *args: (0, 0)
-    torch.npu.get_device_capability = capability_mock
-    torch.cuda.get_device_capability = capability_mock
 
 
 def _patch_storage_backend_init():
