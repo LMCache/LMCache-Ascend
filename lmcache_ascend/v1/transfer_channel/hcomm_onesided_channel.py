@@ -1,20 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 import asyncio
-import json
-import os
-import random
-import socket
-import subprocess
 import threading
 import time
 
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
-from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
@@ -28,76 +22,36 @@ import zmq
 import lmcache_ascend.c_ops as lmc_ops
 import lmcache_ascend.hcomm_onesided as hcomm_os
 
+# Local
+from .base_channel import BaseMultiBufferChannel
+from .buffer_config import (
+    BufferConfig,
+    BufferType,
+    MemHandleMeta,
+    PeerBufferInfo,
+    RemotePeerBufferList,
+    resolve_buffer_ref,
+    resolve_local_addr,
+)
+from .hcomm_onesided_protocol import (
+    HcommOsInitRequest,
+    HcommOsInitResponse,
+    HcommOsMsg,
+    HcommOsReadyRequest,
+    HcommOsReadyResponse,
+    _PeerState,
+)
+from .hcomm_onesided_runtime import (
+    _build_rank_table_json,
+    _get_local_device_info,
+    _init_comm_and_prepare,
+)
+from .transfer_spec import TS_STREAM, resolve_peer_id
+
 logger = init_logger(__name__)
 
 
-class HcommOsMsgBase(msgspec.Struct, tag=True):
-    pass
-
-
-# SoC models that require v1.2 rank table with super_device_id / super_pod_list.
-# All other SoCs use the simpler v1.0 format.
-# Reference: hixl/src/llm_datadist/common/rank_table_generator.cc (kV2Version)
-_V2_SOC_NAMES = frozenset(
-    {
-        "Ascend910_9391",
-        "Ascend910_9381",
-        "Ascend910_9392",
-        "Ascend910_9382",
-        "Ascend910_9372",
-        "Ascend910_9362",
-    }
-)
-
-
-class HcommDeviceInfo(msgspec.Struct):
-    """Device info exchanged during handshake to build the rank table."""
-
-    server_id: str
-    phy_device_id: str
-    device_ip: str
-    super_device_id: str = "0"
-    super_pod_id: str = "0"
-    use_v2: bool = False
-
-
-class HcommOsInitRequest(HcommOsMsgBase):
-    local_id: str
-    buffer_ptr: int
-    buffer_size: int
-    page_size: int
-    is_device: bool
-    device_info: HcommDeviceInfo
-
-
-class HcommOsInitResponse(HcommOsMsgBase):
-    cluster_json: str
-    comm_name: str
-    server_rank: int
-    client_rank: int
-    buffer_ptr: int
-    buffer_size: int
-    page_size: int
-    is_device: bool
-
-
-class HcommOsReadyRequest(HcommOsMsgBase):
-    local_id: str
-
-
-class HcommOsReadyResponse(HcommOsMsgBase):
-    ok: bool
-
-
-HcommOsMsg = Union[
-    HcommOsInitRequest,
-    HcommOsInitResponse,
-    HcommOsReadyRequest,
-    HcommOsReadyResponse,
-]
-
-
-class HcommOneSidedChannel(BaseTransferChannel):
+class HcommOneSidedChannel(BaseMultiBufferChannel):
     """Transfer channel using hcomm one-sided service API with stream support.
 
     Each peer pair gets its own HcclComm (nRanks=2).  The server side is
@@ -106,81 +60,90 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
     SERVER_RANK = 0
     CLIENT_RANK = 1
+    _init_msg_type = Union[HcommOsMsg, SideMsg]
+    _channel_name = "hcomm_onesided"
 
-    def __init__(self, async_mode: bool = False, **kwargs):
-        assert "role" in kwargs
-        assert "buffer_ptr" in kwargs
-        assert "buffer_size" in kwargs
-        assert "peer_init_url" in kwargs
-        assert "align_bytes" in kwargs
-
-        self.role = kwargs["role"]
-        self.buffer_ptr: int = kwargs["buffer_ptr"]
-        self.buffer_size: int = kwargs["buffer_size"]
-        self.page_size: int = kwargs["align_bytes"]
-
-        self.peer_lookup_url = kwargs.get("peer_lookup_url", None)
-
-        self.is_device = _is_device_memory(self.buffer_ptr)
+    def __init__(
+        self,
+        async_mode: bool = False,
+        buffers: Optional[List[BufferConfig]] = None,
+        **kwargs,
+    ):
         self.device_info = _get_local_device_info()
-
-        self.mem_handle: Optional[int] = None
-
-        self._register_global_mem()
-
-        self.local_index_addr: list[int] = []
-        for addr in range(
-            self.buffer_ptr,
-            self.buffer_ptr + self.buffer_size,
-            self.page_size,
-        ):
-            self.local_index_addr.append(addr)
-
-        self.running = True
-        self._state_lock = threading.Lock()
-
-        # peer_id -> PeerState
+        self.mem_handles: List[MemHandleMeta] = []
+        self._uuid_to_handle: Dict[str, MemHandleMeta] = {}
+        # peer_id -> PeerState.
         self._peers: dict[str, _PeerState] = {}
+        super().__init__(async_mode=async_mode, buffers=buffers, **kwargs)
+        self.transport_stream = torch.npu.Stream()
 
-        self.side_channels: list[zmq.Socket] = []
-        self.running_threads: list[threading.Thread] = []
+    def _register_buffers(self, buffers: list[BufferConfig]) -> None:
+        self.mem_handles = []
+        self._uuid_to_handle = {}
+        for buf in buffers:
+            meta = self._register_buffer(buf)
+            self.mem_handles.append(meta)
+            self._uuid_to_handle[meta.uuid] = meta
 
-        self.async_mode = async_mode
-        if self.async_mode:
-            self.zmq_context = get_zmq_context(use_asyncio=True)
-        else:
-            self.zmq_context = get_zmq_context(use_asyncio=False)
-        self.peer_init_url = kwargs["peer_init_url"]
-        self.event_loop = kwargs.get("event_loop", None)
+    def _register_buffer(self, buf: BufferConfig) -> MemHandleMeta:
+        """Register a single buffer with the hcomm one-sided library."""
+        buffer_ptr = buf.ptr
+        buffer_size = buf.size
+        page_size = buf.align_bytes
+        is_device = buf.device_type == BufferType.NPU
 
-        self.transport_stream = torch.npu.Stream(torch.npu.current_device())
-        self.handle_device = torch.npu.current_device()
-
-        self._init_side_channels()
-
-    def _register_global_mem(self):
-        already_registered = lmc_ops.get_device_ptr(self.buffer_ptr) is not None
+        already_registered = lmc_ops.get_device_ptr(buffer_ptr) is not None
         if already_registered:
-            lmc_ops.unregister_ptr(self.buffer_ptr)
+            lmc_ops.unregister_ptr(buffer_ptr)
 
-        self.mem_handle = hcomm_os.register_global_mem(
-            self.buffer_ptr, self.buffer_size, self.is_device
-        )
+        mem_handle = hcomm_os.register_global_mem(buffer_ptr, buffer_size, is_device)
         device_id = torch.npu.current_device()
-        dev_ptr = hcomm_os.get_dev_va(device_id, self.buffer_ptr, self.buffer_size)
+        dev_ptr = hcomm_os.get_dev_va(device_id, buffer_ptr, buffer_size)
         if dev_ptr is not None:
-            lmc_ops.register_mapping(self.buffer_ptr, dev_ptr, self.buffer_size)
+            lmc_ops.register_mapping(buffer_ptr, dev_ptr, buffer_size)
             logger.info(
                 "Re-registered lmc_ops mapping via MemMappingManager (devVA=0x%x)",
                 dev_ptr,
             )
 
+        buffer_addrs = list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
+
         logger.info(
             "Registered global mem: ptr=0x%x size=%d is_device=%s",
-            self.buffer_ptr,
-            self.buffer_size,
-            self.is_device,
+            buffer_ptr,
+            buffer_size,
+            is_device,
         )
+
+        return MemHandleMeta(
+            mem_handle=mem_handle,
+            buffer_ptr=buffer_ptr,
+            buffer_size=buffer_size,
+            page_size=page_size,
+            local_buffer_addrs=buffer_addrs,
+            buffer_type=buf.device_type,
+        )
+
+    def _make_buffer_infos(self) -> List[PeerBufferInfo]:
+        """Build handshake buffer-info list from our registered handles."""
+        return [
+            PeerBufferInfo(
+                uuid=meta.uuid,
+                buffer_ptr=meta.buffer_ptr,
+                buffer_size=meta.buffer_size,
+                page_size=meta.page_size,
+                is_device=(meta.buffer_type == BufferType.NPU),
+            )
+            for meta in self.mem_handles
+        ]
+
+    def _get_buffer_ref(self, data_ptr: int, page_index: int) -> tuple:
+        """Find the buffer UUID for a given data pointer."""
+        return resolve_buffer_ref(self.mem_handles, data_ptr, page_index)
+
+    def _get_local_addr(self, ptr: int, idx: int) -> int:
+        """Resolve a pointer + page index to a local buffer address."""
+        return resolve_local_addr(self.mem_handles, ptr, idx)
 
     def lazy_init_peer_connection(
         self,
@@ -193,13 +156,9 @@ class HcommOneSidedChannel(BaseTransferChannel):
             self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
         )
 
-        # Step 1: send init request with device info, get cluster JSON
         req = HcommOsInitRequest(
             local_id=local_id,
-            buffer_ptr=self.buffer_ptr,
-            buffer_size=self.buffer_size,
-            page_size=self.page_size,
-            is_device=self.is_device,
+            buffers=self._make_buffer_infos(),
             device_info=self.device_info,
         )
         init_tmp_socket.send(msgspec.msgpack.encode(req))
@@ -207,11 +166,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         if not isinstance(resp, HcommOsInitResponse):
             raise ValueError(f"Expected HcommOsInitResponse, got {type(resp).__name__}")
-        if resp.page_size <= 0:
-            raise ValueError(
-                f"Peer returned invalid page_size={resp.page_size}; "
-                "expected a positive value"
-            )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -229,26 +183,25 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 peer_id,
             )
             self._destroy_peer_comm(old_peer, peer_id)
+
+        all_mem_handles = [m.mem_handle for m in self.mem_handles]
         comm = _init_comm_and_prepare(
-            resp.cluster_json, resp.comm_name, my_rank, self.mem_handle
+            resp.cluster_json, resp.comm_name, my_rank, all_mem_handles
         )
 
-        remote_addrs = _build_remote_index_addr(
-            resp.buffer_ptr, resp.buffer_size, resp.page_size
-        )
+        remote_buffers = RemotePeerBufferList(resp.buffers)
 
         peer_state = _PeerState(
             comm=comm,
             my_rank=my_rank,
             remote_rank=remote_rank,
-            remote_index_addr=remote_addrs,
+            remote_buffers=remote_buffers,
         )
         with self._state_lock:
             self._peers[peer_id] = peer_state
 
         logger.info("Client: peer %s connected", peer_id)
 
-        # Step 2: signal ready so server knows prepare finished
         ready_req = HcommOsReadyRequest(local_id=local_id)
         init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
         ready_bytes = init_tmp_socket.recv()
@@ -258,7 +211,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 f"Server failed to complete handshake for peer {peer_id}"
             )
 
-        # Step 3: optional side message
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = self.send_init_side_msg(init_tmp_socket, init_side_msg)
@@ -279,10 +231,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
         req = HcommOsInitRequest(
             local_id=local_id,
-            buffer_ptr=self.buffer_ptr,
-            buffer_size=self.buffer_size,
-            page_size=self.page_size,
-            is_device=self.is_device,
+            buffers=self._make_buffer_infos(),
             device_info=self.device_info,
         )
         await init_tmp_socket.send(msgspec.msgpack.encode(req))
@@ -290,11 +239,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
         resp = msgspec.msgpack.decode(resp_bytes, type=HcommOsMsg)
         if not isinstance(resp, HcommOsInitResponse):
             raise ValueError(f"Expected HcommOsInitResponse, got {type(resp).__name__}")
-        if resp.page_size <= 0:
-            raise ValueError(
-                f"Peer returned invalid page_size={resp.page_size}; "
-                "expected a positive value"
-            )
 
         my_rank = resp.client_rank
         remote_rank = resp.server_rank
@@ -303,7 +247,7 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
         loop = asyncio.get_running_loop()
         device = self.handle_device
-        mem_handle = self.mem_handle
+        all_mem_handles = [m.mem_handle for m in self.mem_handles]
 
         def _client_init_comm():
             torch.npu.set_device(device)
@@ -314,19 +258,17 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 )
                 self._destroy_peer_comm(old_peer, peer_id)
             return _init_comm_and_prepare(
-                resp.cluster_json, resp.comm_name, my_rank, mem_handle
+                resp.cluster_json, resp.comm_name, my_rank, all_mem_handles
             )
 
         comm = await loop.run_in_executor(None, _client_init_comm)
 
-        remote_addrs = _build_remote_index_addr(
-            resp.buffer_ptr, resp.buffer_size, resp.page_size
-        )
+        remote_buffers = RemotePeerBufferList(resp.buffers)
         peer_state = _PeerState(
             comm=comm,
             my_rank=my_rank,
             remote_rank=remote_rank,
-            remote_index_addr=remote_addrs,
+            remote_buffers=remote_buffers,
         )
         with self._state_lock:
             self._peers[peer_id] = peer_state
@@ -349,17 +291,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
         init_tmp_socket.close()
         return init_ret_msg
 
-    def _init_side_channels(self):
-        if self.peer_init_url is None:
-            logger.warning("Peer init URL not set, skipping init loop")
-            return
-        if self.async_mode:
-            asyncio.run_coroutine_threadsafe(self._async_init_loop(), self.event_loop)
-        else:
-            t = threading.Thread(target=self._init_loop, daemon=True)
-            t.start()
-            self.running_threads.append(t)
-
     def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
         return receiver_or_sender_id in self._peers
 
@@ -368,11 +299,6 @@ class HcommOneSidedChannel(BaseTransferChannel):
     ) -> Union[HcommOsMsg, InitSideRetMsgBase]:
         if isinstance(req, HcommOsInitRequest):
             logger.info("Server: HcommOsInitRequest from %s", req.local_id)
-            if req.page_size <= 0:
-                raise ValueError(
-                    f"Peer sent invalid page_size={req.page_size}; "
-                    "expected a positive value"
-                )
 
             my_rank = self.SERVER_RANK
             client_rank = self.CLIENT_RANK
@@ -396,13 +322,11 @@ class HcommOneSidedChannel(BaseTransferChannel):
                 comm_name=comm_name,
                 server_rank=my_rank,
                 client_rank=client_rank,
-                buffer_ptr=self.buffer_ptr,
-                buffer_size=self.buffer_size,
-                page_size=self.page_size,
-                is_device=self.is_device,
+                buffers=self._make_buffer_infos(),
             )
 
             old_peer = self._pop_stale_peer(req.local_id)
+            all_mem_handles = [m.mem_handle for m in self.mem_handles]
 
             def _setup_server_comm():
                 torch.npu.set_device(self.handle_device)
@@ -415,16 +339,14 @@ class HcommOneSidedChannel(BaseTransferChannel):
                         )
                         self._destroy_peer_comm(old_peer, req.local_id)
                     comm = _init_comm_and_prepare(
-                        cluster_json, comm_name, my_rank, self.mem_handle
+                        cluster_json, comm_name, my_rank, all_mem_handles
                     )
-                    remote_addrs = _build_remote_index_addr(
-                        req.buffer_ptr, req.buffer_size, req.page_size
-                    )
+                    remote_buffers = RemotePeerBufferList(req.buffers)
                     peer_state = _PeerState(
                         comm=comm,
                         my_rank=my_rank,
                         remote_rank=remote_rank,
-                        remote_index_addr=remote_addrs,
+                        remote_buffers=remote_buffers,
                     )
                     with self._state_lock:
                         self._peers[req.local_id] = peer_state
@@ -434,14 +356,9 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
             t = threading.Thread(target=_setup_server_comm, daemon=True)
             t.start()
-            # Reply immediately so the client can start its own
-            # init_comm_cluster_info + prepare in parallel.
-            # The ready handshake later ensures both sides finished.
             return resp
 
         elif isinstance(req, HcommOsReadyRequest):
-            # Client signals that its prepare() has returned.  Wait until
-            # our own peer state is ready too.
             deadline = time.monotonic() + 120
             while time.monotonic() < deadline:
                 with self._state_lock:
@@ -455,93 +372,8 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
         raise ValueError(f"Unsupported message type: {type(req)}")
 
-    def _init_loop(self):
-        self.init_side_channel = get_zmq_socket(
-            self.zmq_context, self.peer_init_url, "tcp", zmq.REP, "bind"
-        )
-        self.side_channels.append(self.init_side_channel)
-        torch.npu.set_device(self.handle_device)
-        self.init_side_channel.setsockopt(zmq.RCVTIMEO, 1000)
-
-        while self.running:
-            try:
-                req_bytes = self.init_side_channel.recv()
-                logger.info("Received init request")
-                req = msgspec.msgpack.decode(req_bytes, type=Union[HcommOsMsg, SideMsg])
-                resp = self._handle_init_msg(req)
-                self.init_side_channel.send(msgspec.msgpack.encode(resp))
-                logger.info("Sent init response")
-            except zmq.Again:
-                continue
-            except Exception as e:
-                logger.error("Init loop error: %s", e)
-                try:
-                    self.init_side_channel.send(
-                        msgspec.msgpack.encode(HcommOsReadyResponse(ok=False))
-                    )
-                except Exception:
-                    logger.error("Failed to send HcommOsReadyResponse: %s", e)
-                if self.running:
-                    time.sleep(0.01)
-        self.init_side_channel.close()
-
-    async def _async_init_loop(self):
-        self.init_side_channel = get_zmq_socket(
-            self.zmq_context, self.peer_init_url, "tcp", zmq.REP, "bind"
-        )
-        self.side_channels.append(self.init_side_channel)
-        torch.npu.set_device(self.handle_device)
-        loop = asyncio.get_running_loop()
-
-        while self.running:
-            try:
-                req_bytes = await asyncio.wait_for(
-                    self.init_side_channel.recv(), timeout=1.0
-                )
-                logger.info("Received init request (async)")
-                req = msgspec.msgpack.decode(req_bytes, type=Union[HcommOsMsg, SideMsg])
-                resp = await loop.run_in_executor(None, self._handle_init_msg, req)
-                await self.init_side_channel.send(msgspec.msgpack.encode(resp))
-                logger.info("Sent init response (async)")
-            except asyncio.TimeoutError:
-                continue
-            except Exception as e:
-                logger.error("Async init loop error: %s", e)
-                try:
-                    await self.init_side_channel.send(
-                        msgspec.msgpack.encode(HcommOsReadyResponse(ok=False))
-                    )
-                except Exception:
-                    logger.error("Failed to send HcommOsReadyResponse: %s", e)
-                if self.running:
-                    time.sleep(0.01)
-        self.init_side_channel.close()
-
-    def get_local_mem_indices(
-        self, objects: Union[list[bytes], list[MemoryObj]]
-    ) -> list[int]:
-        local_indices = []
-        if isinstance(objects[0], MemoryObj):
-            for mem_obj in objects:
-                assert isinstance(mem_obj, MemoryObj)
-                local_indices.append(mem_obj.meta.address)
-        elif isinstance(objects[0], bytes):
-            raise NotImplementedError(
-                "Sending raw bytes is not supported in hcomm one-sided channel"
-            )
-        return local_indices
-
-    def batched_send(self, objects, transfer_spec=None) -> int:
-        raise NotImplementedError
-
-    def batched_recv(self, buffers, transfer_spec=None) -> int:
-        raise NotImplementedError
-
-    async def async_batched_send(self, objects, transfer_spec=None) -> int:
-        raise NotImplementedError
-
-    async def async_batched_recv(self, buffers, transfer_spec=None) -> int:
-        raise NotImplementedError
+    def _make_error_response(self) -> HcommOsReadyResponse:
+        return HcommOsReadyResponse(ok=False)
 
     def batched_write(
         self,
@@ -617,9 +449,33 @@ class HcommOneSidedChannel(BaseTransferChannel):
             await asyncio.sleep(0.001)
         return len(buffers)
 
+    def submit_batched_read(
+        self,
+        buffers: Union[list[bytes], list[MemoryObj]],
+        transfer_spec: Optional[dict] = None,
+    ) -> torch.npu.Event:
+        """Submit a batched read without waiting for completion.
+
+        The returned event is recorded on the read stream and can be used
+        by callers for cross-stream synchronization.
+        """
+        assert transfer_spec is not None
+        peer_state, stream_ptr = self._resolve_transfer(transfer_spec)
+
+        op_descs = self._build_op_descs(buffers, peer_state, transfer_spec)
+        hcomm_os.batch_get(
+            peer_state.comm, peer_state.remote_rank, op_descs, stream_ptr
+        )
+
+        stream = self._get_torch_stream(transfer_spec)
+        event = torch.npu.Event()
+        event.record(stream)
+        return event
+
     def _destroy_peer_comm(self, peer: "_PeerState", peer_id: str) -> None:
         try:
-            hcomm_os.unbind_mem(peer.comm, self.mem_handle)
+            for meta in self.mem_handles:
+                hcomm_os.unbind_mem(peer.comm, meta.mem_handle)
             hcomm_os.destroy_comm(peer.comm)
         except Exception as e:
             logger.warning("Failed to destroy comm for peer %s: %s", peer_id, e)
@@ -630,19 +486,14 @@ class HcommOneSidedChannel(BaseTransferChannel):
 
     def _resolve_transfer(self, transfer_spec: dict):
         """Return (peer_state, stream_ptr) from transfer_spec."""
-        peer_id = transfer_spec.get("receiver_id") or transfer_spec["sender_id"]
+        peer_id = resolve_peer_id(transfer_spec)
         with self._state_lock:
             peer_state = self._peers[peer_id]
         stream_ptr = self._get_stream_ptr(transfer_spec)
         return peer_state, stream_ptr
 
     def _get_stream_ptr(self, transfer_spec: dict) -> int:
-        """Extract the raw stream pointer for the C API.
-
-        If ``transfer_spec["stream"]`` is provided it is used directly,
-        otherwise falls back to the internal transport stream.
-        """
-        stream = transfer_spec.get("stream", None)
+        stream = transfer_spec.get(TS_STREAM, None)
         if stream is not None:
             if isinstance(stream, int):
                 return stream
@@ -650,25 +501,29 @@ class HcommOneSidedChannel(BaseTransferChannel):
         return self.transport_stream.npu_stream
 
     def _get_torch_stream(self, transfer_spec: dict) -> torch.npu.Stream:
-        stream = transfer_spec.get("stream", None)
+        stream = transfer_spec.get(TS_STREAM, None)
         if stream is not None and isinstance(stream, torch.npu.Stream):
             return stream
         return self.transport_stream
 
     def _build_op_descs(self, objects, peer_state, transfer_spec):
         descs = []
-        for mem_obj, remote_index in zip(
-            objects, transfer_spec["remote_indexes"], strict=True
-        ):
+        remote_addrs = self._resolve_transfer_addrs(
+            peer_state.remote_buffers, transfer_spec
+        )
+        for mem_obj, remote_addr in zip(objects, remote_addrs, strict=True):
             if not isinstance(mem_obj, MemoryObj):
                 raise NotImplementedError("Sending raw bytes is not supported")
             descs.append(
                 hcomm_os.OpDesc(
-                    local_addr=self.local_index_addr[mem_obj.meta.address],
-                    remote_addr=peer_state.remote_index_addr[remote_index],
+                    local_addr=self._get_local_addr(
+                        mem_obj.data_ptr, mem_obj.meta.address
+                    ),
+                    remote_addr=remote_addr,
                     num_bytes=self.page_size,
                 )
             )
+
         return descs
 
     def close(self):
@@ -683,187 +538,8 @@ class HcommOneSidedChannel(BaseTransferChannel):
         for peer_id, ps in peers_snapshot:
             self._destroy_peer_comm(ps, peer_id)
 
-        if self.mem_handle is not None:
+        for meta in self.mem_handles:
             try:
-                hcomm_os.deregister_global_mem(self.mem_handle)
+                hcomm_os.deregister_global_mem(meta.mem_handle)
             except Exception as e:
                 logger.warning("Error deregistering global mem: %s", e)
-
-
-class _PeerState:
-    __slots__ = ("comm", "my_rank", "remote_rank", "remote_index_addr")
-
-    def __init__(
-        self,
-        comm: int,
-        my_rank: int,
-        remote_rank: int,
-        remote_index_addr: list[int],
-    ):
-        self.comm = comm
-        self.my_rank = my_rank
-        self.remote_rank = remote_rank
-        self.remote_index_addr = remote_index_addr
-
-
-def _build_remote_index_addr(
-    buffer_ptr: int, buffer_size: int, page_size: int
-) -> list[int]:
-    return list(range(buffer_ptr, buffer_ptr + buffer_size, page_size))
-
-
-_HCOMM_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCOMM_INIT_MAX_RETRIES", "5"))
-_HCOMM_INIT_BASE_DELAY = 0.1
-_HCOMM_INIT_MAX_DELAY = 5.0
-
-
-def _init_comm_and_prepare(
-    cluster_json: str, comm_name: str, rank: int, mem_handle: int
-) -> int:
-    """Blocking helper: init comm via cluster-info JSON, bind mem, prepare.
-
-    Retries ``init_comm_cluster_info`` with exponential back-off because
-    concurrent calls to HcclCommInitClusterInfoMemConfig from different
-    processes on the same node can transiently fail (HCCL error 7).
-    """
-    last_err: Optional[RuntimeError] = None
-    for attempt in range(_HCOMM_INIT_MAX_RETRIES):
-        try:
-            comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
-            break
-        except RuntimeError as e:
-            last_err = e
-            delay = min(
-                _HCOMM_INIT_BASE_DELAY * (2**attempt),
-                _HCOMM_INIT_MAX_DELAY,
-            )
-            delay *= random.uniform(0.5, 1.5)
-            logger.warning(
-                "init_comm_cluster_info failed (attempt %d/%d): %s  retrying in %.2fs",
-                attempt + 1,
-                _HCOMM_INIT_MAX_RETRIES,
-                e,
-                delay,
-            )
-            time.sleep(delay)
-    else:
-        raise RuntimeError(
-            f"init_comm_cluster_info failed after {_HCOMM_INIT_MAX_RETRIES} attempts"
-        ) from last_err
-
-    hcomm_os.bind_mem(comm, mem_handle)
-    hcomm_os.prepare(comm, timeout=120)
-    return comm
-
-
-def _is_device_memory(ptr: int) -> bool:
-    return hcomm_os.is_device_memory(ptr)
-
-
-def _get_device_ip(phy_device_id: int) -> str:
-    """Read device IP from /etc/hccn.conf or fall back to hccn_tool."""
-    hccn_conf = "/etc/hccn.conf"
-    if os.path.isfile(hccn_conf):
-        key = f"address_{phy_device_id}="
-        with open(hccn_conf) as f:
-            for line in f:
-                if line.startswith(key):
-                    return line.strip().split("=", 1)[1]
-    try:
-        result = subprocess.run(
-            ["hccn_tool", "-i", str(phy_device_id), "-ip", "-g"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        for line in result.stdout.splitlines():
-            if "ipaddr:" in line:
-                return line.split("ipaddr:")[1].strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        logger.warning("Failed to get device IP from hccn_tool")
-    return ""
-
-
-def _get_local_device_info() -> HcommDeviceInfo:
-    """Gather local device metadata needed for the rank table."""
-    device_id = torch.npu.current_device()
-    info = hcomm_os.get_device_info(device_id)
-    device_ip = _get_device_ip(info["phy_device_id"])
-    soc_name = info.get("soc_name", "")
-    use_v2 = soc_name in _V2_SOC_NAMES
-
-    result = HcommDeviceInfo(
-        server_id=socket.gethostname(),
-        phy_device_id=str(info["phy_device_id"]),
-        device_ip=device_ip,
-        use_v2=use_v2,
-    )
-    if use_v2:
-        result.super_device_id = str(info["super_device_id"])
-        result.super_pod_id = str(info["super_pod_id"])
-    logger.info(
-        "Local device info: soc=%s v2=%s phy_dev=%s ip=%s",
-        soc_name,
-        use_v2,
-        result.phy_device_id,
-        result.device_ip,
-    )
-    return result
-
-
-def _build_rank_table_json(
-    server_info: HcommDeviceInfo,
-    server_rank: int,
-    client_info: HcommDeviceInfo,
-    client_rank: int,
-) -> str:
-    """Build a rank-table JSON string for HcclCommInitClusterInfoMemConfig.
-
-    Uses v1.0 (no super_device_id / super_pod_list) unless both peers
-    report use_v2, in which case v1.2 is used.  Groups devices by
-    server_id (hostname).
-    """
-    use_v2 = server_info.use_v2 and client_info.use_v2
-
-    servers: dict[str, list[dict]] = {}
-    for dev_info, rank_id in [
-        (server_info, server_rank),
-        (client_info, client_rank),
-    ]:
-        dev: dict = {
-            "device_id": dev_info.phy_device_id,
-            "rank_id": str(rank_id),
-        }
-        if dev_info.device_ip:
-            dev["device_ip"] = dev_info.device_ip
-        if use_v2:
-            dev["super_device_id"] = dev_info.super_device_id
-        servers.setdefault(dev_info.server_id, []).append(dev)
-
-    server_list = []
-    for sid, devices in servers.items():
-        devices.sort(key=lambda d: int(d["rank_id"]))
-        server_list.append({"server_id": sid, "device": devices})
-
-    rank_table: dict = {
-        "version": "1.2" if use_v2 else "1.0",
-        "server_count": str(len(server_list)),
-        "server_list": server_list,
-        "status": "completed",
-    }
-
-    if use_v2:
-        pod_map: dict[str, set[str]] = {}
-        for dev_info in (server_info, client_info):
-            pod_map.setdefault(dev_info.super_pod_id, set()).add(dev_info.server_id)
-        super_pod_list = []
-        for pod_id, sids in sorted(pod_map.items()):
-            super_pod_list.append(
-                {
-                    "super_pod_id": pod_id,
-                    "server_list": [{"server_id": s} for s in sorted(sids)],
-                }
-            )
-        rank_table["super_pod_list"] = super_pod_list
-
-    return json.dumps(rank_table)
