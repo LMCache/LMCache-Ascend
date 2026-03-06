@@ -12,19 +12,22 @@ This avoids the intermediate step of fetching all chunks to CPU/NPU memory
 before scattering, enabling overlap of remote fetch and NPU scatter operations.
 """
 
-import asyncio
 # Standard
 from typing import Any, List, Optional
+import asyncio
 
-import torch
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_management import (MemoryFormat, MemoryObj,
-                                          MemoryObjMetadata)
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+import torch
+
 # First Party
 from lmcache_ascend.v1.transfer_channel.transfer_spec import (
-    TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_MEM_INDEXES)
+    TS_RECEIVER_ID,
+    TS_REMOTE_BUFFER_UUIDS,
+    TS_REMOTE_MEM_INDEXES,
+)
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 
 logger = init_logger(__name__)

@@ -2,10 +2,10 @@
 # Standard
 from typing import List, Union
 
-import torch
-import torch_npu  # noqa: F401
 # Third Party
 from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+import torch
+import torch_npu  # noqa: F401
 
 # Local
 from .buffer_config import BufferConfig, BufferType, get_device_buffer_type
@@ -144,8 +144,9 @@ def CreateTransferChannel(
         )
     elif channel_type == "hcomm_onesided":
         # First Party
-        from lmcache_ascend.v1.transfer_channel.hcomm_onesided_channel import \
-            HcommOneSidedChannel
+        from lmcache_ascend.v1.transfer_channel.hcomm_onesided_channel import (
+            HcommOneSidedChannel,
+        )
 
         return HcommOneSidedChannel(
             async_mode=async_mode,

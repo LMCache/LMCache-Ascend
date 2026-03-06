@@ -1,17 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Module under test
 # Third Party
-# First Party
-import lmcache_ascend.c_ops as lmc_ops
+# Third Party
+from lmcache.storage_backend.serde.cachegen_basics import (
+    CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK,
+    CacheGenConfig,
+    CacheGenGPUEncoderOutput,
+    QuantizationSpec,
+)
+from lmcache.storage_backend.serde.cachegen_decoder import decode_function_gpu
+from lmcache.storage_backend.serde.cachegen_encoder import (
+    _split_kv,
+    encode_function,
+    torch_quant_vectorized,
+)
 import pytest
 import torch
 import torch_npu
-from lmcache.storage_backend.serde.cachegen_basics import (
-    CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK, CacheGenConfig,
-    CacheGenGPUEncoderOutput, QuantizationSpec)
-from lmcache.storage_backend.serde.cachegen_decoder import decode_function_gpu
-from lmcache.storage_backend.serde.cachegen_encoder import (
-    _split_kv, encode_function, torch_quant_vectorized)
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 
 
 # Generating relastic and obviously correct input/output for encode is hard in all but

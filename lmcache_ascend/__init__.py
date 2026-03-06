@@ -18,9 +18,8 @@ def _is_vllm_runtime():
 
 def _patch_config():
     # Third Party
+    from lmcache.v1.config_base import _to_bool, _to_int_list, create_config_class
     import lmcache.v1.config
-    from lmcache.v1.config_base import (_to_bool, _to_int_list,
-                                        create_config_class)
 
     # Add new config item for p2p npu usage
     lmcache.v1.config._CONFIG_DEFINITIONS["p2p_use_npu"] = {
@@ -205,17 +204,19 @@ def _patch_ops():
 def _patch_storage_backend_init():
     # Third Party
     import lmcache.v1.storage_backend as lm_storage_backend
+
     # First Party
-    from lmcache_ascend.v1.storage_backend import \
-        CreateStorageBackends as ascend_create_storage_backends
+    from lmcache_ascend.v1.storage_backend import (
+        CreateStorageBackends as ascend_create_storage_backends,
+    )
 
     lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
 
 
 def _patch_torch_capability():
     # Third Party
-    import torch
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
+    import torch
 
     capability_mock = lambda *args: (0, 0)
     torch.npu.get_device_capability = capability_mock
@@ -224,8 +225,9 @@ def _patch_torch_capability():
 
 def _patch_transfer_channel():
     # First Party
-    from lmcache_ascend.v1.transfer_channel import \
-        get_correct_device as ascend_get_correct_device
+    from lmcache_ascend.v1.transfer_channel import (
+        get_correct_device as ascend_get_correct_device,
+    )
 
     sys.modules[
         "lmcache.v1.transfer_channel.transfer_utils"
@@ -235,6 +237,7 @@ def _patch_transfer_channel():
 def _patch_cacheblend():
     # Third Party
     from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
+
     # First Party
     from lmcache_ascend.v1.blend.utils import get_or_create_blender
 
@@ -244,6 +247,7 @@ def _patch_cacheblend():
 def _patch_multi_process():
     # Third Party
     import lmcache.v1.multiprocess.custom_types as lm_mp_types
+
     # First Party
     from lmcache_ascend.v1.multiprocess.custom_types import AscendIPCWrapper
 
@@ -252,10 +256,11 @@ def _patch_multi_process():
 
 def _patch_kv_layer_group():
     # Third Party
+    # Third Party
+    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+
     # First Party
     import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-    from lmcache.v1.kv_layer_groups import (KVLayerGroupInfo,
-                                            KVLayerGroupsManager)
 
     KVLayerGroupsManager.build_kv_layer_groups = (
         ascend_kv_layer_groups.build_kv_layer_groups
@@ -268,9 +273,12 @@ def _patch_kv_layer_group():
 def _patch_mooncake_store_connector():
     # Third Party
     import lmcache.v1.storage_backend.connector.mooncakestore_connector as lmc_mks_connector  # noqa: E501
+
     # First Party
     from lmcache_ascend.v1.storage_backend.connector.mooncakestore_connector import (  # noqa: E501
-        _batched_put_with_metadata, _batched_put_zero_copy)
+        _batched_put_with_metadata,
+        _batched_put_zero_copy,
+    )
 
     # NOTE (gingfung): these two function patches fixes the double free ref counts
     # we took the upstream merged post v0.3.12 into our current branch,
@@ -287,9 +295,11 @@ def _patch_mooncake_store_connector():
 def _patch_init_engine():
     # Third Party
     import lmcache.integration.vllm.vllm_v1_adapter
+
     # First Party
-    from lmcache_ascend.integration.vllm.vllm_v1_adapter import \
-        init_lmcache_engine as ascend_init_lmcache_engine
+    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+        init_lmcache_engine as ascend_init_lmcache_engine,
+    )
 
     # NOTE (gingfung): this is the main entry point of LMCache, and since we are
     # patching this, every time we upgrade, we should re-evaluate the function, as
@@ -303,9 +313,11 @@ def _patch_init_engine():
 def _patch_wait_for_save():
     # Third Party
     import lmcache.integration.vllm.vllm_v1_adapter
+
     # First Party
-    from lmcache_ascend.integration.vllm.vllm_v1_adapter import \
-        wait_for_save as ascend_wait_for_save
+    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+        wait_for_save as ascend_wait_for_save,
+    )
 
     # Fixes a bug where disagg_spec.num_transferred_tokens (initialized to 0)
     # overrides save_spec.skip_leading_tokens via min(), causing redundant
@@ -321,6 +333,7 @@ def _patch_hash_token():
     # ASLR lead to non-deterministic hashing for builtin hash
     # Third Party
     import lmcache.v1.token_database
+
     # First Party
     from lmcache_ascend.v1.tokens_hash import _hash_tokens
 
@@ -337,9 +350,11 @@ def _patch_hash_token():
 def _patch_lookup_client():
     # Third Party
     import lmcache.v1.lookup_client.lmcache_lookup_client as lmc_lookup_client
+
     # First Party
-    from lmcache_ascend.v1.lookup_client.lmcache_lookup_client import \
-        LMCacheLookupClient_lookup
+    from lmcache_ascend.v1.lookup_client.lmcache_lookup_client import (
+        LMCacheLookupClient_lookup,
+    )
 
     lmc_lookup_client.LMCacheLookupClient.lookup = LMCacheLookupClient_lookup
 
@@ -352,6 +367,7 @@ def _patch_sys_detection():
     # and is up to the caller to handle it.
     # Third Party
     import lmcache.v1.system_detection
+
     # First Party
     from lmcache_ascend.v1.system_detection import _read_from_sys
 
@@ -361,10 +377,14 @@ def _patch_sys_detection():
 def _patch_sgl():
     # Third Party
     import lmcache.integration.sglang.sglang_adapter as lmc_sglang_adapter
+
     # First Party
     from lmcache_ascend.integration.sglang.sglang_adapter import (
-        LMCacheConnector__init__, LMCacheLayerwiseConnector_global_min_tokens,
-        LMCacheLayerwiseConnector_start_load_kv, sglang_init_lmcache_engine)
+        LMCacheConnector__init__,
+        LMCacheLayerwiseConnector_global_min_tokens,
+        LMCacheLayerwiseConnector_start_load_kv,
+        sglang_init_lmcache_engine,
+    )
 
     lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
 
@@ -380,6 +400,7 @@ def _patch_sgl():
 
     # Third Party
     import lmcache.v1.memory_management as lmc_memory_management
+
     # First Party
     from lmcache_ascend.v1.memory_management import GPUMemoryAllocator__init__
 
@@ -392,12 +413,13 @@ def _patch_rpc_utils():
     # limit, causing ZMQ errors. The patched version uses shorter, hash-based
     # identifiers to ensure paths are always under the limit.
     # Third Party
+    from lmcache.v1.lookup_client import (
+        lmcache_async_lookup_client as lmc_async_lookup_client,
+    )
+    from lmcache.v1.lookup_client import lmcache_lookup_client as lmc_lookup_client
     import lmcache.v1.offload_server.zmq_server as zmq_server
     import lmcache.v1.rpc_utils
-    from lmcache.v1.lookup_client import \
-        lmcache_async_lookup_client as lmc_async_lookup_client
-    from lmcache.v1.lookup_client import \
-        lmcache_lookup_client as lmc_lookup_client
+
     # First Party
     from lmcache_ascend.v1.rpc_utils import get_zmq_rpc_path_lmcache
 
@@ -411,8 +433,8 @@ def _patch_rpc_utils():
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
-    import sys
     from functools import partial
+    import sys
 
     _patch_config()
 

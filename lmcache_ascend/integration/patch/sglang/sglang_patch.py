@@ -8,9 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 
 # First Party
-from lmcache_ascend.integration.patch.base_patcher import (BasePatcher,
-                                                           VersionRange,
-                                                           logger)
+from lmcache_ascend.integration.patch.base_patcher import (
+    BasePatcher,
+    VersionRange,
+    logger,
+)
 
 
 class SglangPatcher(BasePatcher):

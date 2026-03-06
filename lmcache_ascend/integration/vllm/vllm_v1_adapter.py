@@ -6,9 +6,11 @@ from typing import Optional
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
-from lmcache.integration.vllm.vllm_v1_adapter import (LMCacheConnectorMetadata,
-                                                      _calculate_draft_layers,
-                                                      need_gpu_interm_buffer)
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorMetadata,
+    _calculate_draft_layers,
+    need_gpu_interm_buffer,
+)
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
@@ -26,19 +28,24 @@ except ImportError:
 
 # Third Party
 import torch
+
 # First Party
 from lmcache_ascend import _build_info
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party
     from lmcache_ascend.v1.npu_connector import (
-        VLLMBufferLayerwiseNPUConnector, VLLMPagedMemLayerwiseNPUConnector,
-        VLLMPagedMemNPUConnectorV2)
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
 elif _build_info.__framework_name__ == "mindspore":
     # First Party
     from lmcache_ascend.mindspore.v1.npu_connector import (
-        VLLMBufferLayerwiseNPUConnector, VLLMPagedMemLayerwiseNPUConnector,
-        VLLMPagedMemNPUConnectorV2)
+        VLLMBufferLayerwiseNPUConnector,
+        VLLMPagedMemLayerwiseNPUConnector,
+        VLLMPagedMemNPUConnectorV2,
+    )
 
 logger = init_logger(__name__)
 

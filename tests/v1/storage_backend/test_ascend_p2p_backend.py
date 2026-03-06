@@ -6,33 +6,36 @@ Unit tests use mocks (no NPU required).  Integration tests require at least 2
 NPU devices and are gated with ``@pytest.mark.skipif``.
 """
 
-import asyncio
-import threading
 # Standard
 from unittest.mock import AsyncMock, MagicMock
+import asyncio
+import threading
 
 # First Party
 from tests.bootstrap import prepare_environment
 
 prepare_environment()
 
+# Third Party
+from lmcache.logging import init_logger
+from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
+from lmcache.v1.storage_backend.p2p_backend import P2PErrorCode, P2PErrorMsg, PeerInfo
 import msgspec
 import pytest
 import torch
 import zmq.asyncio
-# Third Party
-from lmcache.logging import init_logger
-from lmcache.utils import CacheEngineKey
-from lmcache.v1.memory_management import (MemoryFormat, MemoryObj,
-                                          MemoryObjMetadata)
-from lmcache.v1.storage_backend.p2p_backend import (P2PErrorCode, P2PErrorMsg,
-                                                    PeerInfo)
+
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.storage_backend.p2p_backend import (
-    AscendBatchedLookupAndGetDoneMsg, AscendBatchedLookupAndGetDoneRetMsg,
-    AscendBatchedLookupAndGetMsg, AscendBatchedLookupAndGetRetMsg,
-    AscendBatchedLookupAndPutMsg, AscendP2PMsg)
+    AscendBatchedLookupAndGetDoneMsg,
+    AscendBatchedLookupAndGetDoneRetMsg,
+    AscendBatchedLookupAndGetMsg,
+    AscendBatchedLookupAndGetRetMsg,
+    AscendBatchedLookupAndPutMsg,
+    AscendP2PMsg,
+)
 
 logger = init_logger(__name__)
 
@@ -213,8 +216,7 @@ class TestAscendP2PBackendUnit:
         )
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id="lu_push",
@@ -256,8 +258,7 @@ class TestAscendP2PBackendUnit:
         backend.pending_pull_resources = {}
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id="lu_pull",
@@ -293,8 +294,7 @@ class TestAscendP2PBackendUnit:
         }
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetDoneMsg(lookup_id="lu_done")
         ret = _run_coroutine(
@@ -314,8 +314,7 @@ class TestAscendP2PBackendUnit:
         backend.pending_pull_resources = {}
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetDoneMsg(lookup_id="nonexistent")
         ret = _run_coroutine(
@@ -352,8 +351,9 @@ class TestAscendP2PBackendUnit:
                 entry = backend.pending_pull_resources.pop(pid, None)
                 if entry is not None:
                     # First Party
-                    from lmcache_ascend.v1.storage_backend.utils import \
-                        release_memory_objects
+                    from lmcache_ascend.v1.storage_backend.utils import (
+                        release_memory_objects,
+                    )
 
                     _, mem_objs = entry
                     release_memory_objects(mem_objs, unpin=True)
@@ -380,8 +380,7 @@ class TestAscendP2PBackendUnit:
         backend.local_cpu_backend.allocate = MagicMock(side_effect=[good_obj, None])
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         keys = [_make_key("k1"), _make_key("k2")]
         cum_chunk_lengths = [0, 256, 512]
@@ -412,8 +411,7 @@ class TestAscendP2PBackendUnit:
         )
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         keys = [_make_key("k1"), _make_key("k2")]
         cum_chunk_lengths = [0, 256, 512]
@@ -445,8 +443,7 @@ class TestAscendP2PBackendUnit:
         backend.target_peer_info_mapping = {"peer_url": peer_info}
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id="lu_retry",
@@ -489,8 +486,7 @@ class TestAscendP2PBackendUnit:
         backend.target_peer_info_mapping = {"peer_url": peer_info}
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id="lu_ok",
@@ -534,8 +530,7 @@ class TestAscendP2PBackendUnit:
         backend._send_lookup_request_with_retry = AsyncMock(return_value=ret_msg)
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         keys = [_make_key("k1"), _make_key("k2")]
         transfer_spec = {"cum_chunk_lengths": [0, 256, 512]}
@@ -575,8 +570,7 @@ class TestAscendP2PBackendUnit:
         backend._send_lookup_request_with_retry = AsyncMock(return_value=ret_msg)
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         keys = [_make_key("k1"), _make_key("k2")]
         transfer_spec = {"cum_chunk_lengths": [0, 256, 512]}
@@ -612,8 +606,7 @@ class TestAscendP2PBackendUnit:
         backend._send_lookup_request_with_retry = AsyncMock(return_value=error_ret)
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         keys = [_make_key("k1")]
         transfer_spec = {"cum_chunk_lengths": [0, 256]}
@@ -639,8 +632,7 @@ class TestAscendP2PBackendUnit:
         mock_objs = [_make_mock_mem_obj()]
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         success = _run_coroutine(
             async_loop,
@@ -667,8 +659,7 @@ class TestAscendP2PBackendUnit:
         backend._send_done_signal = AsyncMock()
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         success = _run_coroutine(
             async_loop,
@@ -697,8 +688,7 @@ class TestAscendP2PBackendUnit:
         mock_objs = [_make_mock_mem_obj()]
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         success = _run_coroutine(
             async_loop,
@@ -725,8 +715,7 @@ class TestAscendP2PBackendUnit:
         backend.transfer_channel.remote_xfer_handler_exists.return_value = False
 
         # First Party
-        from lmcache_ascend.v1.storage_backend.p2p_backend import \
-            AscendP2PBackend
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id="lu_no_xfer",

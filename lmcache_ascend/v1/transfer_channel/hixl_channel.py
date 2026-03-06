@@ -1,30 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from typing import List, Optional, Union
 import asyncio
 import threading
 import time
-from typing import List, Optional, Union
 
-# First Party
-import lmcache_ascend.hixl_npu_comms as hixl_comms
-import msgspec
-import torch
-import zmq
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_socket
-from lmcache.v1.transfer_channel.transfer_utils import (InitSideMsgBase,
-                                                        InitSideRetMsgBase,
-                                                        SideMsg)
+from lmcache.v1.transfer_channel.transfer_utils import (
+    InitSideMsgBase,
+    InitSideRetMsgBase,
+    SideMsg,
+)
+import msgspec
+import torch
+import zmq
+
+# First Party
+import lmcache_ascend.hixl_npu_comms as hixl_comms
 
 # Local
 from .base_channel import BaseMultiBufferChannel
 from .buffer_config import BufferConfig, PeerBufferInfo, RemotePeerBufferList
 from .hixl_engine import HixlEngineWrapper
-from .hixl_protocol import (HixlInitRequest, HixlInitResponse,
-                            HixlMemInfoRequest, HixlMemInfoResponse, HixlMsg,
-                            HixlReadyRequest, HixlReadyResponse)
+from .hixl_protocol import (
+    HixlInitRequest,
+    HixlInitResponse,
+    HixlMemInfoRequest,
+    HixlMemInfoResponse,
+    HixlMsg,
+    HixlReadyRequest,
+    HixlReadyResponse,
+)
 from .transfer_spec import resolve_peer_id
 
 logger = init_logger(__name__)

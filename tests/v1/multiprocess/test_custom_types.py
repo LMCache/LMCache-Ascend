@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import multiprocessing as mp
 from multiprocessing import Queue
+import multiprocessing as mp
 
 # Third Party
 import pytest
 import torch
 import torch_npu  # noqa: F401
+
 # First Party
 # NOTE (gingfung): we have to import the bootstrap and prepare here because
 # multiprocessing will run from the top of the file here and if not bootstrapped,
@@ -20,10 +21,12 @@ prepare_environment()
 # the CudaIPCWrapper should be patched already.
 from lmcache.v1.multiprocess.custom_types import CudaIPCWrapper  # noqa: E402
 from lmcache_tests.v1.multiprocess.test_custom_types import (  # noqa: F401, E402
-    get_customized_decoder, get_customized_encoder,
+    get_customized_decoder,
+    get_customized_encoder,
     test_cudaipc_wrapper_list_serialization,
     test_cudaipc_wrapper_serialization,
-    test_ipc_cache_engine_key_serialization)
+    test_ipc_cache_engine_key_serialization,
+)
 
 
 def _worker_process_deserialize_and_reconstruct(

@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import asyncio
-import threading
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional, Sequence
+import asyncio
+import threading
 
-import torch
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
@@ -14,17 +13,24 @@ from lmcache.v1.event_manager import EventManager
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend import CreateStorageBackends, is_cuda_worker
 from lmcache.v1.storage_backend.abstract_backend import (
-    AllocatorBackendInterface, StorageBackendInterface)
-from lmcache.v1.storage_backend.storage_manager import (AsyncSerializer,
-                                                        AsyncSingleSerializer)
+    AllocatorBackendInterface,
+    StorageBackendInterface,
+)
+from lmcache.v1.storage_backend.storage_manager import (
+    AsyncSerializer,
+    AsyncSingleSerializer,
+)
+import torch
+
 # First Party
 from lmcache_ascend.v1.npu_connector import is_310p
 
 if TYPE_CHECKING:
     # Third Party
     from lmcache.v1.cache_controller.worker import LMCacheWorker
-    from lmcache.v1.lookup_client.lmcache_async_lookup_client import \
-        LMCacheAsyncLookupServer
+    from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupServer,
+    )
 
 
 # Helper function to allocate and copy memory objects between D and H

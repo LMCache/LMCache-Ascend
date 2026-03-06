@@ -7,33 +7,34 @@ role-neutral code lives here: initialisation, allocator setup, memory
 allocation, and key lookup/partitioning.
 """
 
-import threading
 # Standard
 from typing import Optional, Union
+import threading
 
-import torch
-import torch_npu  # noqa: F401
-import zmq
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (MemoryFormat, MemoryObj,
-                                          PagedCpuGpuMemoryAllocator)
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    PagedCpuGpuMemoryAllocator,
+)
 from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.pd_backend import PDBackend, PDConfig
+import torch
+import torch_npu  # noqa: F401
+import zmq
+
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.rpc_utils import _find_free_port
-from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import \
-    AscendPDReceiverMixin
-from lmcache_ascend.v1.storage_backend.pd.sender_mixin import \
-    AscendPDSenderMixin
+from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import AscendPDReceiverMixin
+from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
 from lmcache_ascend.v1.storage_backend.utils import resolve_memory_format
-from lmcache_ascend.v1.transfer_channel import (CreateTransferChannel,
-                                                get_correct_device)
+from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 logger = init_logger(__name__)
 

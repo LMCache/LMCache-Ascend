@@ -1,32 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: E501
 # Standard
-import random
 from unittest.mock import patch
+import random
 
-import pytest
-import torch
 # Third Party
 from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
-# First Party
-from lmcache_ascend.v1.npu_connector import (SGLangLayerwiseNPUConnector,
-                                             VLLMPagedMemLayerwiseNPUConnector,
-                                             VLLMPagedMemNPUConnectorV2)
+
 # TODO (gingfung): once we have sglang kernel, re-enable test_sglang_connector_with_gpu_and_mla
-from lmcache_tests.v1.test_gpu_connector import \
-    test_batched_layerwise_vllm_paged_connector_with_gpu as \
-    original_test_batched_layerwise_vllm_paged_connector_with_gpu
-from lmcache_tests.v1.test_gpu_connector import \
-    test_layerwise_vllm_paged_connector_with_gpu as \
-    original_test_layerwise_vllm_paged_connector_with_gpu
-from lmcache_tests.v1.test_gpu_connector import \
-    test_vllm_paged_connector_v2_to_gpu_bench as \
-    original_test_vllm_paged_connector_v2_to_gpu_bench
-from lmcache_tests.v1.test_gpu_connector import \
-    test_vllm_paged_connector_v2_with_gpu_and_mla as \
-    original_test_vllm_paged_connector_v2_with_gpu_and_mla
-from tests.v1.utils import (check_sglang_npu_kv_cache_equal,
-                            generate_sglang_npu_kv_cache)
+from lmcache_tests.v1.test_gpu_connector import (
+    test_batched_layerwise_vllm_paged_connector_with_gpu as original_test_batched_layerwise_vllm_paged_connector_with_gpu,
+)
+from lmcache_tests.v1.test_gpu_connector import (
+    test_layerwise_vllm_paged_connector_with_gpu as original_test_layerwise_vllm_paged_connector_with_gpu,
+)
+from lmcache_tests.v1.test_gpu_connector import (
+    test_vllm_paged_connector_v2_to_gpu_bench as original_test_vllm_paged_connector_v2_to_gpu_bench,
+)
+from lmcache_tests.v1.test_gpu_connector import (
+    test_vllm_paged_connector_v2_with_gpu_and_mla as original_test_vllm_paged_connector_v2_with_gpu_and_mla,
+)
+import pytest
+import torch
+
+# First Party
+from lmcache_ascend.v1.npu_connector import (
+    SGLangLayerwiseNPUConnector,
+    VLLMPagedMemLayerwiseNPUConnector,
+    VLLMPagedMemNPUConnectorV2,
+)
+from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
 
 
 @pytest.mark.parametrize("use_npu", [True, False])

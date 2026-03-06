@@ -2,8 +2,7 @@
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.custom_types import KVCache
-from lmcache.v1.multiprocess.server import (MPCacheEngine, parse_args,
-                                            run_cache_server)
+from lmcache.v1.multiprocess.server import MPCacheEngine, parse_args, run_cache_server
 
 logger = init_logger(__name__)
 

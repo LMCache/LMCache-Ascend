@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from pathlib import Path
 import configparser
 import glob
 import logging
@@ -10,7 +11,6 @@ import shutil
 import subprocess
 import sys
 import sysconfig
-from pathlib import Path
 
 # Third Party
 from setuptools import Extension, find_packages, setup
@@ -34,8 +34,7 @@ def run_patches():
     try:
         sys.path.append(str(ROOT_DIR))
         # First Party
-        from lmcache_ascend.integration.patch.apply_patch import \
-            run_integration_patches
+        from lmcache_ascend.integration.patch.apply_patch import run_integration_patches
 
         run_integration_patches()
     except Exception as e:

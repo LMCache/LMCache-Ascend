@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import asyncio
 from collections import OrderedDict
 from typing import TYPE_CHECKING, Optional
+import asyncio
 
-import torch
-import torch_npu  # noqa: F401
 # Third Party
 from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
@@ -15,6 +13,9 @@ from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
 from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+import torch
+import torch_npu  # noqa: F401
+
 # First Party
 from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 

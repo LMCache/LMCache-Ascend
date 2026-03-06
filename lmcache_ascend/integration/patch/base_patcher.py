@@ -4,13 +4,13 @@
 # Future
 from __future__ import annotations
 
+# Standard
+from pathlib import Path
 import importlib.metadata
 import importlib.util
 import logging
 import shutil
 import time
-# Standard
-from pathlib import Path
 
 # Third Party
 from packaging import version
