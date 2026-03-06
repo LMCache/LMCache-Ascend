@@ -86,12 +86,6 @@ cd /workspace/LMCache-Ascend
 docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler .
 ```
 
-#### For SGLang Platform:
-It is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
-```bash
-docker pull quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b
-```
-
 Once that is built, run it with the following cmd
 ```bash
 DEVICE_LIST="0,1,2,3,4,5,6,7"
@@ -120,17 +114,26 @@ docker run -it \
 For further info about deployment notes, please refer to the [guide about deployment](docs/deployment.md)
 
 ### Manual Installation
+Assuming your working directory is ```/workspace``` and base environment(vllm/vllm-ascend or sglang) have already been installed.
 
-Assuming your working directory is ```/workspace``` and vllm/vllm-ascend have already been installed.
+1.Prepare Base Environment
 
-3. Install LMCache Repo
+If you are using SGLang, it is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
+
+```bash
+# Pull and run the official SGLang image
+docker pull quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b
+docker run -it --privileged --net=host --name lmcache-sglang-dev quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b /bin/bash
+```
+
+2. Install LMCache Repo
 
 - from pip
 ```bash
 NO_CUDA_EXT=1 pip install lmcache==0.3.12
 ```
 
-4. Install LMCache-Ascend Repo
+3. Install LMCache-Ascend Repo
 
 ```bash
 cd /workspace/LMCache-Ascend

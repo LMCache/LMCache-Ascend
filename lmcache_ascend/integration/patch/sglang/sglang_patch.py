@@ -62,8 +62,10 @@ class SglangPatcher(BasePatcher):
                 if cls._find_module_path(mod_name):
                     return mod_name
             except Exception:
+                logger.warning(f"Critical: Failed to find {mod_name}")
                 continue
-        return None
+
+        raise FileNotFoundError("SGLang model_runner could be found.")
 
     @classmethod
     def _patch_init_memory_pool(cls, path: Path) -> bool:
