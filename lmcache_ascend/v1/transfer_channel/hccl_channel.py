@@ -31,11 +31,7 @@ from .buffer_config import (
     resolve_buffer_ref,
 )
 from .hccl_agent import HcclAgentWrapper
-from .transfer_spec import (
-    TS_RECEIVER_ID,
-    TS_REMOTE_BUFFER_UUIDS,
-    TS_REMOTE_MEM_INDEXES,
-)
+from .transfer_spec import TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_MEM_INDEXES
 
 logger = init_logger(__name__)
 

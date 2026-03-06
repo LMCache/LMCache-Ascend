@@ -16,10 +16,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import TORCH_DTYPE_TO_STR_DTYPE, CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_socket
-from lmcache.v1.storage_backend.pd_backend import (
-    AllocRequest,
-    ProxyNotif,
-)
+from lmcache.v1.storage_backend.pd_backend import AllocRequest, ProxyNotif
 import msgspec
 import zmq
 

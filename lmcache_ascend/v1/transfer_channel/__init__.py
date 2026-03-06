@@ -132,9 +132,7 @@ def CreateTransferChannel(
 
     if channel_type == "hixl":
         # First Party
-        from lmcache_ascend.v1.transfer_channel.hixl_channel import (
-            HixlChannel,
-        )
+        from lmcache_ascend.v1.transfer_channel.hixl_channel import HixlChannel
 
         return HixlChannel(
             async_mode=async_mode,
@@ -160,9 +158,7 @@ def CreateTransferChannel(
         )
     else:
         # First Party
-        from lmcache_ascend.v1.transfer_channel.hccl_channel import (
-            HcclChannel,
-        )
+        from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
 
         return HcclChannel(
             async_mode=async_mode,

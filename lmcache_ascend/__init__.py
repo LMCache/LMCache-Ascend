@@ -208,6 +208,7 @@ def _patch_ops():
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
+
 def _patch_torch_capability():
     # Third Party
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
@@ -487,7 +488,6 @@ if not LMCACHE_ASCEND_PATCHED:
             _patch_sys_detection()
 
     _patch_wait_for_save()
-
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
