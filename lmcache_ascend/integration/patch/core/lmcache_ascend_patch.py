@@ -57,4 +57,4 @@ class LMCacheAscendPatcher(BasePatcher):
 
         cls._backup_file(path)
         path.write_text("".join(lines), encoding="utf-8")
-        logger.info(f"Successfully applied worker patches to {path}")
+        logger.info(f"Successfully applied LMCache-Ascend core patch to {path}")
