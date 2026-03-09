@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """
-1. Patch vLLM-Ascend worker for LMCache model tracking.
+Patch `lmcache` to import `lmcache_ascend`.
 
 This script:
-  - locates vllm_ascend.worker.worker_v1 via import
-  - applies the LMCache model registration + KV transfer init changes to load_model
-  - comments out ensure_kv_transfer_initialized in _init_worker_distributed_environment
+  - locates `lmcache.__init__` via import
+  - adds `import lmcache_ascend` to it to trigger Ascend-specific patches
   - creates a backup of the original file
-
-2. Patch vLLM-Ascend for Rotary Embedding
-Redirecting logic to _npu_rotary_embedding as per the 0.9.2rc1 stable implementation.
-This ensures we avoid the issues identified in the newer version.
 """
 
 # Future
