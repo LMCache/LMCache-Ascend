@@ -407,6 +407,9 @@ class AscendPDReceiverMixin:
                 msg_bytes = self.alloc_side_channel.recv()
             except zmq.Again:
                 continue
+            except zmq.error.ContextTerminated as e:
+                logger.error("ZMQ socket closed, exiting _mem_alloc_loop thread")
+                break
             except Exception as e:
                 logger.error("Failed to receive in mem alloc loop: %s", str(e))
                 if self.running:

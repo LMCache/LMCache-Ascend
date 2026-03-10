@@ -161,6 +161,9 @@ class BaseMultiBufferChannel(BaseTransferChannel):
                 self.init_side_channel.send(msgspec.msgpack.encode(resp))
             except zmq.Again:
                 continue
+            except zmq.error.ContextTerminated as e:
+                logger.error("ZMQ socket closed, exiting _init_loop thread")
+                break
             except Exception as e:
                 logger.error(
                     "Failed to process %s initialization loop: %s",
