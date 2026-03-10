@@ -14,7 +14,7 @@
 # limitations under the License.
 #
 
-FROM hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-800I-A2-mindspore2.7.1.post1-openeuler24.03-lts-sp2-20260116
+FROM hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-300I-Duo-openeuler24.03-lts-sp2-20251211
 
 ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 ARG PIP_NO_CACHE_DIR=1
@@ -27,7 +27,7 @@ COPY . /workspace/LMCache-Ascend/
 
 RUN yum install -y numactl-devel && rm -rf /var/cache/yum && \
     NO_CUDA_EXT=1 pip install lmcache==0.3.12 --no-deps && \
-    cd LMCache-Ascend && export SOC_VERSION=Ascend910B3 && \
+    cd LMCache-Ascend && export SOC_VERSION=Ascend310P3 && \
     USE_MINDSPORE=1 pip install -r requirement_ms.txt --no-build-isolation -v -e .
 
 CMD ["/bin/bash"]
