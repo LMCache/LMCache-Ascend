@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Callable, List, Any
+from typing import Any, Callable, List
 from unittest.mock import MagicMock
 import importlib.util
 
