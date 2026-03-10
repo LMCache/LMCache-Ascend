@@ -17,23 +17,19 @@ from lmcache_ascend.v1.blend.positional_encoding import (
     get_rope_compat,
 )
 
+# Fallback for older versions or different paths
+set_current_vllm_config = None
+CompilationConfig = None
+VllmConfig = None
+
 VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
 if VLLM_INSTALLED:
     # Third Party
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 
     # First Party
     from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
-else:
-    # Attempt to import vLLM configuration utilities
-    try:
-        # Third Party
-        from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
-    except ImportError:
-        # Fallback for older versions or different paths
-        set_current_vllm_config = None
-        CompilationConfig = None
-        VllmConfig = None
 
 
 # ==============================================================================
