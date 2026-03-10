@@ -26,7 +26,7 @@ VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
 if VLLM_INSTALLED:
     # Third Party
-    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
+    from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config  # type: ignore[no-redef]
 
     # First Party
     from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
