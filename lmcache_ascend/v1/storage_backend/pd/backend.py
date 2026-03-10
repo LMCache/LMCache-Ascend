@@ -209,9 +209,8 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             # CPU allocator — for sender-side KV offload (NPU -> CPU -> RDMA).
             # or configured to use CPU as the buffer device.
             # Falls back to pd_buffer_size when pd_cpu_buffer_size is not set.
-            cpu_buffer_size = getattr(
-                config, "pd_cpu_buffer_size", config.pd_buffer_size
-            )
+            cpu_buffer_size = config.pd_cpu_buffer_size or config.pd_buffer_size
+
             cpu_aligned_byte = (
                 (cpu_buffer_size + total_size - 1) // total_size * total_size
             )
