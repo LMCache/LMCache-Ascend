@@ -256,7 +256,6 @@ def _patch_multi_process():
 
 def _patch_kv_layer_group():
     # Third Party
-    # Third Party
     from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
 
     # First Party
@@ -470,7 +469,7 @@ if not LMCACHE_ASCEND_PATCHED:
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()
 
-    _patch_wait_for_save()
+        _patch_wait_for_save()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
