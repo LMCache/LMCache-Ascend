@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Callable, List
+from typing import Callable, List, Any
 from unittest.mock import MagicMock
 import importlib.util
 
@@ -18,9 +18,9 @@ from lmcache_ascend.v1.blend.positional_encoding import (
 )
 
 # Fallback for older versions or different paths
-set_current_vllm_config = None
-CompilationConfig = None
-VllmConfig = None
+set_current_vllm_config: Any = None
+CompilationConfig: Any = None
+VllmConfig: Any = None
 
 VLLM_INSTALLED = importlib.util.find_spec("vllm") is not None
 
