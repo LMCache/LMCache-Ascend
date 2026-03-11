@@ -19,7 +19,7 @@ logger = init_logger(__name__)
 def GPUMemoryAllocator__init__(
     self,
     size: int,
-    device="cuda",
+    device="npu",
     align_bytes: Optional[int] = None,
     use_paging: bool = False,
     **kwargs,
@@ -28,10 +28,7 @@ def GPUMemoryAllocator__init__(
     :param int size: The size of the GPU memory in bytes.
     :param Optional[int] align_bytes: The byte alignment for allocations.
     """
-    # NOTE(niming): In sglang's 'transfer_to_npu', torch.cuda.is_available
-    # is manually mocked to False to prevent CUDA-specific logic.
-    # This implementation keeps the original device behavior.
-    # torch.cuda.is_available = lambda: False
+    # NOTE(niming): torch.cuda.is_available() is mocked to False by sglang.
     if not torch.npu.is_available():
         device = "cpu"
 

@@ -218,9 +218,9 @@ def _patch_torch_capability():
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
     import torch
 
+    # Note: torch_npu do not support get_device_capability
     capability_mock = lambda *args: (0, 0)
     torch.npu.get_device_capability = capability_mock
-    torch.cuda.get_device_capability = capability_mock
 
 
 def _patch_transfer_channel():
