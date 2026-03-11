@@ -984,9 +984,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 # still reading from the same pool on load_stream.
                 # Events are pre-allocated and re-recorded each iteration.
                 channel = proxy_items[0][0]._transfer_channel
-                transport_stream = getattr(
-                    channel, "transport_stream", None
-                )
+                transport_stream = getattr(channel, "transport_stream", None)
                 pool_scatter_events = [
                     torch.npu.Event(),
                     torch.npu.Event(),
@@ -998,11 +996,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
                     # Ensure the previous scatter from this pool has
                     # finished before RDMA overwrites the pool buffers.
-                    if pool_scatter_recorded[current_pool] \
-                            and transport_stream is not None:
-                        transport_stream.wait_event(
-                            pool_scatter_events[current_pool]
-                        )
+                    if (
+                        pool_scatter_recorded[current_pool]
+                        and transport_stream is not None
+                    ):
+                        transport_stream.wait_event(pool_scatter_events[current_pool])
 
                     # Assign backing buffers from current pool to proxies
                     for i, (proxy, _, _) in enumerate(batch):
@@ -1022,9 +1020,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                             prev_read_event,
                             **kwargs,
                         )
-                        pool_scatter_events[1 - current_pool].record(
-                            self.load_stream
-                        )
+                        pool_scatter_events[1 - current_pool].record(self.load_stream)
                         pool_scatter_recorded[1 - current_pool] = True
                         self._clear_proxy_batch(prev_batch)
 
