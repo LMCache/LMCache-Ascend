@@ -979,8 +979,30 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 prev_read_event = None
                 prev_batch = None
 
+                # Per-pool scatter-done events: prevent the next RDMA
+                # write into a pool from racing with a scatter that is
+                # still reading from the same pool on load_stream.
+                # Events are pre-allocated and re-recorded each iteration.
+                channel = proxy_items[0][0]._transfer_channel
+                transport_stream = getattr(
+                    channel, "transport_stream", None
+                )
+                pool_scatter_events = [
+                    torch.npu.Event(),
+                    torch.npu.Event(),
+                ]
+                pool_scatter_recorded = [False, False]
+
                 for batch_idx, batch in enumerate(micro_batches):
                     pool = pools[current_pool]
+
+                    # Ensure the previous scatter from this pool has
+                    # finished before RDMA overwrites the pool buffers.
+                    if pool_scatter_recorded[current_pool] \
+                            and transport_stream is not None:
+                        transport_stream.wait_event(
+                            pool_scatter_events[current_pool]
+                        )
 
                     # Assign backing buffers from current pool to proxies
                     for i, (proxy, _, _) in enumerate(batch):
@@ -1000,9 +1022,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                             prev_read_event,
                             **kwargs,
                         )
-                        # TODO (gingfung): investigate whether
-                        # we need to record scatter-done event on load_stream
-                        # so the next RDMA into the same pool waits for it.
+                        pool_scatter_events[1 - current_pool].record(
+                            self.load_stream
+                        )
+                        pool_scatter_recorded[1 - current_pool] = True
                         self._clear_proxy_batch(prev_batch)
 
                     prev_read_event = cur_read_event
