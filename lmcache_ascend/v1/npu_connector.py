@@ -885,6 +885,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             assert not is_310p(), "Batched P2P transfer is not supported on 310P."
 
             self._remote_batched_to_gpu(memory_objs, starts, ends, **kwargs)
+
+            # NOTE (gingfung): Ensure the compute stream waits for
+            # load_stream's KV scatter to complete before attention
+            # reads the same pages.
+            # load_stream.synchronize() in _remote_batched_to_gpu is
+            # host-side only, the compute stream has no knowledge of it
+            # and can race ahead.
+            torch.npu.current_stream().wait_stream(self.load_stream)
         else:
             with torch.cuda.stream(self.load_stream):
                 for memory_obj, start, end in zip(
