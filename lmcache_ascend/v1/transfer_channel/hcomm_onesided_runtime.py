@@ -60,7 +60,7 @@ def _cleanup_failed_comm(comm: int, mem_handles: List[int]) -> None:
 
     Mirrors the cleanup sequence in ``HcommOneSidedChannel._destroy_peer_comm``
     (unbind all handles, then destroy the comm) so that the comm name is
-    removed from ``g_oneSidedCommHcomInfos`` and the next retry can re-use it.
+    removed from ``g_oneSidedCommHcomInfos`` and the next retry can reuse it.
 
     Must be serialized via ``_hccl_init_lock`` because ``destroy_comm``
     modifies the same thread-unsafe global registry that
