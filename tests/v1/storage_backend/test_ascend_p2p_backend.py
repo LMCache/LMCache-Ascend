@@ -20,11 +20,7 @@ prepare_environment()
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
-from lmcache.v1.storage_backend.p2p_backend import (
-    P2PErrorCode,
-    P2PErrorMsg,
-    PeerInfo,
-)
+from lmcache.v1.storage_backend.p2p_backend import P2PErrorCode, P2PErrorMsg, PeerInfo
 import msgspec
 import pytest
 import torch

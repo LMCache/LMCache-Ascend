@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 # Third Party
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole

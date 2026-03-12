@@ -7,9 +7,7 @@ from lmcache.storage_backend.serde.cachegen_basics import (
     CacheGenGPUEncoderOutput,
     QuantizationSpec,
 )
-from lmcache.storage_backend.serde.cachegen_decoder import (
-    decode_function_gpu,
-)
+from lmcache.storage_backend.serde.cachegen_decoder import decode_function_gpu
 from lmcache.storage_backend.serde.cachegen_encoder import (
     _split_kv,
     encode_function,

@@ -23,14 +23,8 @@ import lmcache_ascend.hixl_npu_comms as hixl_comms
 
 # Local
 from .base_channel import BaseMultiBufferChannel
-from .buffer_config import (
-    BufferConfig,
-    PeerBufferInfo,
-    RemotePeerBufferList,
-)
-from .hixl_engine import (
-    HixlEngineWrapper,
-)
+from .buffer_config import BufferConfig, PeerBufferInfo, RemotePeerBufferList
+from .hixl_engine import HixlEngineWrapper
 from .hixl_protocol import (
     HixlInitRequest,
     HixlInitResponse,
