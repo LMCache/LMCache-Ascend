@@ -6,6 +6,7 @@ import os
 import random
 import socket
 import subprocess
+import threading
 import time
 
 # Third Party
@@ -34,9 +35,47 @@ _V2_SOC_NAMES = frozenset(
     }
 )
 
-_HCOMM_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCOMM_INIT_MAX_RETRIES", "5"))
-_HCOMM_INIT_BASE_DELAY = 0.1
+_HCOMM_INIT_MAX_RETRIES = int(os.environ.get("LMCACHE_HCOMM_INIT_MAX_RETRIES", "3"))
+_HCOMM_INIT_BASE_DELAY = 0.5
 _HCOMM_INIT_MAX_DELAY = 5.0
+
+_HCOMM_PREPARE_MAX_RETRIES = int(
+    os.environ.get("LMCACHE_HCOMM_PREPARE_MAX_RETRIES", "10")
+)
+_HCOMM_PREPARE_BASE_DELAY = 0.2
+_HCOMM_PREPARE_MAX_DELAY = 1.0
+
+# Serialize init_comm_cluster_info / bind_mem / destroy_comm within a process.
+# The global one-sided comm registry (g_oneSidedCommHcomInfos) in libhcomm
+# is not thread-safe; concurrent calls from the server init thread and the
+# client init path corrupt the map and leave zombie comm names that block
+# subsequent retries with "comm Name exist" (HCCL_E_PARA).
+# NOTE: prepare() must NOT be called under this lock -- it is a blocking
+# rendezvous that needs both sides to call concurrently.
+_hccl_init_lock = threading.Lock()
+
+
+def _cleanup_failed_comm(comm: int, mem_handles: List[int]) -> None:
+    """Best-effort teardown of a comm whose prepare or bind failed.
+
+    Mirrors the cleanup sequence in ``HcommOneSidedChannel._destroy_peer_comm``
+    (unbind all handles, then destroy the comm) so that the comm name is
+    removed from ``g_oneSidedCommHcomInfos`` and the next retry can re-use it.
+
+    Must be serialized via ``_hccl_init_lock`` because ``destroy_comm``
+    modifies the same thread-unsafe global registry that
+    ``init_comm_cluster_info`` writes to.
+    """
+    with _hccl_init_lock:
+        for mh in mem_handles:
+            try:
+                hcomm_os.unbind_mem(comm, mh)
+            except Exception:
+                logger.warning("Failed to unbind mem %d from comm %d", mh, comm)
+        try:
+            hcomm_os.destroy_comm(comm)
+        except Exception:
+            logger.error("Failed to destroy comm %d", comm)
 
 
 def _init_comm_and_prepare(
@@ -45,41 +84,88 @@ def _init_comm_and_prepare(
     rank: int,
     mem_handles: List[int],
 ) -> int:
-    """Blocking helper: init comm via cluster-info JSON, bind all mem handles, prepare.
+    """Blocking helper: init comm, bind mem handles, prepare with two-level retry.
 
-    Retries ``init_comm_cluster_info`` with exponential back-off because
-    concurrent calls to HcclCommInitClusterInfoMemConfig from different
-    processes on the same node can transiently fail (HCCL error 7).
+    **Outer loop** (``_HCOMM_INIT_MAX_RETRIES``): retries the full
+    init_comm + bind_mem sequence.  On failure the comm is destroyed so
+    the name is freed in ``g_oneSidedCommHcomInfos``.
+
+    **Inner loop** (``_HCOMM_PREPARE_MAX_RETRIES``): retries only
+    ``prepare()`` on the *same* comm.  The HCCL C++ layer cleans socket
+    resources on prepare failure (``CleanSocketResource``) but leaves the
+    comm and bound memory intact, so calling ``HcclCommPrepare`` again is
+    safe -- it re-runs ``CreateLinkFullmesh`` from scratch.  Keeping the
+    comm alive avoids destroying the remote side's in-progress prepare
+    and prevents the cascading desynchronization that exhausts retries on
+    both sides.
+
+    ``_hccl_init_lock`` serializes only ``init_comm_cluster_info`` and
+    ``bind_mem`` (the operations that mutate the thread-unsafe global
+    comm registry).  ``prepare()`` runs **outside** the lock.
     """
     last_err: Optional[RuntimeError] = None
-    for attempt in range(_HCOMM_INIT_MAX_RETRIES):
+
+    for init_attempt in range(_HCOMM_INIT_MAX_RETRIES):
+        comm = None
         try:
-            comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
-            break
+            with _hccl_init_lock:
+                comm = hcomm_os.init_comm_cluster_info(cluster_json, rank, comm_name)
+                for mh in mem_handles:
+                    hcomm_os.bind_mem(comm, mh)
         except RuntimeError as e:
+            if comm is not None:
+                _cleanup_failed_comm(comm, mem_handles)
             last_err = e
             delay = min(
-                _HCOMM_INIT_BASE_DELAY * (2**attempt),
+                _HCOMM_INIT_BASE_DELAY * (2**init_attempt),
                 _HCOMM_INIT_MAX_DELAY,
             )
             delay *= random.uniform(0.5, 1.5)
             logger.warning(
-                "init_comm_cluster_info failed (attempt %d/%d): %s  retrying in %.2fs",
-                attempt + 1,
+                "init/bind failed (attempt %d/%d): %s  retrying in %.2fs",
+                init_attempt + 1,
                 _HCOMM_INIT_MAX_RETRIES,
                 e,
                 delay,
             )
             time.sleep(delay)
-    else:
-        raise RuntimeError(
-            f"init_comm_cluster_info failed after {_HCOMM_INIT_MAX_RETRIES} attempts"
-        ) from last_err
+            continue
 
-    for mh in mem_handles:
-        hcomm_os.bind_mem(comm, mh)
-    hcomm_os.prepare(comm, timeout=120)
-    return comm
+        # init + bind succeeded -- retry prepare on the same comm
+        for prep_attempt in range(_HCOMM_PREPARE_MAX_RETRIES):
+            try:
+                hcomm_os.prepare(comm, timeout=120)
+                return comm
+            except RuntimeError as e:
+                last_err = e
+                delay = min(
+                    _HCOMM_PREPARE_BASE_DELAY * (2**prep_attempt),
+                    _HCOMM_PREPARE_MAX_DELAY,
+                )
+                delay *= random.uniform(0.5, 1.5)
+                logger.warning(
+                    "prepare failed (attempt %d/%d) for comm %s: %s  retrying in %.2fs",
+                    prep_attempt + 1,
+                    _HCOMM_PREPARE_MAX_RETRIES,
+                    comm_name,
+                    e,
+                    delay,
+                )
+                time.sleep(delay)
+
+        # prepare retries exhausted -- tear down and start full cycle over
+        logger.error(
+            "prepare exhausted %d retries for comm %s, destroying comm",
+            _HCOMM_PREPARE_MAX_RETRIES,
+            comm_name,
+        )
+        _cleanup_failed_comm(comm, mem_handles)
+
+    raise RuntimeError(
+        f"_init_comm_and_prepare failed after "
+        f"{_HCOMM_INIT_MAX_RETRIES} init attempts "
+        f"(each with {_HCOMM_PREPARE_MAX_RETRIES} prepare retries)"
+    ) from last_err
 
 
 def _is_device_memory(ptr: int) -> bool:
