@@ -671,7 +671,11 @@ class AscendP2PBackend(P2PBackend):
             try:
                 old_socket.close(linger=0)
             except Exception as e:
-                logger.warning("Failed to close old done socket for peer %s: %s", target_peer_url, e)
+                logger.warning(
+                    "Failed to close old done socket for peer %s: %s",
+                    target_peer_url,
+                    e,
+                )
 
         query_msg = AscendQueryDonePortMsg()
         ret_bytes = None
