@@ -9,12 +9,7 @@
 #include <sys/mman.h>
 
 uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
-  void *ptr = nullptr;
-  // no flags
-  aclError err = aclrtMallocHost(&ptr, size);
-  if (err != ACL_SUCCESS) {
-    throw std::runtime_error("aclrtMallocHost failed: " + std::to_string(err));
-  }
+  void *ptr = alloc_mem(size);
 
   const char *socVersion = aclrtGetSocName();
 
@@ -26,7 +21,7 @@ uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
     // not 310p
     auto devPtr = register_ptr(ptr, size);
     if (devPtr == nullptr) {
-      free_pinned_ptr(reinterpret_cast<uintptr_t>(ptr));
+      free_mem(ptr);
       throw std::runtime_error("register ptr failed");
     }
   }
@@ -35,11 +30,9 @@ uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
 }
 
 void free_pinned_ptr(uintptr_t ptr) {
-  unregister_ptr(reinterpret_cast<void *>(ptr));
-  aclError err = aclrtFreeHost(reinterpret_cast<void *>(ptr));
-  if (err != ACL_SUCCESS) {
-    throw std::runtime_error("aclrtFreeHost failed: " + std::to_string(err));
-  }
+  void *vptr = reinterpret_cast<void *>(ptr);
+  unregister_ptr(vptr);
+  free_mem(vptr);
 }
 
 /*
@@ -49,7 +42,8 @@ uintptr_t alloc_pinned_numa_ptr(std::size_t size, int node) {
   void *ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (ptr == MAP_FAILED) {
-    throw std::runtime_error(std::string("mmap failed: ") + strerror(errno));
+    throw std::runtime_error(
+        std::string("[alloc_pinned_numa_ptr] mmap failed: ") + strerror(errno));
   }
 
   // Maximum of 64 numa nodes
@@ -59,7 +53,17 @@ uintptr_t alloc_pinned_numa_ptr(std::size_t size, int node) {
                   MPOL_MF_MOVE | MPOL_MF_STRICT);
   if (err != 0) {
     munmap(ptr, size);
-    throw std::runtime_error(std::string("mbind failed: ") + strerror(errno));
+    throw std::runtime_error(
+        std::string("[alloc_pinned_numa_ptr] mbind failed: ") +
+        strerror(errno));
+  }
+
+  // In kernels 5.10 and earlier, the aclrtHostRegister requires pinned memory
+  if (mlock(ptr, size) != 0) {
+    munmap(ptr, size);
+    throw std::runtime_error(
+        std::string("[alloc_pinned_numa_ptr] mlock failed: ") +
+        strerror(errno));
   }
 
   memset(ptr, 0, size);
@@ -86,8 +90,12 @@ uintptr_t alloc_pinned_numa_ptr(std::size_t size, int node) {
 void free_pinned_numa_ptr(uintptr_t p, std::size_t size) {
   void *ptr = reinterpret_cast<void *>(p);
 
+  // Unregister the pointer
   auto unRegErr = unregister_ptr(ptr);
+
+  // Unmap the memory
   auto unMapErr = munmap(ptr, size);
+
   if (unRegErr) {
     throw std::runtime_error("unregister_ptr failed: " +
                              std::to_string(unRegErr));
