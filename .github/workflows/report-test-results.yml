@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["910B Unit Tests"]
+    workflows: ["910B Unit Tests", "MindSpore Unit Tests"]
     types:
       - completed
 
