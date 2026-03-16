@@ -6,18 +6,22 @@
 // that expose functions with std::string or std::vector as arguments
 #define _GLIBCXX_USE_CXX11_ABI 0
 
+// Include internal runtime headers BEFORE hccl_agent.h, then block
+// rt_external.h entirely -- the internal headers are supersets and the
+// external variants redefine the same structs under different guards.
+#include "runtime/dev.h"
+#include "runtime/mem.h"
+#define CCE_RUNTIME_RT_EXTERNAL_H
+
 #include "hccl_agent.h"
-#include "external/rma_buffer.h"
 #include "hccl_utils.h"
+#include "inner/rma_buffer.h"
 
 #include <chrono>
 #include <cstring>
 #include <iostream>
 #include <random>
 #include <thread>
-
-#include "runtime/dev.h"
-#include "runtime/mem.h"
 
 std::shared_ptr<HcclAgent> HcclAgent::instances[MAX_LOCAL_DEVICES];
 std::mutex HcclAgent::instanceMutex;
@@ -66,16 +70,15 @@ HcclResult HcclAgent::Init() {
   }
 
   ACL_CHECK(rtGetDevicePhyIdByIndex(devId_, &phyId_));
-  // TODO: should pass the logical devId to the second argument of NetInit and
-  // NetOpenDev, but Hccl currently wrongly passes the logical ID to
-  // halHostRegister, making it fail when ASCEND_RT_VISIBLE_DEVICES is set. As a
-  // workaround, we temporarily pass the phyId until this is fixed in upstream.
-  // We also temporarily don't check for HcclNetInit errors since when passing
-  // phyId for both arguments, it throws an error if already initialized before.
-  HcclNetInit(NICDeployment::NIC_DEPLOYMENT_DEVICE, phyId_, phyId_, false);
+  std::cerr << "[HcclAgent::Init] devId=" << devId_ << " phyId=" << phyId_
+            << " sizeof(HcclIpAddress)=" << sizeof(hccl::HcclIpAddress)
+            << std::endl;
+
+  HCCL_CHECK(
+      HcclNetInit(NICDeployment::NIC_DEPLOYMENT_DEVICE, phyId_, devId_, false));
   HCCL_CHECK(GetLocalIpv4(phyId_, localIp_));
   HCCL_CHECK(HcclNetOpenDev(&nicNetDevCtx_, NicType::DEVICE_NIC_TYPE, phyId_,
-                            phyId_, localIp_));
+                            devId_, localIp_));
 
   nicServerSocket_ = std::make_shared<hccl::HcclSocket>(nicNetDevCtx_, 0);
   HCCL_CHECK(nicServerSocket_->Init());
