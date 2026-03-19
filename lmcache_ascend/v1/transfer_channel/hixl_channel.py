@@ -304,7 +304,6 @@ class HixlChannel(BaseMultiBufferChannel):
         with self._state_lock:
             remote_engine = self.remote_engine_dict[peer_id]
             remote_buffers = self.remote_peer_buffers[peer_id]
-
         remote_addrs = self._resolve_transfer_addrs(remote_buffers, transfer_spec)
 
         op_descs = []
