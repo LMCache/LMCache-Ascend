@@ -82,6 +82,14 @@ class AscendBatchedLookupAndPutMsg(BatchedLookupAndPutMsg):
     buffer_uuids: list[str] = []
 
 
+class AscendQueryDonePortMsg(msgspec.Struct, tag=True):
+    pass
+
+
+class AscendQueryDonePortRetMsg(msgspec.Struct, tag=True):
+    done_url: str
+
+
 AscendP2PMsg = Union[
     AscendBatchedLookupAndGetMsg,
     AscendBatchedLookupAndGetRetMsg,
@@ -90,6 +98,8 @@ AscendP2PMsg = Union[
     P2PErrorMsg,
     AscendBatchedLookupAndGetDoneMsg,
     AscendBatchedLookupAndGetDoneRetMsg,
+    AscendQueryDonePortMsg,
+    AscendQueryDonePortRetMsg,
 ]
 
 
@@ -265,9 +275,17 @@ class AscendP2PBackend(P2PBackend):
         self.running.set()
         self.async_context: Optional[zmq.asyncio.Context] = None
         self.async_peer_socket: Optional[zmq.asyncio.Socket] = None
+        self.async_done_socket: Optional[zmq.asyncio.Socket] = None
+        self.peer_done_url: Optional[str] = None
+
+        # Per-peer done sockets (client side) keyed by target_peer_url.
+        # Each value is (asyncio.Lock, zmq.asyncio.Socket).
+        self.done_peer_sockets: dict[str, tuple[asyncio.Lock, zmq.asyncio.Socket]] = {}
+
         asyncio.run_coroutine_threadsafe(
             self._run_peer_request_handler_with_recovery(), loop
         )
+        asyncio.run_coroutine_threadsafe(self._run_done_handler_with_recovery(), loop)
         asyncio.run_coroutine_threadsafe(
             self._sweep_expired_pending_pull_resources(), loop
         )
@@ -309,6 +327,11 @@ class AscendP2PBackend(P2PBackend):
                 ret_msg = await self._handle_batched_lookup_and_put(msg)
             elif isinstance(msg, AscendBatchedLookupAndGetDoneMsg):
                 ret_msg = await self._handle_batched_lookup_and_get_done(msg)
+            elif isinstance(msg, AscendQueryDonePortMsg):
+                assert self.peer_done_url is not None, (
+                    "Done signal handler not ready: peer_done_url is None"
+                )
+                ret_msg = AscendQueryDonePortRetMsg(done_url=self.peer_done_url)
             else:
                 logger.error("Unknown message type: %s", type(msg))
                 ret_msg = P2PErrorMsg(error_code=P2PErrorCode.UNKNOWN_MSG_TYPE)
@@ -320,6 +343,59 @@ class AscendP2PBackend(P2PBackend):
                 logger.debug("P2P transfer finished for control signal with no tokens.")
 
             await self.async_peer_socket.send(msgspec.msgpack.encode(ret_msg))
+
+    async def _handle_done_signal_requests(self):
+        """Dedicated handler loop for Done signals on a separate REP socket.
+
+        Binds to an OS-assigned port so there are no port collisions.
+        """
+        assert self.async_context is not None
+        self.async_done_socket = get_zmq_socket_with_timeout(
+            self.async_context,
+            f"{self.peer_host}:0",
+            "tcp",
+            zmq.REP,
+            "bind",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
+        )
+        endpoint: bytes = self.async_done_socket.getsockopt(zmq.LAST_ENDPOINT)
+        self.peer_done_url = endpoint.decode("utf-8").replace("tcp://", "")
+        logger.info("Starting P2P done signal handler at %s", self.peer_done_url)
+
+        while self.running.is_set():
+            msg_bytes = await self.async_done_socket.recv()
+            msg = msgspec.msgpack.decode(
+                msg_bytes, type=AscendBatchedLookupAndGetDoneMsg
+            )
+            ret_msg = await self._handle_batched_lookup_and_get_done(msg)
+            await self.async_done_socket.send(msgspec.msgpack.encode(ret_msg))
+
+    async def _run_done_handler_with_recovery(self) -> None:
+        """Wrapper that runs _handle_done_signal_requests with crash recovery.
+
+        Waits for the main handler to initialise ``async_context`` first,
+        then keeps the done-signal handler alive across unexpected errors.
+        """
+        while self.running.is_set() and self.async_context is None:
+            await asyncio.sleep(0.05)
+
+        while self.running.is_set():
+            try:
+                await self._handle_done_signal_requests()
+                break
+            except asyncio.CancelledError:
+                logger.info("Done signal handler cancelled, shutting down")
+                break
+            except Exception as e:
+                logger.error("Done signal handler crashed: %s", e, exc_info=True)
+                await asyncio.sleep(0.1)
+                if self.async_done_socket is not None:
+                    try:
+                        self.async_done_socket.close(linger=0)
+                    except Exception:
+                        pass
+                    self.async_done_socket = None
 
     async def _handle_batched_lookup_and_get(
         self, msg: AscendBatchedLookupAndGetMsg
@@ -575,31 +651,145 @@ class AscendP2PBackend(P2PBackend):
                     return None
         return None
 
+    async def _ensure_done_peer_connection(
+        self,
+        target_peer_url: str,
+        force: bool = False,
+    ) -> None:
+        """Ensure a dedicated done-signal socket exists for *target_peer_url*.
+
+        On the first call for a peer, queries the peer's done-port via the
+        lookup socket (one-time) and connects a dedicated REQ socket.
+        Subsequent calls return immediately unless *force* is True, which
+        closes the old socket and re-queries (e.g. after a ZMQ error).
+        """
+        if not force and target_peer_url in self.done_peer_sockets:
+            return
+
+        if force and target_peer_url in self.done_peer_sockets:
+            _, old_socket = self.done_peer_sockets.pop(target_peer_url)
+            try:
+                old_socket.close(linger=0)
+            except Exception as e:
+                logger.warning(
+                    "Failed to close old done socket for peer %s: %s",
+                    target_peer_url,
+                    e,
+                )
+
+        query_msg = AscendQueryDonePortMsg()
+        ret_bytes = None
+        for query_attempt in range(2):
+            peer_info = self.target_peer_info_mapping[target_peer_url]
+            async with peer_info.lookup_lock:
+                try:
+                    await peer_info.lookup_socket.send(
+                        msgspec.msgpack.encode(query_msg)
+                    )
+                    ret_bytes = await peer_info.lookup_socket.recv()
+                    break
+                except zmq.ZMQError:
+                    if query_attempt == 0:
+                        pass
+                    else:
+                        raise
+            if ret_bytes is not None:
+                break
+            await self._ensure_peer_connection(target_peer_url, True)
+
+        if ret_bytes is None:
+            raise RuntimeError(
+                "Done port query failed for %s (lookup socket in bad state)"
+                % target_peer_url
+            )
+        ret_msg = msgspec.msgpack.decode(ret_bytes, type=AscendP2PMsg)
+        if not isinstance(ret_msg, AscendQueryDonePortRetMsg):
+            raise RuntimeError(
+                f"Unexpected response to AscendQueryDonePortMsg: {type(ret_msg)}"
+            )
+        done_url = ret_msg.done_url
+        logger.info(
+            "Discovered done port for peer %s: %s",
+            target_peer_url,
+            done_url,
+        )
+
+        ctx = get_zmq_context()
+        done_socket = get_zmq_socket_with_timeout(
+            ctx,
+            done_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
+            self.socket_recv_timeout_ms,
+            self.socket_send_timeout_ms,
+        )
+        self.done_peer_sockets[target_peer_url] = (
+            asyncio.Lock(),
+            done_socket,
+        )
+        # ZMQ connect() is asynchronous; yield so the TCP connection can
+        # establish before the first send (avoids EAGAIN "Resource temporarily
+        # unavailable" on immediate send).
+        await asyncio.sleep(0.05)
+
     async def _send_done_signal(
         self,
         lookup_id: str,
         target_peer_url: str,
     ) -> None:
-        """Send Done signal to peer so it can release pinned resources.
+        """Send Done signal on the dedicated done socket with retry.
 
-        This is critical to prevent memory leaks on the server side.
+        Uses a per-peer done socket that is fully isolated from the
+        lookup socket, preventing the ZMQ REQ/REP state-machine
+        poisoning cascade.
         """
-        try:
-            done_msg = AscendBatchedLookupAndGetDoneMsg(
-                lookup_id=lookup_id,
-            )
-            peer_info = self.target_peer_info_mapping[target_peer_url]
-            async with peer_info.lookup_lock:
-                await peer_info.lookup_socket.send(msgspec.msgpack.encode(done_msg))
-                # Wait for Ack (required for ZMQ REQ/REP state machine)
-                await peer_info.lookup_socket.recv()
-        except Exception as e:
-            logger.error(
-                "Error sending P2P Done signal for lookup_id %s: %s",
-                lookup_id,
-                e,
-                exc_info=True,
-            )
+        done_msg = AscendBatchedLookupAndGetDoneMsg(lookup_id=lookup_id)
+        encoded = msgspec.msgpack.encode(done_msg)
+
+        for attempt in range(self.max_retry_count):
+            try:
+                await self._ensure_done_peer_connection(target_peer_url)
+            except Exception as e:
+                logger.error(
+                    "Failed to ensure done peer connection for "
+                    "lookup_id %s (attempt %d/%d): %s",
+                    lookup_id,
+                    attempt + 1,
+                    self.max_retry_count,
+                    e,
+                )
+                continue
+
+            done_lock, done_socket = self.done_peer_sockets[target_peer_url]
+            async with done_lock:
+                try:
+                    await done_socket.send(encoded)
+                    await done_socket.recv()
+                    return
+                except zmq.ZMQError as e:
+                    logger.warning(
+                        "ZMQ error sending Done for %s (attempt %d/%d): %s",
+                        lookup_id,
+                        attempt + 1,
+                        self.max_retry_count,
+                        e,
+                    )
+                    await self._ensure_done_peer_connection(target_peer_url, force=True)
+                except Exception as e:
+                    logger.error(
+                        "Error sending Done for %s: %s",
+                        lookup_id,
+                        e,
+                        exc_info=True,
+                    )
+                    return
+
+        logger.error(
+            "Failed to send Done for %s after %d attempts",
+            lookup_id,
+            self.max_retry_count,
+        )
 
     async def _handle_pull_mode_transfer(
         self,
@@ -771,3 +961,25 @@ class AscendP2PBackend(P2PBackend):
         transfer_spec: Any = None,
     ) -> None:
         raise NotImplementedError("Batched put is not implemented for AscendP2PBackend")
+
+    def close(self) -> None:
+        """Close the Ascend P2P backend, including dedicated done sockets."""
+        for peer_url, (_, sock) in self.done_peer_sockets.items():
+            try:
+                sock.close(linger=0)
+            except Exception as e:
+                logger.warning(
+                    "Failed to close done socket for peer %s: %s",
+                    peer_url,
+                    e,
+                )
+        self.done_peer_sockets.clear()
+
+        if self.async_done_socket is not None:
+            try:
+                self.async_done_socket.close(linger=0)
+            except Exception as e:
+                logger.warning("Failed to close async done socket: %s", e)
+            self.async_done_socket = None
+
+        super().close()
