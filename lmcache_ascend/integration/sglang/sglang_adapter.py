@@ -14,17 +14,10 @@ from lmcache.utils import (
 )
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.metadata import LMCacheMetadata
 from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
-
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    SGLangLayerwiseNPUConnector,
-    SGLangNPUConnector,
-)
 
 logger = init_logger(__name__)
 

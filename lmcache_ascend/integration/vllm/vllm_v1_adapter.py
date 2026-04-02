@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from types import SimpleNamespace
-from typing import Optional
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
@@ -15,7 +14,6 @@ from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.metadata import LMCacheMetadata
-from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 
 try:
@@ -69,8 +67,7 @@ def ascend_create_gpu_connector(
     if engine == EngineType.VLLM:
         if metadata.use_mla and config.use_layerwise and config.enable_blending:
             raise ValueError(
-                "We haven't supported MLA with Cacheblend yet. "
-                "Please disable blending."
+                "We haven't supported MLA with Cacheblend yet. Please disable blending."
             )
 
         if config.use_layerwise:
@@ -85,13 +82,10 @@ def ascend_create_gpu_connector(
 
         if config.use_gpu_connector_v3:
             raise NotImplementedError(
-                "GPU Connector v3 is not supported yet. "
-                "Please contact LMCache-Ascend."
+                "GPU Connector v3 is not supported yet. Please contact LMCache-Ascend."
             )
         else:
-            return VLLMPagedMemNPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
+            return VLLMPagedMemNPUConnectorV2.from_metadata(metadata, use_gpu, device)
     elif engine == EngineType.SGLANG:
         # First Party
         from lmcache_ascend.v1.npu_connector import (
@@ -131,7 +125,6 @@ def ascend_create_lmcache_engine(self, role: str) -> LMCacheEngine:
     Sets NPU device and uses Ascend-specific GPU connector factory.
     """
     # Third Party
-    from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
 
     if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
@@ -142,9 +135,7 @@ def ascend_create_lmcache_engine(self, role: str) -> LMCacheEngine:
     parallel_config = self._vllm_config.parallel_config
     cache_config = self._vllm_config.cache_config
 
-    kv_dtype = get_kv_cache_torch_dtype(
-        cache_config.cache_dtype, model_config.dtype
-    )
+    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
 
     use_mla = mla_enabled(model_config)
     self._validate_mla_config(use_mla)
@@ -261,9 +252,7 @@ def wait_for_save(self):
 
     if self.use_layerwise:
         for request in connector_metadata.requests:
-            layerwise_storer = self._layerwise_save_storers.pop(
-                request.req_id, None
-            )
+            layerwise_storer = self._layerwise_save_storers.pop(request.req_id, None)
             if layerwise_storer is not None:
                 next(layerwise_storer)
             self.lmcache_engine.lookup_unpin(request.req_id)

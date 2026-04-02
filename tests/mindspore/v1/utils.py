@@ -26,9 +26,7 @@ def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
     )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, kv_shape=(32, 2, 256, 8, 128)
-):
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
     return LMCacheMetadata(
         model_name=model_name,
         world_size=3,

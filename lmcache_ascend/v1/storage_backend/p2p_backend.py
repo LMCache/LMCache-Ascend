@@ -5,7 +5,6 @@ import asyncio
 
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -14,6 +13,7 @@ from lmcache.v1.memory_management import (
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import (
     DEFAULT_SOCKET_RECV_TIMEOUT_MS,
     DEFAULT_SOCKET_SEND_TIMEOUT_MS,

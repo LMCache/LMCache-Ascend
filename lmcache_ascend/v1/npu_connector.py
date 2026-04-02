@@ -15,8 +15,8 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 import torch
 
 # First Party
