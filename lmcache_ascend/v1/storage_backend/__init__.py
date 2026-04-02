@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING, Optional
 import asyncio
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend import storage_plugin_launcher
 from lmcache.v1.storage_backend.abstract_backend import StorageBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-def is_npu_worker(metadata: LMCacheEngineMetadata) -> bool:
+def is_npu_worker(metadata: LMCacheMetadata) -> bool:
     """
     Check if the current role is worker and CUDA is available.
 
@@ -48,10 +48,12 @@ Also remove NIXL as it is not supported.
 
 def CreateStorageBackends(
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,  # noqa: F821
+    skip_backends=None,
+    existing_backends=None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_npu_worker(metadata):
         dst_device = f"npu:{torch.npu.current_device()}"

@@ -12,8 +12,8 @@ from typing import Optional, Union
 import threading
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import get_size_bytes
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -58,7 +58,7 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
     ):
         self.running = True
         self.tp_rank = metadata.worker_id
@@ -179,7 +179,7 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         self._kv_dtypes = [metadata.kv_dtype]
 
     def initialize_allocator(
-        self, config: LMCacheEngineConfig, metadata: LMCacheEngineMetadata
+        self, config: LMCacheEngineConfig, metadata: LMCacheMetadata
     ) -> PagedCpuGpuMemoryAllocator:
         npu_corrected_device = get_correct_device("npu", metadata.worker_id)
         logger.debug("Setting NPU device to %s", npu_corrected_device)

@@ -4,8 +4,8 @@ from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.logging import init_logger
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
@@ -107,7 +107,7 @@ class AscendP2PBackend(P2PBackend):
     def __init__(
         self,
         config: LMCacheEngineConfig,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         loop: asyncio.AbstractEventLoop,
         local_cpu_backend: LocalCPUBackend,
         lmcache_worker: "LMCacheWorker",

@@ -6,7 +6,7 @@ import asyncio
 import threading
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.utils import CacheEngineKey, start_loop_in_thread_with_exceptions
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.event_manager import EventManager
@@ -89,7 +89,7 @@ def allocate_and_copy_objects_310p(
 def StorageManager__init__(
     self,
     config: LMCacheEngineConfig,
-    metadata: LMCacheEngineMetadata,
+    metadata: LMCacheMetadata,
     event_manager: EventManager,
     lmcache_worker: Optional["LMCacheWorker"] = None,
     async_lookup_server: Optional["LMCacheAsyncLookupServer"] = None,

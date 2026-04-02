@@ -4,7 +4,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.3.12"
+LMCACHE_UPSTREAM_TAG = "v0.4.2"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -269,44 +269,42 @@ def _patch_kv_layer_group():
     )
 
 
-def _patch_mooncake_store_connector():
+def _patch_gpu_connector():
+    """Patch CreateGPUConnector to return NPU connectors on Ascend.
+
+    In LMCache 0.4.2, engine initialization uses CreateGPUConnector()
+    as a factory function. We patch it to return Ascend NPU connectors
+    instead of the default CUDA ones.
+    """
     # Third Party
-    import lmcache.v1.storage_backend.connector.mooncakestore_connector as lmc_mks_connector  # noqa: E501
-
-    # First Party
-    from lmcache_ascend.v1.storage_backend.connector.mooncakestore_connector import (  # noqa: E501
-        _batched_put_with_metadata,
-        _batched_put_zero_copy,
-    )
-
-    # NOTE (gingfung): these two function patches fixes the double free ref counts
-    # we took the upstream merged post v0.3.12 into our current branch,
-    # please remove after.
-    # Ref - https://github.com/LMCache/LMCache/pull/2415
-    lmc_mks_connector.MooncakestoreConnector._batched_put_zero_copy = (
-        _batched_put_zero_copy
-    )
-    lmc_mks_connector.MooncakestoreConnector._batched_put_with_metadata = (
-        _batched_put_with_metadata
-    )
-
-
-def _patch_init_engine():
-    # Third Party
-    import lmcache.integration.vllm.vllm_v1_adapter
+    import lmcache.v1.gpu_connector as lm_gpu_connector
 
     # First Party
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-        init_lmcache_engine as ascend_init_lmcache_engine,
+        ascend_create_gpu_connector,
     )
 
-    # NOTE (gingfung): this is the main entry point of LMCache, and since we are
-    # patching this, every time we upgrade, we should re-evaluate the function, as
-    # the experience is that this function signatures or init process will change
-    # every N versions.
-    lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
-        ascend_init_lmcache_engine
+    lm_gpu_connector.CreateGPUConnector = ascend_create_gpu_connector
+
+    # Also patch the manager module if it's already imported
+    _manager_mod = sys.modules.get("lmcache.v1.manager")
+    if _manager_mod is not None:
+        _manager_mod.CreateGPUConnector = ascend_create_gpu_connector
+
+
+def _patch_init_engine():
+    """Patch the LMCacheManager._create_lmcache_engine to set NPU device
+    and use NPU-specific local rank calculation.
+    """
+    # Third Party
+    import lmcache.v1.manager as lm_manager
+
+    # First Party
+    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+        ascend_create_lmcache_engine,
     )
+
+    lm_manager.LMCacheManager._create_lmcache_engine = ascend_create_lmcache_engine
 
 
 def _patch_wait_for_save():
@@ -460,11 +458,13 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_rpc_utils()
 
     _patch_kv_layer_group()
-    _patch_mooncake_store_connector()
+    # NOTE: mooncake double-free fix (PR #2415) is included in LMCache v0.4.2,
+    # so _patch_mooncake_store_connector is no longer needed.
 
     if is_sgl:
         _patch_sgl()
     elif is_vllm:
+        _patch_gpu_connector()
         _patch_init_engine()
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()

@@ -47,7 +47,7 @@ Please ensure your environment matches the versions below.
 #### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.3.12** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
+| **main** | **v0.4.2** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
 | **v0.3.7** | **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
 | **v0.3.7** | **v0.3.7** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
 | v0.3.3 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
@@ -55,12 +55,12 @@ Please ensure your environment matches the versions below.
 #### For PyTorch / SGLang
 | LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.3.12** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
+| **main** | **v0.4.2** | **0.5.8** | **2.8.0.post2.dev20251113** | 🚧 **Experimental** |
 
 #### for MindSpore
 | LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.3.7** | **v0.11.0** | **2.7.1.post1** | ✅ **Verified (Recommended)** |
+| **main** | **v0.4.2** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
 | **v0.3.7** | **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
@@ -82,7 +82,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 Build the image using the provided Dockerfile:
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.11.0-openeuler .
 ```
 
 Once that is built, run it with the following cmd
@@ -106,7 +106,7 @@ docker run -it \
     -v /dev/devmm_svm:/dev/devmm_svm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -v /etc/hccn.conf:/etc/hccn.conf \
-    lmcache-ascend:v0.3.12-vllm-ascend-v0.11.0-openeuler \
+    lmcache-ascend:v0.4.2-vllm-ascend-v0.11.0-openeuler \
     /bin/bash
 ```
 
@@ -139,7 +139,7 @@ docker run -it --privileged --net=host --name lmcache-sglang-dev quay.io/ascend/
 
 - from pip
 ```bash
-NO_CUDA_EXT=1 pip install lmcache==0.3.12
+NO_CUDA_EXT=1 pip install lmcache==0.4.2
 ```
 
 3. Install LMCache-Ascend Repo

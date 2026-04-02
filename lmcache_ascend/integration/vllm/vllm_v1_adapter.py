@@ -4,18 +4,17 @@ from types import SimpleNamespace
 from typing import Optional
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
-    _calculate_draft_layers,
-    need_gpu_interm_buffer,
 )
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import GPUConnectorInterface
+from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
+from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
+from lmcache.v1.metadata import LMCacheMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 
@@ -50,150 +49,193 @@ elif _build_info.__framework_name__ == "mindspore":
 logger = init_logger(__name__)
 
 
-# We need to patch this function due to connector modification
-def init_lmcache_engine(
-    lmcache_config: LMCacheEngineConfig,
-    vllm_config: "VllmConfig",
-    role: str,
-) -> LMCacheEngine:
-    """Initialize the LMCache engine by the given model config and parallel
-    config. This function will check the environment variable
-    `LMCACHE_CONFIG_FILE` to load the configuration file. If that environment
-    variable is not set, this function will return None.
+def ascend_create_gpu_connector(
+    config: LMCacheEngineConfig,
+    metadata: LMCacheMetadata,
+    engine: EngineType,
+) -> GPUConnectorInterface:
+    """Factory function to create NPU connectors on Ascend.
 
-    :param lmcache_config: The LMCache configuration.
-    :type lmcache_config: LMCacheEngineConfig
-    :param vllm_config: The vLLM configuration.
-    :type vllm_config: VllmConfig
-
-    :return: The initialized LMCache engine
-    :rtype: LMCacheEngine
+    Replaces upstream CreateGPUConnector to return Ascend NPU-specific
+    connector implementations.
     """
+    use_gpu = need_gpu_interm_buffer(config)
 
-    curr_engine = LMCacheEngineBuilder.get(ENGINE_NAME)
-    if curr_engine:
+    num_gpus = torch.npu.device_count()
+    local_rank = metadata.worker_id % num_gpus
+    torch.npu.set_device(local_rank)
+    device = torch.device(f"npu:{local_rank}")
+
+    if engine == EngineType.VLLM:
+        if metadata.use_mla and config.use_layerwise and config.enable_blending:
+            raise ValueError(
+                "We haven't supported MLA with Cacheblend yet. "
+                "Please disable blending."
+            )
+
+        if config.use_layerwise:
+            if config.enable_blending:
+                return VLLMBufferLayerwiseNPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+            else:
+                return VLLMPagedMemLayerwiseNPUConnector.from_metadata(
+                    metadata, use_gpu, device
+                )
+
+        if config.use_gpu_connector_v3:
+            raise NotImplementedError(
+                "GPU Connector v3 is not supported yet. "
+                "Please contact LMCache-Ascend."
+            )
+        else:
+            return VLLMPagedMemNPUConnectorV2.from_metadata(
+                metadata, use_gpu, device
+            )
+    elif engine == EngineType.SGLANG:
+        # First Party
+        from lmcache_ascend.v1.npu_connector import (
+            SGLangLayerwiseNPUConnector,
+            SGLangNPUConnector,
+        )
+
+        num_layer, _, chunk_size, num_kv_head, head_dim = metadata.kv_shape
+        hidden_dim_size = num_kv_head * head_dim
+        kv_dtype = metadata.kv_dtype
+
+        if config.use_layerwise:
+            return SGLangLayerwiseNPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+        else:
+            return SGLangNPUConnector(
+                hidden_dim_size,
+                num_layer,
+                use_gpu=use_gpu,
+                chunk_size=chunk_size,
+                dtype=kv_dtype,
+                device=device,
+            )
+    else:
+        raise RuntimeError(f"Unsupported engine type for Ascend: {engine}")
+
+
+def ascend_create_lmcache_engine(self, role: str) -> LMCacheEngine:
+    """Patched version of LMCacheManager._create_lmcache_engine for Ascend.
+
+    Sets NPU device and uses Ascend-specific GPU connector factory.
+    """
+    # Third Party
+    from lmcache.integration.vllm.utils import ENGINE_NAME, mla_enabled
+
+    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
         return curr_engine
 
-    model_config = vllm_config.model_config
-    parallel_config = vllm_config.parallel_config
-    cache_config = vllm_config.cache_config
+    assert self._vllm_config is not None, "vllm_config required for vLLM mode"
 
-    assert isinstance(lmcache_config, LMCacheEngineConfig), (
-        "LMCache v1 configuration is should be passed."
+    model_config = self._vllm_config.model_config
+    parallel_config = self._vllm_config.parallel_config
+    cache_config = self._vllm_config.cache_config
+
+    kv_dtype = get_kv_cache_torch_dtype(
+        cache_config.cache_dtype, model_config.dtype
     )
 
-    kv_dtype = get_kv_cache_torch_dtype(cache_config.cache_dtype, model_config.dtype)
-
     use_mla = mla_enabled(model_config)
-    if use_mla and (
-        lmcache_config.remote_serde != "naive"
-        and lmcache_config.remote_serde is not None
-    ):
-        raise ValueError("MLA only works with naive serde mode..")
+    self._validate_mla_config(use_mla)
 
-    # MLA requires save_unfull_chunk=True for correct KV cache storage and retrieval.
-    # Without this, partial chunks would be discarded, causing incomplete cache
-    # and incorrect results in MLA mode.
-    if use_mla and not lmcache_config.save_unfull_chunk:
-        logger.warning(
-            "MLA (Multi-Level Attention) requires save_unfull_chunk=True "
-            "for correct KV cache storage. Automatically setting "
-            "save_unfull_chunk=True."
-        )
-        lmcache_config.save_unfull_chunk = True
-    elif use_mla:
-        logger.info(
-            "MLA mode enabled with save_unfull_chunk=True - all KV cache "
-            "including partial chunks will be stored"
-        )
-
-    # construct kv shape (for mem pool)
+    # Construct kv shape
     num_layer = model_config.get_num_layers(parallel_config)
-    num_draft_layers = _calculate_draft_layers(vllm_config, model_config)
+    num_draft_layers = self._calculate_draft_layers()
     num_layer += num_draft_layers
-    chunk_size = lmcache_config.chunk_size
-    # this is per gpu
+    chunk_size = self._config.chunk_size
     num_kv_head = model_config.get_num_kv_heads(parallel_config)
     head_size = model_config.get_head_size()
     kv_shape = (num_layer, 1 if use_mla else 2, chunk_size, num_kv_head, head_size)
+
     logger.info(
-        f"num_layer: {num_layer}, chunk_size: {chunk_size}, "
-        f"num_kv_head (per gpu): {num_kv_head}, head_size: {head_size}, "
-        f"hidden_dim (D) for KV (per gpu): {num_kv_head * head_size}, "
-        f"use mla: {use_mla}, kv shape: {kv_shape}, num_draft_layers:{num_draft_layers}"
+        "num_layer: %d, chunk_size: %d, num_kv_head (per gpu): %d, "
+        "head_size: %d, hidden_dim (D) for KV (per gpu): %d, "
+        "use mla: %s, kv shape: %s, num_draft_layers: %d",
+        num_layer,
+        chunk_size,
+        num_kv_head,
+        head_size,
+        num_kv_head * head_size,
+        use_mla,
+        kv_shape,
+        num_draft_layers,
     )
 
-    # Change current device.
+    # Extract engine_id and kv_connector_extra_config from vllm_config
+    engine_id = None
+    kv_connector_extra_config = None
+    if hasattr(self._vllm_config, "kv_transfer_config"):
+        kv_transfer_config = self._vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            engine_id = getattr(kv_transfer_config, "engine_id", None)
+            kv_connector_extra_config = getattr(
+                kv_transfer_config, "kv_connector_extra_config", None
+            )
+
+    # Calculate local rank / world size for NPU
     num_gpus = torch.npu.device_count()
     local_rank = parallel_config.rank % num_gpus
-    torch.npu.set_device(local_rank)
-    device = torch.device(f"npu:{local_rank}")
-    metadata = LMCacheEngineMetadata(
-        model_config.model,
-        parallel_config.world_size,
-        parallel_config.rank,
-        "vllm",
-        kv_dtype,
-        kv_shape,
-        use_mla,
-        role,
+    local_world_size = min(parallel_config.world_size, num_gpus)
+
+    metadata = LMCacheMetadata(
+        model_name=model_config.model,
+        world_size=parallel_config.world_size,
+        local_world_size=local_world_size,
+        worker_id=parallel_config.rank,
+        local_worker_id=local_rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
+        use_mla=use_mla,
+        role=role,
         served_model_name=model_config.served_model_name,
-        chunk_size=lmcache_config.chunk_size,
+        chunk_size=self._config.chunk_size,
+        engine_id=engine_id,
+        kv_connector_extra_config=kv_connector_extra_config,
     )
 
-    use_gpu = need_gpu_interm_buffer(lmcache_config)
-    vllm_gpu_connector: Optional[GPUConnectorInterface]
+    # Change NPU device
+    torch.npu.set_device(local_rank)
 
-    if use_mla and lmcache_config.use_layerwise and lmcache_config.enable_blending:
-        raise ValueError(
-            "We haven't supported MLA with Cacheblend yet. Please disable blending."
-        )
-
+    # Get tensor parallel group
     if role == "scheduler":
-        vllm_gpu_connector = None
-        # Create a dummy tpg object with broadcast and broadcast_object methods
         tpg = SimpleNamespace()
         tpg.broadcast = lambda tensor, src: tensor
         tpg.broadcast_object = lambda obj, src: obj
-    elif lmcache_config.use_layerwise:
-        if lmcache_config.enable_blending:
-            # Use layerwise connector for blending
-            vllm_gpu_connector = VLLMBufferLayerwiseNPUConnector.from_metadata(
-                metadata, use_gpu, device
-            )
-        else:
-            vllm_gpu_connector = VLLMPagedMemLayerwiseNPUConnector.from_metadata(
-                metadata, use_gpu, device
-            )
-        tpg = get_tp_group()
+        vllm_gpu_connector = None
     else:
-        # TODO (gingfung): gpu_connector_v3
-        if lmcache_config.use_gpu_connector_v3:
-            raise NotImplementedError(
-                "GPU Connector v3 is not supported yet. Please contact LMCache-Ascend."
-            )
-        else:
-            vllm_gpu_connector = VLLMPagedMemNPUConnectorV2.from_metadata(
-                metadata, use_gpu, device
-            )
         tpg = get_tp_group()
+        vllm_gpu_connector = ascend_create_gpu_connector(
+            self._config, metadata, EngineType.VLLM
+        )
 
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
-        lmcache_config,
+        self._config,
         metadata,
         vllm_gpu_connector,
         tpg.broadcast,
         tpg.broadcast_object,
     )
 
-    if role == "scheduler" and lmcache_config.enable_scheduler_bypass_lookup:
-        assert engine.save_only_first_rank or lmcache_config.get_extra_config_value(
+    if role == "scheduler" and self._config.enable_scheduler_bypass_lookup:
+        assert engine.save_only_first_rank or self._config.get_extra_config_value(
             "remote_enable_mla_worker_id_as0", metadata.use_mla
         ), (
             "enable_scheduler_bypass_lookup is only supported with "
             "save_only_first_rank or remote_enable_mla_worker_id_as0"
         )
+
     return engine
 
 
@@ -218,10 +260,12 @@ def wait_for_save(self):
         return
 
     if self.use_layerwise:
-        for layerwise_storer in self.layerwise_storers:
-            next(layerwise_storer)
-
         for request in connector_metadata.requests:
+            layerwise_storer = self._layerwise_save_storers.pop(
+                request.req_id, None
+            )
+            if layerwise_storer is not None:
+                next(layerwise_storer)
             self.lmcache_engine.lookup_unpin(request.req_id)
         return
 

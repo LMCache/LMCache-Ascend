@@ -28,7 +28,7 @@ WORKDIR /workspace
 COPY . /workspace/LMCache-Ascend/
 
 # Install LMCache
-RUN NO_CUDA_EXT=1 pip install lmcache==0.3.12
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.2
 
 # Install LMCache-Ascend
 RUN cd /workspace/LMCache-Ascend && \
