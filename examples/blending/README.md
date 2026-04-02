@@ -9,9 +9,9 @@ The following table defines the support level of CacheBlend across various compo
 | **0.9.2** | **0.3.3 / 0.3.7** | 🟢 Stable | **Production Ready** | **Full** | - |
 | **0.10.0** | **0.3.7** | 🔴 Unsupported | **N/A** | **None** | - |
 | **0.11.0** | **0.3.7** | 🔴 Unsupported | **N/A** | **None** | - |
-| **0.9.2** | **0.4.2** | 🔴 Conflict | **N/A** | **None** | Version mismatch; usage not advised. |
-| **0.10.0** | **0.4.2** | 🟢 Stable | **Production Ready** | **Full** | - |
-| **0.11.0** | **0.4.2** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.9.2** | **0.3.12** | 🔴 Conflict | **N/A** | **None** | Version mismatch; usage not advised. |
+| **0.10.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
+| **0.11.0** | **0.3.12** | 🟢 Stable | **Production Ready** | **Full** | - |
 
 ## 1. Critical Preparations
 
