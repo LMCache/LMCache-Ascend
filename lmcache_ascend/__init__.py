@@ -426,6 +426,11 @@ def _patch_rpc_utils():
     lmc_async_lookup_client.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
     zmq_server.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
+    # Also patch the factory module if already imported
+    _factory_mod = sys.modules.get("lmcache.v1.lookup_client.factory")
+    if _factory_mod is not None:
+        _factory_mod.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+
 
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:

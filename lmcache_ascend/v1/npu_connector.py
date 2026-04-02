@@ -528,7 +528,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.
