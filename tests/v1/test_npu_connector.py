@@ -32,6 +32,7 @@ from lmcache_ascend.v1.npu_connector import (
 from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
 import lmcache_ascend.c_ops as lmc_ops
 
+
 @pytest.mark.parametrize("use_npu", [True, False])
 @pytest.mark.parametrize(
     "gpu_kv_format",
