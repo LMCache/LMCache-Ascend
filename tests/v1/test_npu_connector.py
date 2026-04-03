@@ -49,13 +49,19 @@ def test_vllm_paged_connector_v2_with_npu_and_mla(use_npu, gpu_kv_format):
 
 
 @pytest.mark.parametrize("use_npu", [True])
-def test_layerwise_vllm_paged_connector_with_npu(use_npu):
+@pytest.mark.parametrize(
+    "gpu_kv_format",
+    [
+        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
+    ],
+)
+def test_layerwise_vllm_paged_connector_with_npu(use_npu, gpu_kv_format):
     target_patch = (
         "lmcache_tests.v1.test_gpu_connector.VLLMPagedMemLayerwiseGPUConnector"
     )
 
     with patch(target_patch, new=VLLMPagedMemLayerwiseNPUConnector):
-        original_test_layerwise_vllm_paged_connector_with_gpu(use_npu)
+        original_test_layerwise_vllm_paged_connector_with_gpu(use_npu, gpu_kv_format)
 
 
 @pytest.mark.parametrize("use_npu", [True])
