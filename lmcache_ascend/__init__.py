@@ -195,8 +195,26 @@ def _patch_config():
 
 
 def _patch_ops():
+    # Standard
+    from enum import IntEnum
+
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
+
+    # LMCache v0.4.2 introduces GPUKVFormat enum in c_ops (CUDA pybind).
+    # Ascend c_ops doesn't have it, so we provide a compatible mock
+    # to avoid AttributeError when upstream code references it.
+    if not hasattr(ascend_c_ops, "GPUKVFormat"):
+
+        class GPUKVFormat(IntEnum):
+            NB_NL_TWO_BS_NH_HS = 0
+            NL_X_TWO_NB_BS_NH_HS = 1
+            NL_X_NB_TWO_BS_NH_HS = 2
+            NL_X_NB_BS_HS = 3
+            TWO_X_NL_X_NBBS_NH_HS = 4
+            NL_X_NBBS_ONE_HS = 5
+
+        ascend_c_ops.GPUKVFormat = GPUKVFormat
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
