@@ -16,32 +16,21 @@ from tests.bootstrap import prepare_environment
 
 prepare_environment()
 
-try:
-    # Third Party
-    from lmcache.v1.multiprocess.server import run_cache_server  # noqa: E402
-    from lmcache_tests.v1.multiprocess.test_cache_server import (  # noqa: E402
-        CHUNK_SIZE,
-        CPU_BUFFER_SIZE,
-        DEFAULT_TIMEOUT,
-        SERVER_HOST,
-        SERVER_PORT,
-        SERVER_URL,
-        client,
-        client_context,
-        registered_instance,
-        test_server_running,
-        zmq_context,
-    )
-
-    _SKIP = False
-except (ImportError, ModuleNotFoundError) as _exc:
-    _SKIP = True
-    _SKIP_REASON = (
-        f"Skipping multiprocess cache server tests: {_exc}. "
-        "This may be caused by missing native_storage_ops (Rust module)."
-    )
-
-pytestmark = pytest.mark.skipif(_SKIP, reason=_SKIP_REASON if _SKIP else "")
+# Third Party
+from lmcache.v1.multiprocess.server import run_cache_server  # noqa: E402
+from lmcache_tests.v1.multiprocess.test_cache_server import (  # noqa: E402
+    CHUNK_SIZE,
+    CPU_BUFFER_SIZE,
+    DEFAULT_TIMEOUT,
+    SERVER_HOST,
+    SERVER_PORT,
+    SERVER_URL,
+    client,
+    client_context,
+    registered_instance,
+    test_server_running,
+    zmq_context,
+)
 
 
 def server_process_runner(
