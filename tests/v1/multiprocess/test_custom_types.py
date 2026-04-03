@@ -29,22 +29,44 @@ from lmcache_tests.v1.multiprocess.test_custom_types import (  # noqa: F401, E40
 )
 
 
-def _npu_ipc_available() -> bool:
-    """Probe whether NPU IPC cross-process sharing works in this environment.
+def _ipc_child_probe(handle_args, result_queue):
+    """Spawned child: reconstruct shared tensor and read it back."""
+    try:
+        torch.npu.init()
+        device_index, handle_tail = handle_args
+        storage = torch.UntypedStorage._new_shared_npu(device_index, *handle_tail)
+        t = torch.empty((), device=f"npu:{device_index}", dtype=torch.float32)
+        t.set_(storage, 0, (2,), (1,))
+        _ = t.sum().cpu().item()
+        result_queue.put(True)
+    except Exception:
+        result_queue.put(False)
 
-    Some container setups lack the required /dev nodes or driver support
-    for _share_npu_ / _new_shared_npu, which only surfaces at runtime
-    as ACL error 507057 (SUSPECT REMOTE ERROR).  A quick round-trip
-    in a spawned child detects this cheaply.
+
+def _npu_ipc_available() -> bool:
+    """Probe whether NPU IPC cross-process sharing actually works.
+
+    The error 507057 (SUSPECT REMOTE ERROR) only manifests when a
+    *different* process tries to open the IPC handle, so we must
+    spawn a real child process to detect it reliably.
     """
     if not torch.npu.is_available():
         return False
     try:
         t = torch.zeros(2, device="npu")
-        storage = t.untyped_storage()
-        handle = storage._share_npu_()
-        _ = torch.UntypedStorage._new_shared_npu(t.device.index, *handle[1:])
-        return True
+        handle = t.untyped_storage()._share_npu_()
+        handle_args = (t.device.index, handle[1:])
+
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue()
+        p = ctx.Process(target=_ipc_child_probe, args=(handle_args, q))
+        p.start()
+        p.join(timeout=15)
+        if p.is_alive():
+            p.terminate()
+            p.join()
+            return False
+        return not q.empty() and q.get() is True
     except Exception:
         return False
 
