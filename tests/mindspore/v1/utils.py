@@ -39,7 +39,7 @@ def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)
 
 
 def dumb_cache_engine_key():
-    return CacheEngineKey("test_model", 3, 123, 1234)
+    return CacheEngineKey("test_model", 3, 123, 1234, torch.bfloat16)
 
 
 def random_string(N):
