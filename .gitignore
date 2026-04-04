@@ -20,3 +20,6 @@ schedule.log
 
 # Visual Studio Code
 .vscode/
+
+# claude
+CLAUDE.md
