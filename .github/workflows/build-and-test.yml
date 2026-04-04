@@ -1,4 +1,4 @@
-name: '910C Unit Tests'
+name: 'Unit Tests'
 
 on:
   workflow_call:
