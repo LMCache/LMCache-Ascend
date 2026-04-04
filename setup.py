@@ -170,7 +170,9 @@ def _get_npu_soc():
         except subprocess.CalledProcessError:
             continue
         except FileNotFoundError as e:
-            logger.info(f"Failed to execute npu-smi command and retrieve SoC version: {e}")
+            logger.info(
+                f"Failed to execute npu-smi command and retrieve SoC version: {e}"
+            )
             continue
 
     _soc_version = os.getenv("SOC_VERSION")
@@ -180,7 +182,9 @@ def _get_npu_soc():
             if _soc_version.lower().startswith("ascend")
             else _soc_version
         )
-    raise RuntimeError("No available NPU found, please check npu-smi info or set `SOC_VERSION`")
+    raise RuntimeError(
+        "No available NPU found, please check npu-smi info or set `SOC_VERSION`"
+    )
 
 
 def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
