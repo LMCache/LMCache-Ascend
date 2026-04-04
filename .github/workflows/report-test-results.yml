@@ -2,7 +2,7 @@ name: Publish Test Results
 
 on:
   workflow_run:
-    workflows: ["910C Unit Tests"]
+    workflows: ["Unit Tests"]
     types:
       - completed
 
