@@ -62,14 +62,6 @@ jobs:
 
       
     steps:
-      - name: 🔧 Fix Proxy Configuration
-        run: |
-          echo "Overwriting Runner Proxy Settings..."
-          echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-          echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-          echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
-          echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
-
       - name: Checkout (Workflow Run)
         if: github.event_name == 'workflow_run'
         uses: actions/checkout@v4
