@@ -47,20 +47,21 @@ Please ensure your environment matches the versions below.
 #### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.2** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
+| **main** | **v0.4.2** | **>=v0.11.0** | **>=2.7.1** | 🚧 **Experimental** |
+| **v0.3.12** | **v0.3.12** | **>=v0.11.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
 | **v0.3.7** | **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
-| **v0.3.7** | **v0.3.7** | **v0.11.0** | **2.7.1** | 🚧 **Experimental** |
-| v0.3.3 | v0.3.3 | v0.9.2 | 2.5.1 | ⚠️ Legacy Support |
 
 #### For PyTorch / SGLang
 | LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **main** | **v0.4.2** | **0.5.8** | **2.8.0.post2.dev20251113** | 🚧 **Experimental** |
+| **v0.3.12** | **v0.3.12** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
 
 #### for MindSpore
 | LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **main** | **v0.4.2** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
+| **v0.3.12** | **v0.3.12** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
 | **v0.3.7** | **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
@@ -87,25 +88,24 @@ docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-asc
 
 Once that is built, run it with the following cmd
 ```bash
-DEVICE_LIST="0,1,2,3,4,5,6,7"
-docker run -it \
-    --privileged \
+docker run -itd \
+    --shm-size=200g --privileged --net=host \
     --cap-add=SYS_RESOURCE \
     --cap-add=IPC_LOCK \
-    -p 8000:8000 \
-    -p 8001:8001 \
-    --name lmcache-ascend-dev \
-    -e ASCEND_VISIBLE_DEVICES=${DEVICE_LIST} \
-    -e ASCEND_RT_VISIBLE_DEVICES=${DEVICE_LIST} \
-    -e ASCEND_TOTAL_MEMORY_GB=32 \
-    -e VLLM_TARGET_DEVICE=npu \
+    --device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
+    --device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
+    --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
     -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
     -v /etc/localtime:/etc/localtime \
+    -v /usr/local/dcmi:/usr/local/dcmi \
     -v /var/log/npu:/var/log/npu \
-    -v /dev/davinci_manager:/dev/davinci_manager \
-    -v /dev/devmm_svm:/dev/devmm_svm \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /etc/hccn.conf:/etc/hccn.conf \
+    -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
+    -v /usr/src/kernels:/usr/src/kernels:ro \
+    --name lmcache-ascend-dev \
     lmcache-ascend:v0.4.2-vllm-ascend-v0.11.0-openeuler \
     /bin/bash
 ```
@@ -122,8 +122,8 @@ If you are using vllm-ascend, it is recommended to use the official [vLLM-Ascend
 
 ```bash
 # Pull and run the official vLLM-Ascend image
-docker pull quay.io/ascend/vllm-ascend:v0.11.0rc0
-docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.11.0rc0 /bin/bash
+docker pull quay.io/ascend/vllm-ascend:v0.11.0
+docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.11.0 /bin/bash
 ```
 
 ** For SGLang **
@@ -176,6 +176,8 @@ ktc = KVTransferConfig(
         kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
 ```
+
+> **Note**: For vllm-ascend versions >=0.17.0rc1, you can specify `--kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'`
 
 #### Using with SGLang
 For SGLang, integration is simplified. You do not need to specify a kv_connector; simply enable the LMCache flag(`--enable-lmcache`).
