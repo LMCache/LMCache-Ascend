@@ -38,7 +38,7 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
   - **CANN Toolkit**: >= 8.2.RC1
   - **Ascend Driver**: >= 24.1.0
   - **PyTorch**: >= 2.7.1 (For vLLM 0.10.2+)
-  - **vLLM**: v0.11.0 & **vLLM-Ascend**: v0.11.0
+  - **vLLM**: >=v0.11.0 & **vLLM-Ascend**: >=v0.11.0
 
 ### Compatibility Matrix
 
@@ -49,7 +49,6 @@ Please ensure your environment matches the versions below.
 | :--- | :--- | :--- | :--- | :--- |
 | **main** | **v0.4.2** | **>=v0.11.0** | **>=2.7.1** | 🚧 **Experimental** |
 | **v0.3.12** | **v0.3.12** | **>=v0.11.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
-| **v0.3.7** | **v0.3.7** | **v0.10.2** | **2.7.1** | ✅ **Verified (Recommended)** |
 
 #### For PyTorch / SGLang
 | LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
@@ -61,8 +60,7 @@ Please ensure your environment matches the versions below.
 | LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | **main** | **v0.4.2** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
-| **v0.3.12** | **v0.3.12** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
-| **v0.3.7** | **v0.3.7** | **v0.9.1** | **2.7.1** | ✅ **Verified (Recommended)** |
+| **v0.3.12** | **v0.3.12** | **v0.11.0** | **2.7.1.post1** | ✅ **Verified (Recommended)** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
 
