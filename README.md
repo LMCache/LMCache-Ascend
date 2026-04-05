@@ -81,7 +81,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 Build the image using the provided Dockerfile:
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.11.0-openeuler .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler .
 ```
 
 Once that is built, run it with the following cmd
@@ -104,7 +104,7 @@ docker run -itd \
     -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
     -v /usr/src/kernels:/usr/src/kernels:ro \
     --name lmcache-ascend-dev \
-    lmcache-ascend:v0.4.2-vllm-ascend-v0.11.0-openeuler \
+    lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler \
     /bin/bash
 ```
 
@@ -120,8 +120,8 @@ If you are using vllm-ascend, it is recommended to use the official [vLLM-Ascend
 
 ```bash
 # Pull and run the official vLLM-Ascend image
-docker pull quay.io/ascend/vllm-ascend:v0.11.0
-docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.11.0 /bin/bash
+docker pull quay.io/ascend/vllm-ascend:v0.18.0rc1
+docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.18.0rc1 /bin/bash
 ```
 
 ** For SGLang **
@@ -209,7 +209,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 2. Build Docker Image
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/mindspore/Dockerfile.a2.openEuler -t lmcache-ascend:v0.3.7-mindspore2.7.1.post1-openeuler .
+docker build -f docker/mindspore/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-mindspore2.7.1.post1-openeuler .
 ```
 
 3. Start Container
@@ -233,7 +233,7 @@ docker run -itd \
     -v /home:/home \
     --name lmcache-ascend-ms \
     --entrypoint /bin/bash \
-    lmcache-ascend:v0.3.7-mindspore2.7.1.post1-openeuler
+    lmcache-ascend:v0.4.2-mindspore2.7.1.post1-openeuler
 
 docker exec -it -u root lmcache-ascend-ms bash
 ```
@@ -270,7 +270,7 @@ docker exec -it -u root lmcache-ascend-ms bash
 2. Install LMCache
 
 ```bash
-NO_CUDA_EXT=1 pip install lmcache==0.3.7 --no-deps
+NO_CUDA_EXT=1 pip install lmcache==0.4.2 --no-deps
 ```
 
 3. Install LMCache-Ascend
