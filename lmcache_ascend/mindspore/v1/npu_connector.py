@@ -18,7 +18,7 @@ from typing import List, Optional
 
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.gpu_connector import (
+from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMBufferLayerwiseGPUConnector,
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,

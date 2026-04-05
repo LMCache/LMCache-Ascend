@@ -4,12 +4,11 @@ from enum import Enum, auto
 from typing import Any, List, Optional, Set, Tuple, Union
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
-from lmcache.v1.gpu_connector import (
+from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
     SGLangLayerwiseGPUConnector,
     VLLMBufferLayerwiseGPUConnector,
@@ -17,6 +16,7 @@ from lmcache.v1.gpu_connector import (
     VLLMPagedMemLayerwiseGPUConnector,
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 import torch
 
 # First Party
@@ -524,11 +524,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     @classmethod
     def from_metadata(
         cls,
-        metadata: LMCacheEngineMetadata,
+        metadata: LMCacheMetadata,
         use_gpu: bool = False,
         device: Optional[torch.device] = None,
     ) -> "VLLMPagedMemGPUConnectorV2":
-        """Create a connector from LMCacheEngineMetadata.
+        """Create a connector from LMCacheMetadata.
 
         Args:
             metadata: The LMCache engine metadata containing model configuration.

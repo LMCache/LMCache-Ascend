@@ -1,0 +1,190 @@
+name: 'E2E vLLM Test'
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run at 2:00 AM every day
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-vllm-test:
+    name: E2E vLLM Test on 910C
+    runs-on: [self-hosted, Linux, ARM64, 910c]
+    timeout-minutes: 120
+
+    environment:
+      name: ci-hardware
+
+    container:
+      image: quay.io/ascend/vllm-ascend:v0.18.0rc1-a3
+      env:
+        SOC_VERSION: Ascend910C
+        PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+        LMCACHE_TRACK_USAGE: false
+        NO_CUDA_EXT: 1
+        NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+        LMCACHE_LOG_LEVEL: INFO
+        PYTHONHASHSEED: 0
+        ASCEND_RT_VISIBLE_DEVICES: "2.3"
+
+      options: >-
+        --label owner=ci-test-runner
+        --add-host=host.docker.internal:192.168.1.1
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci2
+        --device /dev/davinci3
+        --device /dev/davinci4
+        --device /dev/davinci5
+        --device /dev/davinci6
+        --device /dev/davinci7
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        -v /usr/local/dcmi:/usr/local/dcmi:ro
+        -v /etc/hccn.conf:/etc/hccn.conf:ro
+        -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        --user root
+        --cap-add=SYS_PTRACE
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+
+      - name: 🔧 Fix Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 📦 Install LMCache & Build Project
+        run: |
+          echo ">>> Installing LMCache Core..."
+          pip install lmcache==0.4.2
+
+          echo ">>> Building LMCache-Ascend..."
+          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+
+          python3 -m pip install -v --no-build-isolation -e .
+
+      - name: 🚀 Start vLLM Service
+        env:
+          MODEL_PATH: ${{ secrets.VLLM_QWEN3_32B_MODEL_PATH }}
+          VLLM_PORT: ${{ secrets.VLLM_QWEN3_32B_PORT }}
+        run: |
+          echo "Starting vLLM service..."
+          echo "Model: $MODEL_PATH"
+          echo "Port: $VLLM_PORT"
+
+          # Start vLLM in background
+          nohup vllm serve $MODEL_PATH \
+            --served-model-name Qwen3-32B \
+            --gpu-memory-utilization 0.92 \
+            --trust-remote-code \
+            --tensor-parallel-size 2 \
+            --max-num-seqs 32 \
+            --max-num-batched-tokens 32768 \
+            --host 0.0.0.0 \
+            --port $VLLM_PORT \
+            --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' \
+            > vllm_server.log 2>&1 &
+
+          echo $! > vllm.pid
+          echo "vLLM PID: $(cat vllm.pid)"
+
+      - name: ⏳ Wait for vLLM to be Ready
+        env:
+          VLLM_PORT: ${{ secrets.VLLM_QWEN3_32B_PORT }}
+        run: |
+          echo "Waiting for vLLM service to be ready..."
+          for i in {1..60}; do
+            if curl -s "http://localhost:$VLLM_PORT/v1/models" > /dev/null 2>&1; then
+              echo "vLLM service is ready!"
+              break
+            fi
+            echo "Waiting... ($i/60)"
+            sleep 10
+          done
+
+          # Check if service is ready
+          if ! curl -s "http://localhost:$VLLM_PORT/v1/models" > /dev/null 2>&1; then
+            echo "vLLM service failed to start. Log:"
+            cat vllm_server.log
+            exit 1
+          fi
+
+      - name: 📝 Send Test Requests (3 times)
+        env:
+          VLLM_PORT: ${{ secrets.VLLM_QWEN3_32B_PORT }}
+        run: |
+          set -o pipefail
+          echo "Sending test requests to vLLM..."
+
+          # A long prompt to generate thousands of tokens and trigger LMCache reading
+          for i in 1 2 3; do
+            echo ""
+            echo "============= Request #$i ============="
+            echo "Sending request to http://localhost:$VLLM_PORT/v1/chat/completions"
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://localhost:$VLLM_PORT/v1/chat/completions" \
+              -H "Content-Type: application/json" \
+              -d '{
+                "model": "Qwen3-32B",
+                "messages": [
+                  {"role": "user", "content": "Please provide a comprehensive explanation of transformer architecture in neural networks, including self-attention mechanisms, multi-head attention, positional encoding, and how these components work together to process sequential data. Include details about feed-forward networks, layer normalization, and the difference between encoder and decoder architectures. Also explain how pretrained language models like BERT and GPT use these foundations and how they differ in their approach to pretraining and fine-tuning. Be thorough and technical."}
+                ],
+                "max_tokens": 2048,
+                "temperature": 0.7
+              }')
+
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+
+            echo "HTTP Status: $HTTP_CODE"
+            echo "$BODY" | tee response_$i.json
+
+            if [ "$HTTP_CODE" != "200" ]; then
+              echo "Request #$i failed with HTTP code $HTTP_CODE"
+              echo "Checking if vLLM is still running..."
+              if ! curl -s "http://localhost:$VLLM_PORT/v1/models" > /dev/null 2>&1; then
+                echo "vLLM service has crashed!"
+              fi
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+      - name: 📄 Upload vLLM Server Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-server-log
+          path: vllm_server.log
+
+      - name: 📄 Upload Response Files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vllm-responses
+          path: response_*.json
+
+      - name: 🧹 Cleanup
+        if: always()
+        run: |
+          if [ -f vllm.pid ]; then
+            echo "Stopping vLLM service (PID: $(cat vllm.pid))..."
+            kill $(cat vllm.pid) 2>/dev/null || true
+            rm -f vllm.pid
+          fi

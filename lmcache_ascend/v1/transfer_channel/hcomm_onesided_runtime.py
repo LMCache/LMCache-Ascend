@@ -172,8 +172,34 @@ def _is_device_memory(ptr: int) -> bool:
     return hcomm_os.is_device_memory(ptr)
 
 
+def _find_hccn_tool() -> str:
+    """Locate the ``hccn_tool`` binary.
+
+    Returns the first path that exists from common Ascend driver
+    locations, or falls back to the bare name (relying on PATH).
+    """
+    candidates = [
+        os.path.join(
+            os.environ.get("ASCEND_DRIVER_HOME", "/usr/local/Ascend/driver"),
+            "tools",
+            "hccn_tool",
+        ),
+        "/usr/local/Ascend/driver/tools/hccn_tool",
+    ]
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return "hccn_tool"
+
+
 def _get_device_ip(phy_device_id: int) -> str:
-    """Read device IP from /etc/hccn.conf or fall back to hccn_tool."""
+    """Read device IP from /etc/hccn.conf or fall back to hccn_tool.
+
+    The device IP is required when ``HCCL_INTRA_ROCE_ENABLE=1`` (host-
+    memory transfers via RoCE).  Without it the rank table omits the
+    ``device_ip`` field, causing ``HcclCommInitClusterInfoMemConfig`` to
+    reject the table with HCCL_E_PARA.
+    """
     hccn_conf = "/etc/hccn.conf"
     if os.path.isfile(hccn_conf):
         key = f"address_{phy_device_id}="
@@ -181,9 +207,11 @@ def _get_device_ip(phy_device_id: int) -> str:
             for line in f:
                 if line.startswith(key):
                     return line.strip().split("=", 1)[1]
+
+    hccn_tool = _find_hccn_tool()
     try:
         result = subprocess.run(
-            ["hccn_tool", "-i", str(phy_device_id), "-ip", "-g"],
+            [hccn_tool, "-i", str(phy_device_id), "-ip", "-g"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -191,8 +219,18 @@ def _get_device_ip(phy_device_id: int) -> str:
         for line in result.stdout.splitlines():
             if "ipaddr:" in line:
                 return line.split("ipaddr:")[1].strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        logger.warning("Failed to get device IP from hccn_tool")
+        logger.warning(
+            "hccn_tool ran but returned no ipaddr for device %d", phy_device_id
+        )
+    except FileNotFoundError:
+        logger.warning(
+            "hccn_tool not found (searched: %s). "
+            "Mount /etc/hccn.conf or install hccn_tool to enable "
+            "host-memory (RoCE) transfers.",
+            hccn_tool,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("hccn_tool timed out querying device %d", phy_device_id)
     return ""
 
 

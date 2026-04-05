@@ -4,26 +4,20 @@ from typing import List
 import uuid
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.sglang.sglang_adapter import (
-    LoadMetadata,
-    need_gpu_interm_buffer,
-)
+from lmcache.integration.sglang.sglang_adapter import LoadMetadata
 from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
+from lmcache.utils import (
+    EngineType,
+    mock_up_broadcast_fn,
+    mock_up_broadcast_object_fn,
+)
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import GPUConnectorInterface
+from lmcache.v1.metadata import LMCacheMetadata
 from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
-
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    SGLangLayerwiseNPUConnector,
-    SGLangNPUConnector,
-)
 
 logger = init_logger(__name__)
 
@@ -63,42 +57,24 @@ def sglang_init_lmcache_engine(
 
     # NOTE:Change current device using NPU
     torch.npu.set_device(local_rank)
-    device = torch.device(f"npu:{local_rank}")
 
     # Use global rank for metadata (tensor parallel rank)
-    metadata = LMCacheEngineMetadata(
-        model_config.model_path,
-        tp_size,
-        global_rank,
-        "sgl",
-        kv_dtype,
-        kv_shape,
+    metadata = LMCacheMetadata(
+        model_name=model_config.model_path,
+        world_size=tp_size,
+        local_world_size=tp_size,
+        worker_id=global_rank,
+        local_worker_id=local_rank,
+        kv_dtype=kv_dtype,
+        kv_shape=kv_shape,
     )
 
-    use_gpu = need_gpu_interm_buffer(config)
+    # First Party
+    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+        ascend_create_gpu_connector,
+    )
 
-    hidden_dim_size = num_kv_head * head_dim
-
-    gpu_connector: GPUConnectorInterface
-
-    if config.use_layerwise:
-        gpu_connector = SGLangLayerwiseNPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
-    else:
-        gpu_connector = SGLangNPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
+    gpu_connector = ascend_create_gpu_connector(config, metadata, EngineType.SGLANG)
     engine = LMCacheEngineBuilder.get_or_create(
         ENGINE_NAME,
         config,
