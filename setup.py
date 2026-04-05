@@ -430,7 +430,7 @@ class CustomAscendCmakeBuildExt(build_ext):
                     )
 
         logger.info("All files copied successfully")
-        run_patches()
+        # run_patches()  # Temporarily disabled for v0.18.0rc1 build
 
 
 def ascend_extension():
