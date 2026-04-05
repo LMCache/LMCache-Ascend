@@ -1,7 +1,11 @@
 name: 'E2E vLLM Test'
 
 on:
+  workflow_call:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["Code Quality"]
+    types: [completed]
   schedule:
     # Run at 2:00 AM every day
     - cron: '0 2 * * *'
@@ -19,6 +23,10 @@ jobs:
     name: E2E vLLM Test on 910C
     runs-on: [self-hosted, Linux, ARM64, 910c]
     timeout-minutes: 120
+
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
 
     environment:
       name: ci-hardware
