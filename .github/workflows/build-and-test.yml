@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 30
 
     environment: 
-      name: 910b-hardware
+      name: ci-hardware
     
     if: >
       github.event_name != 'workflow_run' || 
@@ -221,7 +221,7 @@ jobs:
     timeout-minutes: 30
 
     environment: 
-      name: 910c-hardware
+      name: ci-hardware
 
     if: >
       github.event_name != 'workflow_run' ||
