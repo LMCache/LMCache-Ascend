@@ -4,7 +4,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.3.12"
+LMCACHE_UPSTREAM_TAG = "v0.4.2"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -195,8 +195,26 @@ def _patch_config():
 
 
 def _patch_ops():
+    # Standard
+    from enum import IntEnum
+
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
+
+    # LMCache v0.4.2 introduces GPUKVFormat enum in c_ops (CUDA pybind).
+    # Ascend c_ops doesn't have it, so we provide a compatible mock
+    # to avoid AttributeError when upstream code references it.
+    if not hasattr(ascend_c_ops, "GPUKVFormat"):
+
+        class GPUKVFormat(IntEnum):
+            NB_NL_TWO_BS_NH_HS = 0
+            NL_X_TWO_NB_BS_NH_HS = 1
+            NL_X_NB_TWO_BS_NH_HS = 2
+            NL_X_NB_BS_HS = 3
+            TWO_X_NL_X_NBBS_NH_HS = 4
+            NL_X_NBBS_ONE_HS = 5
+
+        ascend_c_ops.GPUKVFormat = GPUKVFormat
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
@@ -269,44 +287,43 @@ def _patch_kv_layer_group():
     )
 
 
-def _patch_mooncake_store_connector():
+def _patch_gpu_connector():
+    """Patch CreateGPUConnector to return NPU connectors on Ascend.
+
+    In LMCache 0.4.2, engine initialization uses CreateGPUConnector()
+    as a factory function. We patch it to return Ascend NPU connectors
+    instead of the default CUDA ones.
+    """
     # Third Party
-    import lmcache.v1.storage_backend.connector.mooncakestore_connector as lmc_mks_connector  # noqa: E501
+    import lmcache.v1.gpu_connector as lm_gpu_connector
 
     # First Party
-    from lmcache_ascend.v1.storage_backend.connector.mooncakestore_connector import (  # noqa: E501
-        _batched_put_with_metadata,
-        _batched_put_zero_copy,
-    )
+    from lmcache_ascend.v1.gpu_connector import CreateNPUConnector
 
-    # NOTE (gingfung): these two function patches fixes the double free ref counts
-    # we took the upstream merged post v0.3.12 into our current branch,
-    # please remove after.
-    # Ref - https://github.com/LMCache/LMCache/pull/2415
-    lmc_mks_connector.MooncakestoreConnector._batched_put_zero_copy = (
-        _batched_put_zero_copy
-    )
-    lmc_mks_connector.MooncakestoreConnector._batched_put_with_metadata = (
-        _batched_put_with_metadata
-    )
+    lm_gpu_connector.CreateGPUConnector = CreateNPUConnector
+
+    # Also patch the reference in lmcache.v1.manager module, in case it
+    # was imported before this patch ran
+    _manager_mod = sys.modules.get("lmcache.v1.manager")
+    if _manager_mod is not None:
+        _manager_mod.CreateGPUConnector = CreateNPUConnector
 
 
-def _patch_init_engine():
+def _patch_get_vllm_torch_dev():
+    """Patch get_vllm_torch_dev to return NPU device on Ascend.
+
+    The upstream function only supports CUDA and XPU. This patch adds
+    NPU support by replacing the function with our Ascend-specific version.
+    """
     # Third Party
-    import lmcache.integration.vllm.vllm_v1_adapter
+    import lmcache.integration.vllm.utils as lm_utils
 
     # First Party
-    from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-        init_lmcache_engine as ascend_init_lmcache_engine,
+    from lmcache_ascend.integration.vllm.utils import (
+        get_vllm_torch_dev as ascend_get_vllm_torch_dev,
     )
 
-    # NOTE (gingfung): this is the main entry point of LMCache, and since we are
-    # patching this, every time we upgrade, we should re-evaluate the function, as
-    # the experience is that this function signatures or init process will change
-    # every N versions.
-    lmcache.integration.vllm.vllm_v1_adapter._init_lmcache_engine = (
-        ascend_init_lmcache_engine
-    )
+    lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
 
 
 def _patch_wait_for_save():
@@ -352,10 +369,12 @@ def _patch_lookup_client():
 
     # First Party
     from lmcache_ascend.v1.lookup_client.lmcache_lookup_client import (
-        LMCacheLookupClient_lookup,
+        normalize_token_ids,
     )
 
-    lmc_lookup_client.LMCacheLookupClient.lookup = LMCacheLookupClient_lookup
+    lmc_lookup_client.LMCacheLookupClient.lookup = normalize_token_ids(
+        lmc_lookup_client.LMCacheLookupClient.lookup
+    )
 
 
 def _patch_sys_detection():
@@ -382,10 +401,7 @@ def _patch_sgl():
         LMCacheConnector__init__,
         LMCacheLayerwiseConnector_global_min_tokens,
         LMCacheLayerwiseConnector_start_load_kv,
-        sglang_init_lmcache_engine,
     )
-
-    lmc_sglang_adapter.init_lmcache_engine = sglang_init_lmcache_engine
 
     lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
 
@@ -420,13 +436,22 @@ def _patch_rpc_utils():
     import lmcache.v1.rpc_utils
 
     # First Party
-    from lmcache_ascend.v1.rpc_utils import get_zmq_rpc_path_lmcache
+    from lmcache_ascend.v1.rpc_utils import use_short_engine_id
+
+    get_zmq_rpc_path_lmcache = use_short_engine_id(
+        lmcache.v1.rpc_utils.get_zmq_rpc_path_lmcache
+    )
 
     lmcache.v1.rpc_utils.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
     lmc_lookup_client.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
     lmc_async_lookup_client.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
     zmq_server.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
+
+    # Also patch the factory module if already imported
+    _factory_mod = sys.modules.get("lmcache.v1.lookup_client.factory")
+    if _factory_mod is not None:
+        _factory_mod.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
 
 # Check if we've already patched to avoid redundant work
@@ -449,6 +474,10 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_torch_capability()
 
     _patch_ops()
+    if is_vllm:
+        _patch_get_vllm_torch_dev()
+        _patch_gpu_connector()
+
     _patch_hash_token()
 
     if _build_info.__framework_name__ == "pytorch":
@@ -460,12 +489,10 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_rpc_utils()
 
     _patch_kv_layer_group()
-    _patch_mooncake_store_connector()
 
     if is_sgl:
         _patch_sgl()
     elif is_vllm:
-        _patch_init_engine()
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()
 

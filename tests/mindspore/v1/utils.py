@@ -7,25 +7,39 @@ import string
 import threading
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
 from lmcache.utils import CacheEngineKey
-from lmcache.v1.gpu_connector import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.gpu_connector.gpu_connectors import VLLMPagedMemGPUConnectorV2
+from lmcache.v1.metadata import LMCacheMetadata
 import numpy as np
 import torch
 
 
-def dumb_metadata(fmt="vllm", kv_shape=(32, 2, 256, 8, 128)):
-    return LMCacheEngineMetadata("test_model", 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata(kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name="test_model",
+        world_size=3,
+        local_world_size=3,
+        worker_id=123,
+        local_worker_id=123,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
-def dumb_metadata_with_model_name(
-    model_name: str, fmt="vllm", kv_shape=(32, 2, 256, 8, 128)
-):
-    return LMCacheEngineMetadata(model_name, 3, 123, fmt, torch.bfloat16, kv_shape)
+def dumb_metadata_with_model_name(model_name: str, kv_shape=(32, 2, 256, 8, 128)):
+    return LMCacheMetadata(
+        model_name=model_name,
+        world_size=3,
+        local_world_size=3,
+        worker_id=123,
+        local_worker_id=123,
+        kv_dtype=torch.bfloat16,
+        kv_shape=kv_shape,
+    )
 
 
 def dumb_cache_engine_key():
-    return CacheEngineKey("vllm", "test_model", 3, 123, 1234)
+    return CacheEngineKey("test_model", 3, 123, 1234, torch.bfloat16)
 
 
 def random_string(N):
