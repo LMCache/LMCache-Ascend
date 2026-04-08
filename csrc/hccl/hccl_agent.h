@@ -9,16 +9,15 @@
 #include <unordered_map>
 #include <vector>
 
-#include "acl/acl.h"
-#include "hccl/dispatcher.h"
-#include "hccl/hccl.h"
-#include "hccl/hccl_common.h"
-#include "hccl/hccl_mem.h"
-#include "hccl/hccl_network_pub.h"
-#include "hccl/hccl_socket.h"
-#include "hccl/hccl_types.h"
-#include "hccl/notify_pool.h"
-#include "hccl/transport_mem.h"
+#include "dispatcher.h"
+#include "hccl_common.h"
+#include "hccl_mem.h"
+#include "hccl_network_pub.h"
+#include "hccl_socket.h"
+#include "notify_pool.h"
+#include "transport_mem.h"
+#include <acl/acl.h>
+#include <hccl/hccl_types.h>
 
 constexpr uint32_t MAX_LOCAL_DEVICES = 16;
 constexpr uint32_t TAG_SIZE = 32;
