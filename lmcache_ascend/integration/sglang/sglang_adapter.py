@@ -4,111 +4,13 @@ from typing import List
 import uuid
 
 # Third Party
-from lmcache.config import LMCacheEngineMetadata
-from lmcache.integration.sglang.sglang_adapter import (
-    LoadMetadata,
-    need_gpu_interm_buffer,
-)
-from lmcache.integration.sglang.utils import ENGINE_NAME, lmcache_get_config
+from lmcache.integration.sglang.sglang_adapter import LoadMetadata
 from lmcache.logging import init_logger
-from lmcache.utils import mock_up_broadcast_fn, mock_up_broadcast_object_fn
-from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.gpu_connector import GPUConnectorInterface
 from sglang.srt.configs.model_config import ModelConfig
 import torch
 import torch.distributed as dist
 
-# First Party
-from lmcache_ascend.v1.npu_connector import (
-    SGLangLayerwiseNPUConnector,
-    SGLangNPUConnector,
-)
-
 logger = init_logger(__name__)
-
-
-def sglang_init_lmcache_engine(
-    model_config: ModelConfig,
-    tp_size: int,
-    local_rank: int,
-    global_rank: int,
-    kv_dtype: torch.dtype,
-) -> LMCacheEngine:
-    """
-    Initialize LMCache engine for SGLang integration.
-
-    Args:
-        model_config: SGLang model configuration
-        tp_size: Tensor parallel size
-        local_rank: Local GPU device index (for device selection)
-        global_rank: Global tensor parallel rank (for metadata)
-        kv_dtype: Data type for KV cache tensors
-    """
-    if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
-        return curr_engine
-
-    config = lmcache_get_config()
-    assert isinstance(config, LMCacheEngineConfig), (
-        "LMCache v1 configuration is should be passed."
-    )
-
-    # construct kv shape (for mem pool)
-    num_layer = model_config.num_hidden_layers
-    chunk_size = config.chunk_size
-    num_kv_head = model_config.get_num_kv_heads(tp_size)
-    head_dim = model_config.head_dim
-
-    kv_shape = (num_layer, 2, chunk_size, num_kv_head, head_dim)
-
-    # NOTE:Change current device using NPU
-    torch.npu.set_device(local_rank)
-    device = torch.device(f"npu:{local_rank}")
-
-    # Use global rank for metadata (tensor parallel rank)
-    metadata = LMCacheEngineMetadata(
-        model_config.model_path,
-        tp_size,
-        global_rank,
-        "sgl",
-        kv_dtype,
-        kv_shape,
-    )
-
-    use_gpu = need_gpu_interm_buffer(config)
-
-    hidden_dim_size = num_kv_head * head_dim
-
-    gpu_connector: GPUConnectorInterface
-
-    if config.use_layerwise:
-        gpu_connector = SGLangLayerwiseNPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
-    else:
-        gpu_connector = SGLangNPUConnector(
-            hidden_dim_size,
-            num_layer,
-            use_gpu=use_gpu,
-            chunk_size=chunk_size,
-            dtype=kv_dtype,
-            device=device,
-        )
-    engine = LMCacheEngineBuilder.get_or_create(
-        ENGINE_NAME,
-        config,
-        metadata,
-        gpu_connector,
-        mock_up_broadcast_fn,
-        mock_up_broadcast_object_fn,
-    )
-
-    return engine
 
 
 def LMCacheConnector__init__(

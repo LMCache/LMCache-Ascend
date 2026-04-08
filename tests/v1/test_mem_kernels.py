@@ -1091,13 +1091,17 @@ def test_batched_fused_single_layer_kernel_separate_kv(
     mem_allocator = PinMemoryAllocator(total_cpu_bytes)
 
     try:
+        cpu_memory_objs = []
         cpu_tensors = []
         for layer_id in range(num_layers):
+            layer_memory_objs = []
             layer_tensors = []
             for chunk_id in range(num_chunks):
                 chunk_shape = torch.Size(get_buffer_shape(chunk_sizes[chunk_id]))
                 memory_obj = mem_allocator.allocate(chunk_shape, dtype)
+                layer_memory_objs.append(memory_obj)
                 layer_tensors.append(memory_obj.tensor)
+            cpu_memory_objs.append(layer_memory_objs)
             cpu_tensors.append(layer_tensors)
 
         start_event = torch.npu.Event(enable_timing=True)
@@ -1162,5 +1166,6 @@ def test_batched_fused_single_layer_kernel_separate_kv(
         del kv_cache_src
         del kv_cache_dst
         del staging_cache
+        del cpu_memory_objs
         del cpu_tensors
         torch.npu.empty_cache()

@@ -137,14 +137,6 @@ def _get_npu_soc():
     Raises:
         RuntimeError: If the npu-smi command fails or the output is malformed.
     """
-    _soc_version = os.getenv("SOC_VERSION")
-    if _soc_version:
-        return (
-            "Ascend" + _soc_version[6:]
-            if _soc_version.lower().startswith("ascend")
-            else _soc_version
-        )
-
     # Iterate through common NPU IDs (0-7) to find an available one.
     for npu_id in [0, 1, 2, 3, 4, 5, 6, 7]:
         try:
@@ -178,10 +170,21 @@ def _get_npu_soc():
         except subprocess.CalledProcessError:
             continue
         except FileNotFoundError as e:
-            raise RuntimeError(
+            logger.info(
                 f"Failed to execute npu-smi command and retrieve SoC version: {e}"
-            ) from e
-    raise RuntimeError("No available NPU found, please check npu-smi info")
+            )
+            continue
+
+    _soc_version = os.getenv("SOC_VERSION")
+    if _soc_version:
+        return (
+            "Ascend" + _soc_version[6:]
+            if _soc_version.lower().startswith("ascend")
+            else _soc_version
+        )
+    raise RuntimeError(
+        "No available NPU found, please check npu-smi info or set `SOC_VERSION`"
+    )
 
 
 def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
@@ -427,7 +430,7 @@ class CustomAscendCmakeBuildExt(build_ext):
                     )
 
         logger.info("All files copied successfully")
-        run_patches()
+        # run_patches()  # Temporarily disabled for v0.18.0rc1 build
 
 
 def ascend_extension():
