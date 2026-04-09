@@ -33,7 +33,7 @@ jobs:
       image: quay.io/ascend/vllm-ascend:v0.11.0-openeuler
       env:
         SOC_VERSION: Ascend910B4
-        PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
         LMCACHE_TRACK_USAGE: false
         NO_CUDA_EXT: 1
         NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
@@ -230,8 +230,8 @@ jobs:
     container:
       image: quay.io/ascend/vllm-ascend:v0.18.0rc1-a3
       env:
-        SOC_VERSION: Ascend910C
-        PIP_INDEX_URL: https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+        SOC_VERSION: Ascend910_9382
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
         LMCACHE_TRACK_USAGE: false
         NO_CUDA_EXT: 1
         NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
