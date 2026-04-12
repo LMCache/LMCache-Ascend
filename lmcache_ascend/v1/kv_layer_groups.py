@@ -3,6 +3,7 @@
 from collections import defaultdict
 
 import torch
+
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
@@ -34,8 +35,8 @@ def _get_tuple_storage_shape(kv_cache: tuple[torch.Tensor, ...]) -> torch.Size:
 
 
 def _get_kv_cache_group_key_and_info(
-        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
-    ) -> tuple[tuple[object, ...], torch.Size, torch.dtype]:
+    kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
+) -> tuple[tuple[object, ...], torch.Size, torch.dtype]:
     """Build a stable grouping key plus the LMCache storage shape/dtype."""
     if isinstance(kv_cache, tuple):
         dtypes = tuple(tensor.dtype for tensor in kv_cache)
@@ -98,9 +99,7 @@ def build_kv_layer_groups(self, kv_caches: dict[str, torch.Tensor]) -> None:
         return
 
     # Group layers by (shape, dtype) in a single loop
-    groups_dict: dict[tuple[object, ...], list[tuple[str, int]]] = (
-        defaultdict(list)
-    )
+    groups_dict: dict[tuple[object, ...], list[tuple[str, int]]] = defaultdict(list)
     group_infos: dict[tuple[object, ...], tuple[torch.Size, torch.dtype]] = {}
 
     for idx, (layer_name, kv_cache) in enumerate(kv_caches.items()):
