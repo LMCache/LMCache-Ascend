@@ -43,8 +43,8 @@ void multi_layer_kv_transfer(
 
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-      page_buffer_size, direction, use_mla, kvcache_format_raw,
-      k_hidden_dims, v_hidden_dims, dsa_hidden_dims);
+      page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
+      v_hidden_dims, dsa_hidden_dims);
 
   // Calculate UB buffer parameters
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
@@ -86,8 +86,8 @@ void fused_multi_layer_kv_transfer(
 
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-      page_buffer_size, direction, use_mla, kvcache_format_raw,
-      k_hidden_dims, v_hidden_dims, dsa_hidden_dims);
+      page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
+      v_hidden_dims, dsa_hidden_dims);
 
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
                                 key_value_ptrs);
@@ -95,34 +95,32 @@ void fused_multi_layer_kv_transfer(
   // Calculate and verify the CPU buffer size
   // For MLA_KV and DSA_KV, K/V have different hidden_dims
   // Use staging_cache's actual size for verification
-  size_t staging_cache_size = static_cast<size_t>(staging_cache.numel()) *
-                               staging_cache.element_size();
+  size_t staging_cache_size =
+      static_cast<size_t>(staging_cache.numel()) * staging_cache.element_size();
 
   size_t required_size = 0;
   switch (config.kvcache_format) {
-    case kvcache_ops::KVCacheFormat::MLA_KV:
-      required_size = static_cast<size_t>(config.num_layers) *
-                      config.num_tokens *
-                      (config.k_hidden_dims + config.v_hidden_dims) *
-                      key_value.element_size();
-      break;
-    case kvcache_ops::KVCacheFormat::DSA_KV:
-      required_size = static_cast<size_t>(config.num_layers) *
-                      config.num_tokens *
-                      (config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims) *
-                      key_value.element_size();
-      break;
-    default:
-      required_size = static_cast<size_t>(config.kv_size) *
-                      config.num_layers * config.num_tokens *
-                      config.hidden_dims * key_value.element_size();
-      break;
+  case kvcache_ops::KVCacheFormat::MLA_KV:
+    required_size = static_cast<size_t>(config.num_layers) * config.num_tokens *
+                    (config.k_hidden_dims + config.v_hidden_dims) *
+                    key_value.element_size();
+    break;
+  case kvcache_ops::KVCacheFormat::DSA_KV:
+    required_size =
+        static_cast<size_t>(config.num_layers) * config.num_tokens *
+        (config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims) *
+        key_value.element_size();
+    break;
+  default:
+    required_size = static_cast<size_t>(config.kv_size) * config.num_layers *
+                    config.num_tokens * config.hidden_dims *
+                    key_value.element_size();
+    break;
   }
 
-  TORCH_CHECK(
-      staging_cache_size >= required_size,
-      "staging_cache size insufficient: need ", required_size, " bytes, got ",
-      staging_cache_size);
+  TORCH_CHECK(staging_cache_size >= required_size,
+              "staging_cache size insufficient: need ", required_size,
+              " bytes, got ", staging_cache_size);
 
   at_npu::native::OpCommand cmd;
   cmd.Name("fused_multi_layer_kv_transfer_kernel_v2");

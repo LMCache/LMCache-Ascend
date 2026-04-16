@@ -3,9 +3,6 @@
 from enum import Enum, auto
 from typing import Any, List, Optional, Set, Tuple, Union
 
-import lmcache_ascend.c_ops as lmc_ops
-import torch
-
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
@@ -20,10 +17,12 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
 )
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
+import torch
 
 # First Party
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 

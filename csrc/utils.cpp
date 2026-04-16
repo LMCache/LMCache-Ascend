@@ -29,8 +29,7 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
 MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,
-    int page_buffer_size, bool direction, bool use_mla,
-    int kvcache_format_raw,
+    int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw,
     int64_t k_hidden_dims, int64_t v_hidden_dims, int64_t dsa_hidden_dims) {
   MultiLayerKVConfig config;
 
@@ -58,24 +57,24 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
   config.dsa_hidden_dims = dsa_hidden_dims;
 
   switch (config.kvcache_format) {
-    case kvcache_ops::KVCacheFormat::MERGED_KV:
-      config.kv_size = 1;
-      config.hidden_dims = key_value.size(-1);
-      break;
-    case kvcache_ops::KVCacheFormat::SEPARATE_KV:
-      config.kv_size = 2;
-      config.hidden_dims = key_value.size(-1);
-      break;
-    case kvcache_ops::KVCacheFormat::MLA_KV:
-      config.kv_size = 2;
-      config.hidden_dims = config.k_hidden_dims;
-      break;
-    case kvcache_ops::KVCacheFormat::DSA_KV:
-      config.kv_size = 3;
-      config.hidden_dims = config.k_hidden_dims;
-      break;
-    default:
-      TORCH_CHECK(false, "Unsupported KVCacheFormat: ", kvcache_format_raw);
+  case kvcache_ops::KVCacheFormat::MERGED_KV:
+    config.kv_size = 1;
+    config.hidden_dims = key_value.size(-1);
+    break;
+  case kvcache_ops::KVCacheFormat::SEPARATE_KV:
+    config.kv_size = 2;
+    config.hidden_dims = key_value.size(-1);
+    break;
+  case kvcache_ops::KVCacheFormat::MLA_KV:
+    config.kv_size = 2;
+    config.hidden_dims = config.k_hidden_dims;
+    break;
+  case kvcache_ops::KVCacheFormat::DSA_KV:
+    config.kv_size = 3;
+    config.hidden_dims = config.k_hidden_dims;
+    break;
+  default:
+    TORCH_CHECK(false, "Unsupported KVCacheFormat: ", kvcache_format_raw);
   }
 
   return config;
@@ -105,7 +104,8 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   if (config.kvcache_format == kvcache_ops::KVCacheFormat::MLA_KV) {
     max_hidden_dims = std::max(config.k_hidden_dims, config.v_hidden_dims);
   } else if (config.kvcache_format == kvcache_ops::KVCacheFormat::DSA_KV) {
-    max_hidden_dims = std::max({config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims});
+    max_hidden_dims = std::max(
+        {config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims});
   }
 
   int64_t baseBuffSize =
