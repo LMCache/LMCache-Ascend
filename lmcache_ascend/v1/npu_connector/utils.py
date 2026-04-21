@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import List, Union
+from typing import List, Tuple, Union
 
 # Third Party
 from lmcache.v1.gpu_connector.utils import permute_to_contiguous
