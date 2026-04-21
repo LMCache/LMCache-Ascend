@@ -13,7 +13,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.2"
+LMCACHE_UPSTREAM_TAG = "v0.4.3"
 LMCACHE_ASCEND_PATCHED = False
 
 
