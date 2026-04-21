@@ -6,7 +6,7 @@ from typing import List, Union
 from lmcache.v1.gpu_connector.utils import permute_to_contiguous
 import torch
 
-_KVTupleTwoOrMore = tuple[torch.Tensor, torch.Tensor, *tuple[torch.Tensor, ...]]
+_KVTupleTwoOrMore = Tuple[torch.Tensor, ...]
 _KVLayer = Union[torch.Tensor, _KVTupleTwoOrMore]
 
 
