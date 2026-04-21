@@ -539,7 +539,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             layout_hints: Optional KV layout hints from the serving engine.
 
         Returns:
-            A new instance of VLLMPagedMemGPUConnectorV2.
+            A new instance of VLLMPagedMemNPUConnectorV2.
         """
         # Extract parameters from metadata
         # kv_shape: (num_layer, 2 or 1, chunk_size, num_kv_head, head_size)
