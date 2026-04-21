@@ -6,7 +6,7 @@ import logging
 import os
 
 # First Party
-from lmcache_ascend.v1.gpu_connector.npu_connectors import is_310p
+from lmcache_ascend.v1.npu_connector.npu_connectors import is_310p
 
 logger = logging.getLogger(__name__)
 
