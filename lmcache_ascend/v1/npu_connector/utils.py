@@ -31,7 +31,7 @@ def permute_kv_caches_to_contiguous(
                     "Tuple KV entries must contain at least two tensors; "
                     f"got len={len(layer)}"
                 )
-            permuted: list[torch.Tensor] = []
+            permuted: List[torch.Tensor] = []
             for t in layer:
                 if not isinstance(t, torch.Tensor):
                     raise ValueError(
