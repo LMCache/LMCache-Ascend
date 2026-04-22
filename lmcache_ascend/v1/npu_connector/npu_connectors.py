@@ -841,7 +841,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """
         assert memory_obj.tensor is not None
 
-        self.initialize_kvcaches_ptr(**kwargs)
+        with torch.npu.stream(self.store_stream):
+            self.initialize_kvcaches_ptr(**kwargs)
+
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -850,8 +852,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        with torch.npu.stream(self.store_stream):
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError("KV cache format is not initialized!")
 
@@ -1089,11 +1092,25 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         # We avoid per-object synchronization during batch transfers.
         # A single synchronization is performed at the end of the batch.
         kwargs["no_sync"] = True
+
+        # When invoked from the async store worker thread, the engine
+        # records an NPU event on the forward-pass stream and hands it
+        # here via kwargs.  Make the store stream wait on that event so
+        # DMA kernels do not start reading the paged KV cache before
+        # the forward pass has finished writing it.  Pop before the
+        # per-object loop since ``from_gpu`` / ``from_gpu_310p`` do not
+        # expect this kwarg.
+        ordering_event = kwargs.pop("ordering_event", None)
+        if ordering_event is not None:
+            with torch.npu.stream(self.store_stream):
+                self.store_stream.wait_event(ordering_event)
+
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():
                 self.from_gpu_310p(memory_obj, start, end, **kwargs)
             else:
                 self.from_gpu(memory_obj, start, end, **kwargs)
+
         self.store_stream.synchronize()
 
     def get_shape(self, num_tokens: int) -> torch.Size:
