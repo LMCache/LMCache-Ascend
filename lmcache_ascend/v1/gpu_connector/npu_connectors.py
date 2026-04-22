@@ -1082,9 +1082,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
         # NOTE (gingfung):
-        # no need to sync per obj
-        # if we were going to batch from_gpu anyway.
-        # we do a batch sync in the end.
+        # Since no_sync is only consumed by us, for now we modify the kwargs directly.
+        # We avoid per-object synchronization during batch transfers.
+        # A single synchronization is performed at the end of the batch.
         kwargs["no_sync"] = True
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():
