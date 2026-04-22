@@ -30,7 +30,7 @@ jobs:
 
     container:
       # TODO (gingfung): use strategy matrix for version tests
-      image: quay.io/ascend/vllm-ascend:v0.11.0-openeuler
+      image: quay.io/ascend/vllm-ascend:v0.18.0rc1
       env:
         SOC_VERSION: Ascend910B4
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
@@ -111,7 +111,7 @@ jobs:
           
           echo ">>> Installing LMCache Core..."
           # TODO (gingfung): use strategy matrix for different version tests
-          pip install lmcache==0.4.2
+          pip install lmcache==0.4.3
 
           echo ">>> Building LMCache-Ascend..."
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
@@ -308,7 +308,7 @@ jobs:
           
           echo ">>> Installing LMCache Core..."
           # TODO (gingfung): use strategy matrix for different version tests
-          pip install lmcache==0.4.2
+          pip install lmcache==0.4.3
 
           echo ">>> Building LMCache-Ascend..."
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH

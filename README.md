@@ -47,7 +47,7 @@ Please ensure your environment matches the versions below.
 #### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.2** | **>=v0.11.0** | **>=2.7.1** | 🚧 **Experimental** |
+| **main** | **v0.4.3** | **>=v0.14.0** | **>=2.7.1** | 🚧 **Experimental** |
 | **v0.3.12** | **v0.3.12** | **>=v0.11.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
 
 #### For PyTorch / SGLang

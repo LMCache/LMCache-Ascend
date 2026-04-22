@@ -4,7 +4,7 @@ from lmcache_tests.v1.utils import *
 import torch
 
 # First Party
-from lmcache_ascend.v1.gpu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
+from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 
 def create_npu_connector(hidden_dim, num_layers):
