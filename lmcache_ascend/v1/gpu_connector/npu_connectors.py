@@ -879,8 +879,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.use_mla,
                     self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
                 )
-
-        if not memory_obj.tensor.is_cuda:
+        no_sync = kwargs.get("no_sync", False)
+        if not no_sync and not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
             # memory object
@@ -1081,11 +1081,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.to_gpu(memory_obj, start, end, **kwargs)
 
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
+        # NOTE (gingfung):
+        # no need to sync per obj
+        # if we were going to batch from_gpu anyway.
+        # we do a batch sync in the end.
+        kwargs["no_sync"] = True
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():
                 self.from_gpu_310p(memory_obj, start, end, **kwargs)
             else:
                 self.from_gpu(memory_obj, start, end, **kwargs)
+        self.store_stream.synchronize()
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         kv_size = 1 if self.use_mla else 2
