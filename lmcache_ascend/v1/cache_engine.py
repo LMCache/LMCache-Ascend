@@ -2,11 +2,6 @@
 """
 LMCacheEngine for Ascend NPU.
 
-Adds an asynchronous ``store_async`` path on top of upstream LMCache:
-the main (forward-pass) thread only records an NPU event and enqueues a
-work item; a dedicated background worker thread runs ``process_tokens``,
-``allocate``, DMA launch, and ``batched_put``.  The adapter learns which
-requests have fully drained via ``get_finished_stores``.
 """
 
 # Standard
@@ -88,24 +83,25 @@ class AscendLMCacheEngine(LMCacheEngine):
             broadcast_fn,
             broadcast_object_fn,
         )
+        self.store_async = self.config.store_async
+        if self.store_async:
+            self._store_queue: Optional[queue.Queue] = None
+            self._store_worker_thread: Optional[threading.Thread] = None
+            self._store_lock = threading.Lock()
 
-        self._store_queue: Optional[queue.Queue] = None
-        self._store_worker_thread: Optional[threading.Thread] = None
-        self._store_lock = threading.Lock()
-
-        # req_id -> number of in-flight background stores.  Entry
-        # removed when count hits 0.
-        self._pending_store_reqs: Dict[str, int] = {}
-        # req_ids whose generation finished while stores were still
-        # draining.  Re-checked on each ``get_finished_stores`` call.
-        self._deferred_finished_req_ids: set = set()
-        # req_ids already reported as finished_sending, to prevent
-        # duplicate reports after the scheduler frees blocks.
-        self._reported_finished_store_ids: set = set()
+            # req_id -> number of in-flight background stores.  Entry
+            # removed when count hits 0.
+            self._pending_store_reqs: Dict[str, int] = {}
+            # req_ids whose generation finished while stores were still
+            # draining.  Re-checked on each ``get_finished_stores`` call.
+            self._deferred_finished_req_ids: set = set()
+            # req_ids already reported as finished_sending, to prevent
+            # duplicate reports after the scheduler frees blocks.
+            self._reported_finished_store_ids: set = set()
 
         self._device_id: Optional[int] = None
 
-        if self.kv_events_enabled:
+        if self.kv_events_enabled and self.store_async:
             self.kv_events = ThreadSafeEventList()
 
     def _ensure_store_worker(self) -> None:
@@ -121,9 +117,12 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def post_init(self, **kwargs) -> None:
         super().post_init(**kwargs)
-        self._ensure_store_worker()
+        if self.store_async:
+            self._ensure_store_worker()
 
     def _store_worker_loop(self) -> None:
+        if not self.store_async:
+            return
         device_set = False
         while True:
             work = self._store_queue.get()
@@ -150,56 +149,85 @@ class AscendLMCacheEngine(LMCacheEngine):
                         self._pending_store_reqs[req_id] = cnt
                 self._store_queue.task_done()
 
+    def _stage_slot_mapping_for_store(self, kwargs: dict) -> None:
+        """Copy ``slot_mapping`` into pre-sized NPU + pinned-CPU buffers when
+        the connector was built with ``vllm_config``.
+
+        Mutates ``kwargs["slot_mapping"]`` in place.
+        """
+        sm = kwargs["slot_mapping"]
+        gc = self.gpu_connector
+        if not isinstance(sm, torch.Tensor) or not hasattr(
+            gc, "_lmcache_slot_mapping_npu_buf"
+        ):
+            return
+        token_len = int(sm.shape[0])
+        cap = getattr(gc, "_lmcache_max_slot_mapping_tokens", None)
+        if cap is not None and token_len > cap:
+            raise RuntimeError(
+                f"slot_mapping length {token_len} exceeds pre-allocated "
+                f"capacity {cap}. Check vLLM model_config.max_model_len / "
+                "scheduler_config.max_num_batched_tokens vs connector init."
+            )
+        with torch.npu.stream(gc.store_stream):
+            gc._lmcache_slot_mapping_cpu_pinned[:token_len].copy_(sm)
+            gc._lmcache_slot_mapping_npu_buf[:token_len].copy_(
+                gc._lmcache_slot_mapping_cpu_pinned[:token_len],
+                non_blocking=True,
+            )
+            kwargs["slot_mapping"] = gc._lmcache_slot_mapping_npu_buf[:token_len]
+
+    def _record_forward_ordering_event(self, kwargs: dict) -> None:
+        """Record an event on the current (forward) stream so the
+        connector's ``store_stream`` can wait on it before issuing any
+        DMA.
+
+        Idempotent: skips if the caller already provided one.
+        """
+        if kwargs.get("ordering_event") is not None:
+            return
+        if self._device_id is None:
+            self._device_id = torch.npu.current_device()
+        event = torch.npu.Event()
+        event.record()
+        kwargs["ordering_event"] = event
+
+    def _store_token_count(
+        self,
+        mask: Optional[torch.Tensor],
+        tokens: Optional[Union[torch.Tensor, list[int]]],
+        hashes: Optional[List[int]],
+        offsets: Optional[List[int]],
+        *,
+        offsets_err: str,
+    ) -> int:
+        if mask is not None:
+            return int(torch.sum(mask).item())
+        if tokens is not None:
+            return len(tokens)
+        if hashes is not None:
+            assert offsets is not None, offsets_err
+            return sum(offsets)
+        return 0
+
     @torch.inference_mode()
-    def _execute_store_background(
+    def _run_store_pipeline(
         self,
         tokens: Optional[Union[torch.Tensor, list]],
         hashes: Optional[List[int]],
         offsets: Optional[List[int]],
         mask: Optional[torch.Tensor],
+        num_to_store_tokens: int,
         kwargs: dict,
     ) -> None:
-        # Re-check health/freeze here: state may have flipped between
-        # enqueue and dispatch, and running stale work against a closed
-        # storage_manager would crash.
-        if not self.is_healthy():
-            logger.debug(
-                "[bg-store] engine unhealthy, dropping store for req %s",
-                kwargs.get("req_id", "unspecified"),
-            )
-            return
-        if self.is_frozen():
-            logger.debug(
-                "[bg-store] freeze mode enabled, dropping store for req %s",
-                kwargs.get("req_id", "unspecified"),
-            )
-            return
+        """Shared implementation for sync ``store`` and background async work.
 
-        # Re-stage ``slot_mapping`` into pre-sized NPU + pinned-CPU buffers when
-        # the connector was built with ``vllm_config`` (capacity uses
-        # max(model max_model_len, scheduler max_num_batched_tokens)).
-        sm = kwargs.get("slot_mapping")
-        gc = self.gpu_connector
-        if isinstance(sm, torch.Tensor) and hasattr(
-            gc, "_lmcache_slot_mapping_npu_buf"
-        ):
-            token_len = int(sm.shape[0])
-            cap = getattr(gc, "_lmcache_max_slot_mapping_tokens", None)
-            if cap is not None and token_len > cap:
-                raise RuntimeError(
-                    f"slot_mapping length {token_len} exceeds pre-allocated "
-                    f"capacity {cap}. Check vLLM model_config.max_model_len / "
-                    "scheduler_config.max_num_batched_tokens vs connector init."
-                )
-            with torch.npu.stream(gc.store_stream):
-                gc._lmcache_slot_mapping_cpu_pinned[:token_len].copy_(sm)
-                gc._lmcache_slot_mapping_npu_buf[:token_len].copy_(
-                    gc._lmcache_slot_mapping_cpu_pinned[:token_len],
-                    non_blocking=True,
-                )
-                kwargs["slot_mapping"] = gc._lmcache_slot_mapping_npu_buf[:token_len]
+        Expects engine health and freeze state already checked by the caller.
+        ``kwargs`` must already include any ``ordering_event`` required by the
+        connector for async ordering.
+        """
+        self._stage_slot_mapping_for_store(kwargs)
 
-        num_to_store_tokens = kwargs.pop("num_to_store_tokens", 0)
         store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
 
         starts: List[int] = []
@@ -327,7 +355,39 @@ class AscendLMCacheEngine(LMCacheEngine):
                 num_to_store_tokens,
             )
 
+    @torch.inference_mode()
+    def _execute_store_background(
+        self,
+        tokens: Optional[Union[torch.Tensor, list]],
+        hashes: Optional[List[int]],
+        offsets: Optional[List[int]],
+        mask: Optional[torch.Tensor],
+        kwargs: dict,
+    ) -> None:
+        # Re-check health/freeze here: state may have flipped between
+        # enqueue and dispatch, and running stale work against a closed
+        # storage_manager would crash.
+        if not self.is_healthy():
+            logger.debug(
+                "[bg-store] engine unhealthy, dropping store for req %s",
+                kwargs.get("req_id", "unspecified"),
+            )
+            return
+        if self.is_frozen():
+            logger.debug(
+                "[bg-store] freeze mode enabled, dropping store for req %s",
+                kwargs.get("req_id", "unspecified"),
+            )
+            return
+
+        num_to_store_tokens = int(kwargs.pop("num_to_store_tokens", 0))
+        self._run_store_pipeline(
+            tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
+        )
+
     def get_finished_stores(self, finished_req_ids: set) -> set:
+        if not self.store_async:
+            return None
         result: set = set()
         with self._store_lock:
             # Forget req_ids the scheduler no longer asks about.
@@ -359,6 +419,60 @@ class AscendLMCacheEngine(LMCacheEngine):
         return []
 
     @torch.inference_mode()
+    def store(
+        self,
+        tokens: Optional[Union[torch.Tensor, list[int]]] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> None:
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping store operation")
+            return
+
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for store operation"
+        )
+
+        if self._is_passive():
+            logger.debug(f"rank={self.metadata.worker_id} ignore store")
+            return
+
+        assert self.storage_manager is not None
+
+        num_to_store_tokens = self._store_token_count(
+            mask,
+            tokens,
+            hashes,
+            offsets,
+            offsets_err=("Offsets should be set when hashes are provided during store"),
+        )
+
+        assert tokens is not None or hashes is not None, (
+            "Either 'tokens' or 'hashes' must be provided."
+        )
+
+        self._log_kvcache_for_check(
+            operation="Store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=False,
+        )
+
+        if self.is_frozen():
+            logger.debug(
+                "Freeze mode enabled, skipping store operation for %d tokens",
+                num_to_store_tokens,
+            )
+            return
+
+        self._record_forward_ordering_event(kwargs)
+        self._run_store_pipeline(
+            tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
+        )
+
+    @torch.inference_mode()
     def store_async(
         self,
         tokens: Optional[Union[torch.Tensor, list[int]]] = None,
@@ -388,16 +502,15 @@ class AscendLMCacheEngine(LMCacheEngine):
         # Mirror upstream store()'s token-count accounting so
         # stats_monitor.on_store_request(...) on the bg thread sees the
         # same number the scheduler saw at enqueue time.
-        num_to_store_tokens = 0
-        if mask is not None:
-            num_to_store_tokens = torch.sum(mask).item()
-        elif tokens is not None:
-            num_to_store_tokens = len(tokens)
-        elif hashes is not None:
-            assert offsets is not None, (
+        num_to_store_tokens = self._store_token_count(
+            mask,
+            tokens,
+            hashes,
+            offsets,
+            offsets_err=(
                 "Offsets should be set when hashes are provided during store_async"
-            )
-            num_to_store_tokens = sum(offsets)
+            ),
+        )
 
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
@@ -417,24 +530,9 @@ class AscendLMCacheEngine(LMCacheEngine):
             )
             return
 
-        # Capture the current NPU device once; the bg worker will
-        # ``set_device`` to this on its first iteration.
-        if self._device_id is None:
-            self._device_id = torch.npu.current_device()
-
-        # Record an event on the current (forward-pass) stream; the bg
-        # worker passes this through to ``batched_from_gpu`` which
-        # issues ``store_stream.wait_event(...)`` before any DMA.
-        event = torch.npu.Event()
-        event.record()
-
-        kwargs["ordering_event"] = event
+        self._record_forward_ordering_event(kwargs)
         kwargs["num_to_store_tokens"] = num_to_store_tokens
 
-        # IMPORTANT: increment ``_pending_store_reqs`` and enqueue the
-        # work item under the same lock so ``get_finished_stores``
-        # cannot observe a counter of 0 for a req whose work item has
-        # been posted but not yet drained.
         self._ensure_store_worker()
 
         with self._store_lock:
