@@ -372,10 +372,14 @@ def _patch_vllm_v1_adapter():
     import lmcache.integration.vllm.vllm_v1_adapter as lmc_vllm_v1_adapter
 
     # First Party
+    from lmcache_ascend.integration.vllm.vllm_service_factory import (
+        VllmAscendServiceFactory,
+    )
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         LMCacheAscendConnectorV1Impl as ascend_LMCacheAscendConnectorV1Impl,
     )
 
+    lmc_vllm_v1_adapter.VllmServiceFactory = VllmAscendServiceFactory
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
 

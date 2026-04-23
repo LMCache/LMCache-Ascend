@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional
+from typing import Any, Optional
 
 # Third Party
 from lmcache.logging import init_logger
@@ -32,11 +32,52 @@ elif _build_info.__framework_name__ == "mindspore":
 logger = init_logger(__name__)
 
 
+def _attach_lmcache_slot_mapping_staging(
+    connector: GPUConnectorInterface,
+    vllm_config: Optional[Any],
+    device: torch.device,
+) -> None:
+    """Pre-allocate NPU + pinned-CPU buffers for ``slot_mapping`` staging.
+
+    ``slot_mapping`` is indexed per **request** and can be as long as
+    ``model_config.max_model_len``, which may exceed
+    ``scheduler_config.max_num_batched_tokens``. Capacity is the max of
+    those bounds when both are present.
+
+    For a 256k tokens with long, we allocate about 256k*8 bytes,
+        i.e. about 2MB. 1M tokens with int64 will take about 8MB.
+    """
+    if vllm_config is None or device.type != "npu":
+        return
+    bounds: list[int] = []
+    model_cfg = getattr(vllm_config, "model_config", None)
+    if model_cfg is not None:
+        mml = getattr(model_cfg, "max_model_len", None)
+        if mml is not None and mml > 0:
+            bounds.append(int(mml))
+    sched = getattr(vllm_config, "scheduler_config", None)
+    if sched is not None:
+        mnb = getattr(sched, "max_num_batched_tokens", None)
+        if mnb is not None and mnb > 0:
+            bounds.append(int(mnb))
+    if not bounds:
+        return
+    max_tokens = max(bounds)
+    connector._lmcache_max_slot_mapping_tokens = int(max_tokens)
+    connector._lmcache_slot_mapping_npu_buf = torch.empty(
+        int(max_tokens), dtype=torch.long, device=device
+    )
+    connector._lmcache_slot_mapping_cpu_pinned = torch.empty(
+        int(max_tokens), dtype=torch.long, device="cpu", pin_memory=True
+    )
+
+
 def CreateNPUConnector(
     config: LMCacheEngineConfig,
     metadata: LMCacheMetadata,
     engine: EngineType,
     layout_hints: Optional[LayoutHints] = None,
+    vllm_config: Optional[Any] = None,
 ) -> GPUConnectorInterface:
     """Factory function to create NPU connectors on Ascend.
 
@@ -58,22 +99,26 @@ def CreateNPUConnector(
 
         if config.use_layerwise:
             if config.enable_blending:
-                return VLLMBufferLayerwiseNPUConnector.from_metadata(
+                conn = VLLMBufferLayerwiseNPUConnector.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
             else:
-                return VLLMPagedMemLayerwiseNPUConnector.from_metadata(
+                conn = VLLMPagedMemLayerwiseNPUConnector.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
+            _attach_lmcache_slot_mapping_staging(conn, vllm_config, device)
+            return conn
 
         if config.use_gpu_connector_v3:
             raise NotImplementedError(
                 "GPU Connector v3 is not supported yet. Please contact LMCache-Ascend."
             )
         else:
-            return VLLMPagedMemNPUConnectorV2.from_metadata(
+            conn = VLLMPagedMemNPUConnectorV2.from_metadata(
                 metadata, use_gpu, device, layout_hints=layout_hints
             )
+            _attach_lmcache_slot_mapping_staging(conn, vllm_config, device)
+            return conn
     elif engine == EngineType.SGLANG:
         # First Party
         from lmcache_ascend.v1.npu_connector.npu_connectors import (
@@ -86,7 +131,7 @@ def CreateNPUConnector(
         kv_dtype = metadata.kv_dtype
 
         if config.use_layerwise:
-            return SGLangLayerwiseNPUConnector(
+            conn = SGLangLayerwiseNPUConnector(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
@@ -95,7 +140,7 @@ def CreateNPUConnector(
                 device=device,
             )
         else:
-            return SGLangNPUConnector(
+            conn = SGLangNPUConnector(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
@@ -103,5 +148,7 @@ def CreateNPUConnector(
                 dtype=kv_dtype,
                 device=device,
             )
+        _attach_lmcache_slot_mapping_staging(conn, vllm_config, device)
+        return conn
     else:
         raise RuntimeError(f"Unsupported engine type for Ascend: {engine}")

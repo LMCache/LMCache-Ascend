@@ -13,7 +13,6 @@ requests have fully drained via ``get_finished_stores``.
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 import queue
 import threading
-import time
 
 # Third Party
 from lmcache.logging import init_logger
@@ -150,7 +149,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                     else:
                         self._pending_store_reqs[req_id] = cnt
                 self._store_queue.task_done()
-                time.sleep(0)
 
     @torch.inference_mode()
     def _execute_store_background(
@@ -176,6 +174,30 @@ class AscendLMCacheEngine(LMCacheEngine):
                 kwargs.get("req_id", "unspecified"),
             )
             return
+
+        # Re-stage ``slot_mapping`` into pre-sized NPU + pinned-CPU buffers when
+        # the connector was built with ``vllm_config`` (capacity uses
+        # max(model max_model_len, scheduler max_num_batched_tokens)).
+        sm = kwargs.get("slot_mapping")
+        gc = self.gpu_connector
+        if isinstance(sm, torch.Tensor) and hasattr(
+            gc, "_lmcache_slot_mapping_npu_buf"
+        ):
+            token_len = int(sm.shape[0])
+            cap = getattr(gc, "_lmcache_max_slot_mapping_tokens", None)
+            if cap is not None and token_len > cap:
+                raise RuntimeError(
+                    f"slot_mapping length {token_len} exceeds pre-allocated "
+                    f"capacity {cap}. Check vLLM model_config.max_model_len / "
+                    "scheduler_config.max_num_batched_tokens vs connector init."
+                )
+            with torch.npu.stream(gc.store_stream):
+                gc._lmcache_slot_mapping_cpu_pinned[:token_len].copy_(sm)
+                gc._lmcache_slot_mapping_npu_buf[:token_len].copy_(
+                    gc._lmcache_slot_mapping_cpu_pinned[:token_len],
+                    non_blocking=True,
+                )
+                kwargs["slot_mapping"] = gc._lmcache_slot_mapping_npu_buf[:token_len]
 
         num_to_store_tokens = kwargs.pop("num_to_store_tokens", 0)
         store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
@@ -376,12 +398,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                 "Offsets should be set when hashes are provided during store_async"
             )
             num_to_store_tokens = sum(offsets)
-            # Materialize slot_mapping on the store stream so the copy
-            # does not serialize against vLLM's compute stream.
-            with torch.npu.stream(self.gpu_connector.store_stream):
-                kwargs["slot_mapping"] = torch.tensor(
-                    kwargs["slot_mapping"], dtype=torch.long, device="npu"
-                )
 
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."

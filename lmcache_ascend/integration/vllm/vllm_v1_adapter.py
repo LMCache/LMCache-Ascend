@@ -91,8 +91,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
-            slot_mapping = slot_mapping.to(self.device)
-
             skip_leading_tokens = save_spec.skip_leading_tokens
 
             if skip_leading_tokens == len(token_ids):
