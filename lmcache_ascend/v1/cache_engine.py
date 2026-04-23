@@ -83,8 +83,8 @@ class AscendLMCacheEngine(LMCacheEngine):
             broadcast_fn,
             broadcast_object_fn,
         )
-        self.store_async = self.config.store_async
-        if self.store_async:
+        self.is_store_async = self.config.store_async
+        if self.is_store_async:
             self._store_queue: Optional[queue.Queue] = None
             self._store_worker_thread: Optional[threading.Thread] = None
             self._store_lock = threading.Lock()
@@ -101,7 +101,7 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         self._device_id: Optional[int] = None
 
-        if self.kv_events_enabled and self.store_async:
+        if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
 
     def _ensure_store_worker(self) -> None:
@@ -117,11 +117,11 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def post_init(self, **kwargs) -> None:
         super().post_init(**kwargs)
-        if self.store_async:
+        if self.is_store_async:
             self._ensure_store_worker()
 
     def _store_worker_loop(self) -> None:
-        if not self.store_async:
+        if not self.is_store_async:
             return
         device_set = False
         while True:
@@ -386,7 +386,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         )
 
     def get_finished_stores(self, finished_req_ids: set) -> set:
-        if not self.store_async:
+        if not self.is_store_async:
             return None
         result: set = set()
         with self._store_lock:
