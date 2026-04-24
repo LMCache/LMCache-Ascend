@@ -91,6 +91,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
+            # made a copy and move to the NPU
+            slot_mapping = slot_mapping.pin_memory()
+            slot_mapping_npu = slot_mapping.to(
+                device="npu", dtype=torch.long, non_blocking=True
+            )
+
             skip_leading_tokens = save_spec.skip_leading_tokens
 
             if skip_leading_tokens == len(token_ids):
@@ -127,28 +133,21 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
 
-            if self.store_async:
-                self.lmcache_engine.store_async(
-                    token_ids,
-                    mask=store_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                    offset=skip_leading_tokens,
-                    transfer_spec=request.disagg_spec,
-                    request_configs=request.request_configs,
-                    req_id=request.req_id,
-                )
-            else:
-                self.lmcache_engine.store(
-                    token_ids,
-                    mask=store_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                    offset=skip_leading_tokens,
-                    transfer_spec=request.disagg_spec,
-                    request_configs=request.request_configs,
-                    req_id=request.req_id,
-                )
+            ordering_event = torch.npu.Event()
+            ordering_event.record()
+
+            self.lmcache_engine.store(
+                token_ids,
+                mask=store_mask,
+                kvcaches=kvcaches,
+                slot_mapping=slot_mapping,
+                offset=skip_leading_tokens,
+                transfer_spec=request.disagg_spec,
+                request_configs=request.request_configs,
+                req_id=request.req_id,
+                ordering_event=ordering_event,
+                slot_mapping_npu=slot_mapping_npu,
+            )
 
             if get_pp_group().is_last_rank:
                 save_spec.skip_leading_tokens = len(token_ids)

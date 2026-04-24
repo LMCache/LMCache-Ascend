@@ -851,14 +851,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if "slot_mapping" not in kwargs:
             raise ValueError("'slot_mapping' should be provided in kwargs.")
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping"]
+        slot_mapping: torch.Tensor = kwargs["slot_mapping_npu"]
         with torch.npu.stream(self.store_stream):
             kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError("KV cache format is not initialized!")
 
-        with torch.cuda.stream(self.store_stream):
+        with torch.npu.stream(self.store_stream):
             # No staging buffer or token count mismatch
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
                 lmc_ops.multi_layer_kv_transfer(
@@ -1094,11 +1094,12 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         kwargs["no_sync"] = True
 
         ordering_event = kwargs.pop("ordering_event", None)
+        current_stream = torch.npu.current_stream()
         with torch.npu.stream(self.store_stream):
             if ordering_event is not None:
                 self.store_stream.wait_event(ordering_event)
             else:
-                self.store_stream.wait_stream(torch.npu.current_stream())
+                self.store_stream.wait_stream(current_stream)
 
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():

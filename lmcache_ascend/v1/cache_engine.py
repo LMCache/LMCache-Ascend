@@ -118,26 +118,25 @@ class AscendLMCacheEngine(LMCacheEngine):
     def post_init(self, **kwargs) -> None:
         super().post_init(**kwargs)
         if self.is_store_async:
+            self._device_id = torch.npu.current_device()
             self._ensure_store_worker()
 
     def _store_worker_loop(self) -> None:
         if not self.is_store_async:
             return
-        device_set = False
+        if self._device_id is not None:
+            torch.npu.set_device(self._device_id)
         while True:
             work = self._store_queue.get()
             if work is None:  # poison pill
                 self._store_queue.task_done()
                 break
 
-            if not device_set and self._device_id is not None:
-                torch.npu.set_device(self._device_id)
-                device_set = True
-
-            tokens, hashes, offsets, mask, kwargs = work
-            req_id = kwargs.get("req_id", "unspecified")
+            req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs = work
             try:
-                self._execute_store_background(tokens, hashes, offsets, mask, kwargs)
+                self._run_store_pipeline(
+                    req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
+                )
             except Exception:
                 logger.exception("Background store failed for req %s", req_id)
             finally:
@@ -148,49 +147,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                     else:
                         self._pending_store_reqs[req_id] = cnt
                 self._store_queue.task_done()
-
-    def _stage_slot_mapping_for_store(self, kwargs: dict) -> None:
-        """Copy ``slot_mapping`` into pre-sized NPU + pinned-CPU buffers when
-        the connector was built with ``vllm_config``.
-
-        Mutates ``kwargs["slot_mapping"]`` in place.
-        """
-        sm = kwargs["slot_mapping"]
-        gc = self.gpu_connector
-        if not isinstance(sm, torch.Tensor) or not hasattr(
-            gc, "_lmcache_slot_mapping_npu_buf"
-        ):
-            return
-        token_len = int(sm.shape[0])
-        cap = getattr(gc, "_lmcache_max_slot_mapping_tokens", None)
-        if cap is not None and token_len > cap:
-            raise RuntimeError(
-                f"slot_mapping length {token_len} exceeds pre-allocated "
-                f"capacity {cap}. Check vLLM model_config.max_model_len / "
-                "scheduler_config.max_num_batched_tokens vs connector init."
-            )
-        with torch.npu.stream(gc.store_stream):
-            gc._lmcache_slot_mapping_cpu_pinned[:token_len].copy_(sm)
-            gc._lmcache_slot_mapping_npu_buf[:token_len].copy_(
-                gc._lmcache_slot_mapping_cpu_pinned[:token_len],
-                non_blocking=True,
-            )
-            kwargs["slot_mapping"] = gc._lmcache_slot_mapping_npu_buf[:token_len]
-
-    def _record_forward_ordering_event(self, kwargs: dict) -> None:
-        """Record an event on the current (forward) stream so the
-        connector's ``store_stream`` can wait on it before issuing any
-        DMA.
-
-        Idempotent: skips if the caller already provided one.
-        """
-        if kwargs.get("ordering_event") is not None:
-            return
-        if self._device_id is None:
-            self._device_id = torch.npu.current_device()
-        event = torch.npu.Event()
-        event.record()
-        kwargs["ordering_event"] = event
 
     def _store_token_count(
         self,
@@ -213,6 +169,7 @@ class AscendLMCacheEngine(LMCacheEngine):
     @torch.inference_mode()
     def _run_store_pipeline(
         self,
+        req_id: str,
         tokens: Optional[Union[torch.Tensor, list]],
         hashes: Optional[List[int]],
         offsets: Optional[List[int]],
@@ -226,7 +183,25 @@ class AscendLMCacheEngine(LMCacheEngine):
         ``kwargs`` must already include any ``ordering_event`` required by the
         connector for async ordering.
         """
-        self._stage_slot_mapping_for_store(kwargs)
+        assert tokens is not None or hashes is not None, (
+            "Either 'tokens' or 'hashes' must be provided."
+        )
+
+        # KVCache Check logging
+        self._log_kvcache_for_check(
+            operation="Store",
+            kwargs=kwargs,
+            token_count=num_to_store_tokens,
+            require_req_id=False,
+        )
+
+        # Check if freeze mode is enabled
+        if self.is_frozen():
+            logger.debug(
+                "Freeze mode enabled, skipping store operation for %d tokens",
+                num_to_store_tokens,
+            )
+            return
 
         store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
 
@@ -239,150 +214,115 @@ class AscendLMCacheEngine(LMCacheEngine):
         tot_token_num = 0
 
         request_configs = kwargs.get("request_configs")
-        req_id = self._get_req_id(kwargs)
+        if request_configs is not None and len(request_configs) != 0:
+            assert isinstance(request_configs, dict)
 
-        try:
-            if request_configs is not None and len(request_configs) != 0:
-                assert isinstance(request_configs, dict)
+        with store_stats.profile_process_tokens():
+            prev_key = 0
+            for start, end, key in self.token_database.process_tokens(
+                tokens,
+                hashes,
+                offsets,
+                mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+                # Allocate the memory object
+                num_tokens = end - start
+                kv_shapes = self.metadata.get_shapes(num_tokens)
+                kv_dtypes = self.metadata.get_dtypes()
 
-            with store_stats.profile_process_tokens():
-                prev_key = 0
-                for start, end, key in self.token_database.process_tokens(
-                    tokens,
-                    hashes,
-                    offsets,
-                    mask,
-                    request_configs=request_configs,
-                ):
-                    assert isinstance(key, CacheEngineKey)
-                    num_tokens = end - start
-                    kv_shapes = self.metadata.get_shapes(num_tokens)
-                    kv_dtypes = self.metadata.get_dtypes()
-
-                    # TODO (Jiayi): should be batched in the future
-                    memory_obj = self.storage_manager.allocate(
-                        kv_shapes,
-                        kv_dtypes,
-                        busy_loop=self.config.get_extra_config_value(
-                            "force_store_wait", False
-                        ),
-                        fmt=self.fmt,
-                    )
-                    if memory_obj is None:
-                        logger.warning(
-                            "Local cpu memory under pressure so"
-                            " choosing to store only "
-                            f" {len(memory_objs)}"
-                            " total chunks of KV cache."
-                        )
-                        break
-
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(key)
-                    memory_objs.append(memory_obj)
-                    tot_kv_size += memory_obj.get_size()
-                    tot_token_num += num_tokens
-
-                    if self.kv_events_enabled:
-                        stored_event = CacheStoreEvent(
-                            block_hashes=[key.chunk_hash],
-                            parent_block_hash=None if start == 0 else prev_key,
-                            token_ids=[],
-                            block_size=num_tokens,
-                            lora_id=None,
-                            medium="cpu",
-                            lora_name=None,
-                        )
-                        if tokens is not None:
-                            stored_event.token_ids = convert_tokens_to_list(
-                                tokens,
-                                start,
-                                end,
-                            )
-                            if isinstance(tokens, torch.Tensor):
-                                stored_event.medium = tokens.device
-                        elif hashes is not None:
-                            stored_event.token_ids = hashes[start : end + 1]
-                        logger.debug(
-                            "Added kv cache event '%s' to kv cache events queue",
-                            stored_event,
-                        )
-                        self.kv_events.append(stored_event)
-                        prev_key = key.chunk_hash
-
-            if not memory_objs:
-                return
-
-            with store_stats.profile_from_gpu():
-                self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
-
-            with store_stats.profile_put():
-                transfer_spec = kwargs.get("transfer_spec", None)
-                # TODO: we implicitly rely on batched_put to call ref_count_down
-                # this management should be done in a cleaner way
-                self.storage_manager.batched_put(
-                    keys,
-                    memory_objs,
-                    transfer_spec=transfer_spec,
-                    location=self.store_location,
+                # TODO (Jiayi): should be batched in the future
+                memory_obj = self.storage_manager.allocate(
+                    kv_shapes,
+                    kv_dtypes,
+                    busy_loop=self.config.get_extra_config_value(
+                        "force_store_wait", False
+                    ),
+                    fmt=self.fmt,
                 )
+                if memory_obj is None:
+                    logger.warning(
+                        "Local cpu memory under pressure so"
+                        " choosing to store only "
+                        f" {len(memory_objs)}"
+                        " total chunks of KV cache."
+                    )
+                    break
 
-            self.stats_monitor.on_store_finished(
-                store_stats,
-                tot_token_num,
-            )
-            tot_time = store_stats.time_to_store()
+                starts.append(start)
+                ends.append(end)
+                keys.append(key)
+                memory_objs.append(memory_obj)
+                tot_kv_size += memory_obj.get_size()
+                tot_token_num += num_tokens
 
-            logger.info(
-                "[req_id=%s] Stored %d out of total %d tokens. "
-                "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
-                "offload_time: %.4f ms, put_time: %.4f ms",
-                req_id,
-                tot_token_num,
-                num_to_store_tokens,
-                tot_kv_size / 1024**3,
-                tot_time * 1000,
-                tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
-                (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
-                store_stats.put_time * 1000,
-            )
-        except Exception:
-            logger.exception(
-                "[req_id=%s] Failed to store %d out of total %d tokens",
-                req_id,
-                tot_token_num,
-                num_to_store_tokens,
-            )
+                # Create KV event
+                if self.kv_events_enabled:
+                    stored_event = CacheStoreEvent(
+                        block_hashes=[key.chunk_hash],
+                        parent_block_hash=None if start == 0 else prev_key,
+                        token_ids=[],
+                        block_size=num_tokens,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                    if tokens is not None:
+                        stored_event.token_ids = convert_tokens_to_list(
+                            tokens,
+                            start,
+                            end,
+                        )
+                        if isinstance(tokens, torch.Tensor):
+                            stored_event.medium = tokens.device
+                    elif hashes is not None:
+                        stored_event.token_ids = hashes[start : end + 1]
+                    logger.debug(
+                        (
+                            "Added kv cache event '%s' to kv cache events queue"
+                            % stored_event
+                        )
+                    )
+                    self.kv_events.append(stored_event)
+                    prev_key = key.chunk_hash
 
-    @torch.inference_mode()
-    def _execute_store_background(
-        self,
-        tokens: Optional[Union[torch.Tensor, list]],
-        hashes: Optional[List[int]],
-        offsets: Optional[List[int]],
-        mask: Optional[torch.Tensor],
-        kwargs: dict,
-    ) -> None:
-        # Re-check health/freeze here: state may have flipped between
-        # enqueue and dispatch, and running stale work against a closed
-        # storage_manager would crash.
-        if not self.is_healthy():
-            logger.debug(
-                "[bg-store] engine unhealthy, dropping store for req %s",
-                kwargs.get("req_id", "unspecified"),
-            )
-            return
-        if self.is_frozen():
-            logger.debug(
-                "[bg-store] freeze mode enabled, dropping store for req %s",
-                kwargs.get("req_id", "unspecified"),
-            )
+        # memory_objs might be empty, directly return to avoid sending tokens
+        if not memory_objs:
             return
 
-        num_to_store_tokens = int(kwargs.pop("num_to_store_tokens", 0))
-        self._run_store_pipeline(
-            tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
+        with store_stats.profile_from_gpu():
+            self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+
+        with store_stats.profile_put():
+            transfer_spec = kwargs.get("transfer_spec", None)
+            # TODO: we implicitly rely on batched_put to call ref_count_down
+            # this management should be done in a cleaner way
+            self.storage_manager.batched_put(
+                keys,
+                memory_objs,
+                transfer_spec=transfer_spec,
+                location=self.store_location,
+            )
+
+        self.stats_monitor.on_store_finished(
+            store_stats,
+            tot_token_num,
+        )
+        tot_time = store_stats.time_to_store()
+
+        logger.info(
+            "[req_id=%s] Stored %d out of total %d tokens. "
+            "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
+            "offload_time: %.4f ms, put_time: %.4f ms",
+            req_id,
+            tot_token_num,
+            num_to_store_tokens,
+            tot_kv_size / 1024**3,
+            tot_time * 1000,
+            tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
+            (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
+            store_stats.put_time * 1000,
         )
 
     def get_finished_stores(self, finished_req_ids: set) -> set:
@@ -427,6 +367,26 @@ class AscendLMCacheEngine(LMCacheEngine):
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> None:
+        """Store the tokens/hashes and mask into the cache engine.
+
+        :param Optional[torch.Tensor] tokens: The tokens of the corresponding KV caches.
+
+        :param Optional[List[int]] hashes: The hashes of the corresponding KV caches.
+
+        :param Optional[torch.Tensor] mask: The mask for the tokens. Should
+            have the same length as tokens. And the mask should ALWAYS be like
+            FFFFFTTTTTTT, where True means the tokens needs to be matched,
+            and the Falses will ALWAYS be at the PREFIX of the tensor.
+
+        :param **kwargs: The additional arguments for the storage backend which
+            will be passed into the gpu_connector.
+            Should include KV cache specific information (e.g., paged KV buffer
+            and the page tables).
+
+        :raises: ValueError if the number of Falses in the mask is not a
+            multiple of the chunk size.
+        """
+        # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store operation")
             return
@@ -441,105 +401,38 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         assert self.storage_manager is not None
 
-        num_to_store_tokens = self._store_token_count(
-            mask,
-            tokens,
-            hashes,
-            offsets,
-            offsets_err=("Offsets should be set when hashes are provided during store"),
-        )
-
-        assert tokens is not None or hashes is not None, (
-            "Either 'tokens' or 'hashes' must be provided."
-        )
-
-        self._log_kvcache_for_check(
-            operation="Store",
-            kwargs=kwargs,
-            token_count=num_to_store_tokens,
-            require_req_id=False,
-        )
-
-        if self.is_frozen():
-            logger.debug(
-                "Freeze mode enabled, skipping store operation for %d tokens",
-                num_to_store_tokens,
-            )
-            return
-
-        self._record_forward_ordering_event(kwargs)
-        self._run_store_pipeline(
-            tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
-        )
-
-    @torch.inference_mode()
-    def store_async(
-        self,
-        tokens: Optional[Union[torch.Tensor, list[int]]] = None,
-        hashes: Optional[List[int]] = None,
-        offsets: Optional[List[int]] = None,
-        mask: Optional[torch.Tensor] = None,
-        **kwargs,
-    ) -> None:
-        if not self.is_healthy():
-            logger.warning("LMCache is unhealthy, skipping store_async operation")
-            return
-
-        assert self.gpu_connector is not None, (
-            "gpu_connector is required for store_async operation"
-        )
-
-        if self._is_passive():
-            logger.debug(f"rank={self.metadata.worker_id} ignore store_async")
-            return
-
-        assert self.storage_manager is not None, (
-            "storage_manager is required for store_async operation"
-        )
-
+        # Get req_id for logging
         req_id = self._get_req_id(kwargs)
 
-        # Mirror upstream store()'s token-count accounting so
-        # stats_monitor.on_store_request(...) on the bg thread sees the
-        # same number the scheduler saw at enqueue time.
-        num_to_store_tokens = self._store_token_count(
-            mask,
-            tokens,
-            hashes,
-            offsets,
-            offsets_err=(
-                "Offsets should be set when hashes are provided during store_async"
-            ),
-        )
+        # Initialize num_to_store_tokens to avoid reference before assignment
+        num_to_store_tokens = 0
 
-        assert tokens is not None or hashes is not None, (
-            "Either 'tokens' or 'hashes' must be provided."
-        )
-
-        self._log_kvcache_for_check(
-            operation="Store",
-            kwargs=kwargs,
-            token_count=num_to_store_tokens,
-            require_req_id=False,
-        )
-
-        if self.is_frozen():
-            logger.debug(
-                "Freeze mode enabled, skipping store_async operation for %d tokens",
-                num_to_store_tokens,
+        if mask is not None:
+            num_to_store_tokens = torch.sum(mask).item()
+        elif tokens is not None:
+            num_to_store_tokens = len(tokens)
+        elif hashes is not None:
+            assert offsets is not None, (
+                "Offsets should be set when hashes are provided during store"
             )
-            return
-
-        self._record_forward_ordering_event(kwargs)
-        kwargs["num_to_store_tokens"] = num_to_store_tokens
-
-        self._ensure_store_worker()
-
-        with self._store_lock:
-            self._pending_store_reqs[req_id] = (
-                self._pending_store_reqs.get(req_id, 0) + 1
+            num_to_store_tokens = sum(offsets)
+            kwargs["slot_mapping"] = torch.tensor(
+                kwargs["slot_mapping"], dtype=torch.long, device="npu"
             )
-            self._store_queue.put((tokens, hashes, offsets, mask, kwargs))
+
+        if not self.is_store_async:
+            self._run_store_pipeline(
+                req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
+            )
+        else:
+            self._ensure_store_worker()
+            with self._store_lock:
+                self._pending_store_reqs[req_id] = (
+                    self._pending_store_reqs.get(req_id, 0) + 1
+                )
+                self._store_queue.put(
+                    (req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs)
+                )
 
     def close(self) -> None:
         """Stop the bg worker gracefully, then close the base engine."""
