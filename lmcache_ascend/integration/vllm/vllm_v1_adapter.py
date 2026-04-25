@@ -97,12 +97,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                 slot_mapping_npu = slot_mapping.to(
                     device="npu", dtype=torch.long, non_blocking=True
                 )
-                slot_mapping_npu_event = torch.npu.Event()
-                slot_mapping_npu_event.record()
-
-            self.lmcache_engine.gpu_connector.store_stream.wait_event(
-                slot_mapping_npu_event
-            )
 
             skip_leading_tokens = save_spec.skip_leading_tokens
 
