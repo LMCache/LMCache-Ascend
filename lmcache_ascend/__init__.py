@@ -369,6 +369,9 @@ def _patch_get_vllm_torch_dev():
 
 def _patch_vllm_v1_adapter():
     # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        lmcache_connector as vllm_lmcache_connector,
+    )
     import lmcache.integration.vllm.vllm_v1_adapter as lmc_vllm_v1_adapter
 
     # First Party
@@ -377,6 +380,13 @@ def _patch_vllm_v1_adapter():
     )
 
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
+
+    def handle_preemptions(self, preempted_req_ids):
+        method = getattr(self._lmcache_engine, "handle_preemptions", None)
+        if callable(method):
+            method(preempted_req_ids)
+
+    vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
 
 
 def _patch_cache_engine():

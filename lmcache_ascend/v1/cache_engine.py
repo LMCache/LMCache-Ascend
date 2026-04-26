@@ -8,6 +8,7 @@ LMCacheEngine for Ascend NPU.
 from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 import queue
 import threading
+import time
 
 # Third Party
 from lmcache.logging import init_logger
@@ -88,6 +89,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             self._store_queue: Optional[queue.Queue] = None
             self._store_worker_thread: Optional[threading.Thread] = None
             self._store_lock = threading.Lock()
+            self._store_cv = threading.Condition(self._store_lock)
 
             # req_id -> number of in-flight background stores.  Entry
             # removed when count hits 0.
@@ -132,7 +134,15 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._store_queue.task_done()
                 break
 
-            req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs = work
+            (
+                req_id,
+                tokens,
+                hashes,
+                offsets,
+                mask,
+                num_to_store_tokens,
+                kwargs,
+            ) = work
             try:
                 self._run_store_pipeline(
                     req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
@@ -146,6 +156,12 @@ class AscendLMCacheEngine(LMCacheEngine):
                         self._pending_store_reqs.pop(req_id, None)
                     else:
                         self._pending_store_reqs[req_id] = cnt
+                    logger.debug(
+                        "Async store done for req %s; remaining=%d",
+                        req_id,
+                        max(cnt, 0),
+                    )
+                    self._store_cv.notify_all()
                 self._store_queue.task_done()
 
     def _store_token_count(
@@ -177,12 +193,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         num_to_store_tokens: int,
         kwargs: dict,
     ) -> None:
-        """Shared implementation for sync ``store`` and background async work.
-
-        Expects engine health and freeze state already checked by the caller.
-        ``kwargs`` must already include any ``ordering_event`` required by the
-        connector for async ordering.
-        """
+        """Shared implementation for sync and async store."""
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
         )
@@ -353,6 +364,52 @@ class AscendLMCacheEngine(LMCacheEngine):
             self._reported_finished_store_ids.update(result)
         return result
 
+    def wait_for_pending_stores(self, req_ids: Iterable[str]) -> set[str]:
+        """Wait until async stores for the given requests have drained.
+
+        vLLM reports preempted request ids to workers before the next forward can
+        overwrite their freed KV blocks.  If one of those ids still has a
+        background store reading paged KV, drain it here to avoid store-after-free.
+        """
+        if not self.is_store_async:
+            return set()
+
+        req_id_set = set(req_ids)
+        if not req_id_set:
+            return set()
+
+        with self._store_cv:
+            pending_at_start = {
+                req_id for req_id in req_id_set if req_id in self._pending_store_reqs
+            }
+            if not pending_at_start:
+                return set()
+
+            pending_counts = {
+                req_id: self._pending_store_reqs[req_id] for req_id in pending_at_start
+            }
+            logger.info(
+                "Waiting for pending async stores before preemption: "
+                "req_ids=%s pending_counts=%s",
+                sorted(pending_at_start),
+                pending_counts,
+            )
+            start_time = time.monotonic()
+            self._store_cv.wait_for(
+                lambda: not any(
+                    req_id in self._pending_store_reqs for req_id in req_id_set
+                )
+            )
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+
+        logger.info(
+            "Pending async stores drained before preemption: req_ids=%s "
+            "elapsed=%.4f ms",
+            sorted(pending_at_start),
+            elapsed_ms,
+        )
+        return pending_at_start
+
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
         if self.kv_events_enabled and self.kv_events:
             return self.kv_events.drain()
@@ -430,8 +487,22 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._pending_store_reqs[req_id] = (
                     self._pending_store_reqs.get(req_id, 0) + 1
                 )
+                logger.debug(
+                    "Enqueued async store for req %s; pending=%d tokens=%d",
+                    req_id,
+                    self._pending_store_reqs[req_id],
+                    num_to_store_tokens,
+                )
                 self._store_queue.put(
-                    (req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs)
+                    (
+                        req_id,
+                        tokens,
+                        hashes,
+                        offsets,
+                        mask,
+                        num_to_store_tokens,
+                        kwargs,
+                    )
                 )
 
     def close(self) -> None:

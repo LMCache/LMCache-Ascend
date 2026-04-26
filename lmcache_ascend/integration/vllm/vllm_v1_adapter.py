@@ -38,16 +38,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         self.store_async = self.config.store_async
         logger.debug("store_async: %s", self.store_async)
 
-    # Patching wait_for_save to remove the PD disagg_spec skip_leading_tokens
-    # override. The upstream code does:
-    #   if self.kv_role == "kv_producer" and request.disagg_spec:
-    #       skip_leading_tokens = min(skip_leading_tokens,
-    #                                 request.disagg_spec.num_transferred_tokens)
-    # save_spec.skip_leading_tokens is already aligned with the number of tokens
-    # that have been saved, in chunk prefills and delay pull mode, this can cause
-    # redundant full re-saves when there is an existing cache hit.
-    # In push mode, this is not a problem, because the skip leading tokens
-    # already aligns with the number of tokens that have been saved.
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
@@ -76,6 +66,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
         assert self.lmcache_engine is not None
 
+        ordering_event = torch.npu.Event()
+        ordering_event.record()
+
         for request in connector_metadata.requests:
             self.lmcache_engine.lookup_unpin(request.req_id)
 
@@ -91,7 +84,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
-            # made a copy and move to the NPU
             slot_mapping = slot_mapping.pin_memory()
             with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
                 slot_mapping_npu = slot_mapping.to(
@@ -134,9 +126,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                     store_mask = store_mask[:aligned_token_len]
                     slot_mapping = slot_mapping[:aligned_token_len]
 
-            ordering_event = torch.npu.Event()
-            ordering_event.record()
-
             self.lmcache_engine.store(
                 token_ids,
                 mask=store_mask,
@@ -165,6 +154,25 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             finished_sending if finished_sending else None,
             None,
         )
+
+    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+        if (
+            not self.store_async
+            or self.kv_role == "kv_consumer"
+            or self.lmcache_engine is None
+        ):
+            return
+
+        logger.debug(
+            "LMCache-Ascend handling preemptions: req_ids=%s",
+            sorted(preempted_req_ids),
+        )
+        waited_req_ids = self.lmcache_engine.wait_for_pending_stores(preempted_req_ids)
+        if waited_req_ids:
+            logger.info(
+                "Handled preemptions after draining async stores: req_ids=%s",
+                sorted(waited_req_ids),
+            )
 
     def request_finished(
         self,
