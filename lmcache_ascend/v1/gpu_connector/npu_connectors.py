@@ -589,13 +589,15 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         - chunk_size: The MAX size of the chunk to be copied to GPU.
         - dtype: The data type of the intermediate buffer.
         """
-        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
-
+        # Initialize kv_format before calling super().__init__
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
 
+        # Initialize MLA/DSA parameters
         self.kv_lora_rank: int = 0
         self.qk_rope_head_dim: int = 0
         self.dsa_head_dim: int = 0
+
+        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
 
         if is_310p():
             assert "num_kv_head" in kwargs, ("num_kv_head should be provided in 310p",)
@@ -1213,13 +1215,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.from_gpu(memory_obj, start, end, **kwargs)
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        if self.kv_format in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV):
-            if self.kv_format == KVCacheFormat.MLA_KV:
-                total_hidden_dims = self.kv_lora_rank + self.qk_rope_head_dim
-            else:
-                total_hidden_dims = (
-                    self.kv_lora_rank + self.qk_rope_head_dim + self.dsa_head_dim
-                )
+        if self.kv_format == KVCacheFormat.MLA_KV:
+            total_hidden_dims = self.kv_lora_rank + self.qk_rope_head_dim
+            return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
+        elif self.kv_format == KVCacheFormat.DSA_KV:
+            total_hidden_dims = self.kv_lora_rank + self.qk_rope_head_dim + self.dsa_head_dim
             return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
         else:
             kv_size = 1 if self.use_mla else 2
