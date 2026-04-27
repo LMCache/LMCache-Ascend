@@ -164,24 +164,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                     self._store_cv.notify_all()
                 self._store_queue.task_done()
 
-    def _store_token_count(
-        self,
-        mask: Optional[torch.Tensor],
-        tokens: Optional[Union[torch.Tensor, list[int]]],
-        hashes: Optional[List[int]],
-        offsets: Optional[List[int]],
-        *,
-        offsets_err: str,
-    ) -> int:
-        if mask is not None:
-            return int(torch.sum(mask).item())
-        if tokens is not None:
-            return len(tokens)
-        if hashes is not None:
-            assert offsets is not None, offsets_err
-            return sum(offsets)
-        return 0
-
     @torch.inference_mode()
     def _run_store_pipeline(
         self,
@@ -193,7 +175,9 @@ class AscendLMCacheEngine(LMCacheEngine):
         num_to_store_tokens: int,
         kwargs: dict,
     ) -> None:
-        """Shared implementation for sync and async store."""
+        """Shared implementation for sync and async store.
+        From upstream store function.
+        """
         assert tokens is not None or hashes is not None, (
             "Either 'tokens' or 'hashes' must be provided."
         )
@@ -477,6 +461,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 kwargs["slot_mapping"], dtype=torch.long, device="npu"
             )
 
+        # lmcache-ascend start ---------------------
         if not self.is_store_async:
             self._run_store_pipeline(
                 req_id, tokens, hashes, offsets, mask, num_to_store_tokens, kwargs
@@ -504,6 +489,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                         kwargs,
                     )
                 )
+        # lmcache-ascend end ---------------------
 
     def close(self) -> None:
         """Stop the bg worker gracefully, then close the base engine."""

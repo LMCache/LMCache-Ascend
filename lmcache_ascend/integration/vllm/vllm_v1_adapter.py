@@ -66,8 +66,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
         assert self.lmcache_engine is not None
 
+        # lmcache-ascend start ---------------------
         ordering_event = torch.npu.Event()
         ordering_event.record()
+        # lmcache-ascend end ---------------------
 
         for request in connector_metadata.requests:
             self.lmcache_engine.lookup_unpin(request.req_id)
@@ -84,11 +86,13 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             assert isinstance(slot_mapping, torch.Tensor)
             assert len(slot_mapping) == len(token_ids)
 
+            # lmcache-ascend start ---------------------
             slot_mapping = slot_mapping.pin_memory()
             with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
                 slot_mapping_npu = slot_mapping.to(
                     device="npu", dtype=torch.long, non_blocking=True
                 )
+            # lmcache-ascend end ---------------------
 
             skip_leading_tokens = save_spec.skip_leading_tokens
 
