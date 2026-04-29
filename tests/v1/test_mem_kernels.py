@@ -18,8 +18,6 @@ from .utils import (
     generate_kv_cache_paged_list_tuple_tensors,
     generate_mla_kv_cache,
     generate_dsa_kv_cache,
-    check_mla_kv_cache_equal,
-    check_dsa_kv_cache_equal,
 )
 
 
@@ -183,6 +181,7 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
 
     num_blocks = 1000
     dtype = torch.bfloat16
+    hidden_dim_size = num_heads * head_size
     kv_cache = generate_kv_cache_paged_list_tuple_tensors(
         num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
     )
@@ -1331,13 +1330,15 @@ def test_multi_layer_kv_transfer_mla_format(
         )
 
     # Verify correctness
-    check_mla_kv_cache_equal(
+    check_paged_kv_cache_equal(
         kv_cache_src,
         kv_cache_dst,
         slot_mapping,
-        num_kv_heads,
-        kv_lora_rank,
-        qk_rope_head_dim,
+        num_heads=num_kv_heads,
+        head_size=128,
+        kv_format=3,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
     )
 
     mem_allocator.close()
@@ -1474,14 +1475,16 @@ def test_multi_layer_kv_transfer_dsa_format(
         )
 
     # Verify correctness
-    check_dsa_kv_cache_equal(
+    check_paged_kv_cache_equal(
         kv_cache_src,
         kv_cache_dst,
         slot_mapping,
-        num_kv_heads,
-        kv_lora_rank,
-        qk_rope_head_dim,
-        dsa_head_dim,
+        num_heads=num_kv_heads,
+        head_size=128,
+        kv_format=4,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
     )
 
     mem_allocator.close()

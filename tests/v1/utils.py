@@ -2,6 +2,7 @@
 # Third Party
 from lmcache_tests.v1.utils import *
 import torch
+from typing import List, Tuple
 
 # First Party
 from lmcache_ascend.v1.gpu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
@@ -73,11 +74,14 @@ def check_paged_kv_cache_equal(
     num_heads=8,
     head_size=128,
     vllm_two_major=True,
-    kv_format=1,  # 1:MERGED KV 2:SEPARATE KV
+    kv_format=1,  # 1:MERGED KV 2:SEPARATE KV 3:MLA_KV 4:DSA_KV
+    kv_lora_rank=0,
+    qk_rope_head_dim=0,
+    dsa_head_dim=0,
 ):
     """
     Check whether two paged kv caches are the same at slot_mapping.
-    Supports both MERGED_KV and SEPARATE_KV formats.
+    Supports MERGED_KV, SEPARATE_KV, MLA_KV, and DSA_KV formats.
     """
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
@@ -87,23 +91,52 @@ def check_paged_kv_cache_equal(
             left_kv = left_kv.transpose(0, 1)
             right_kv = right_kv.transpose(0, 1)
 
-        left_k = left_kv[0].reshape(-1, num_heads, head_size)
-        left_v = left_kv[1].reshape(-1, num_heads, head_size)
-        right_k = right_kv[0].reshape(-1, num_heads, head_size)
-        right_v = right_kv[1].reshape(-1, num_heads, head_size)
+        # Handle different KV cache formats
+        if kv_format == 3:  # MLA_KV: (k_cache, v_cache) with different shapes
+            # MLA format: k_cache=[blocks, block_size, kv_lora_rank], 
+            #             v_cache=[blocks, block_size, qk_rope_head_dim]
+            left_k = left_kv[0].reshape(-1, kv_lora_rank)
+            left_v = left_kv[1].reshape(-1, qk_rope_head_dim)
+            right_k = right_kv[0].reshape(-1, kv_lora_rank)
+            right_v = right_kv[1].reshape(-1, qk_rope_head_dim)
+        elif kv_format == 4:  # DSA_KV: (k_cache, v_cache, dsa_k_cache)
+            # DSA format: k_cache=[blocks, block_size, kv_lora_rank],
+            #             v_cache=[blocks, block_size, qk_rope_head_dim],
+            #             dsa_k_cache=[blocks, block_size, 1, 128]
+            left_k = left_kv[0].reshape(-1, kv_lora_rank)
+            left_v = left_kv[1].reshape(-1, qk_rope_head_dim)
+            left_dsa = left_kv[2].reshape(-1, 128)
+            right_k = right_kv[0].reshape(-1, kv_lora_rank)
+            right_v = right_kv[1].reshape(-1, qk_rope_head_dim)
+            right_dsa = right_kv[2].reshape(-1, 128)
+            
+            assert len(left_dsa.shape) == 2
+            assert len(right_dsa.shape) == 2
+            assert left_dsa.shape[token_dim] >= num_tokens
+            assert right_dsa.shape[token_dim] >= num_tokens
+            assert (left_dsa[slot_mapping, :] == right_dsa[slot_mapping, :]).all()
+        else:  # MERGED_KV or SEPARATE_KV with same K/V shapes
+            left_k = left_kv[0].reshape(-1, num_heads, head_size)
+            left_v = left_kv[1].reshape(-1, num_heads, head_size)
+            right_k = right_kv[0].reshape(-1, num_heads, head_size)
+            right_v = right_kv[1].reshape(-1, num_heads, head_size)
 
-        assert len(left_k.shape) == 3
-        assert len(left_v.shape) == 3
-        assert len(right_k.shape) == 3
-        assert len(right_v.shape) == 3
+        assert len(left_k.shape) >= 2
+        assert len(left_v.shape) >= 2
+        assert len(right_k.shape) >= 2
+        assert len(right_v.shape) >= 2
 
         assert left_k.shape[token_dim] >= num_tokens
         assert left_v.shape[token_dim] >= num_tokens
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
-        assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
-        assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
+        if kv_format in (3, 4):  # MLA/DSA format (2D tensors after reshape)
+            assert (left_k[slot_mapping, :] == right_k[slot_mapping, :]).all()
+            assert (left_v[slot_mapping, :] == right_v[slot_mapping, :]).all()
+        else:  # MERGED/SEPARATE format (3D tensors)
+            assert (left_k[slot_mapping, :, :] == right_k[slot_mapping, :, :]).all()
+            assert (left_v[slot_mapping, :, :] == right_v[slot_mapping, :, :]).all()
 
 
 def generate_sglang_npu_kv_cache(
@@ -224,90 +257,3 @@ def generate_dsa_kv_cache(
         dsa_k_cache = torch.rand(dsa_k_shape, dtype=dtype, device=device)
         ret.append((k_cache, v_cache, dsa_k_cache))
     return ret
-
-
-def check_mla_kv_cache_equal(
-    left: List[Tuple[torch.Tensor, torch.Tensor]],
-    right: List[Tuple[torch.Tensor, torch.Tensor]],
-    slot_mapping: torch.Tensor,
-    num_kv_heads: int,
-    kv_lora_rank: int,
-    qk_rope_head_dim: int,
-):
-    """
-    Verify that two MLA format KV caches are identical for the given slot mappings.
-    """
-    num_tokens = slot_mapping.shape[0]
-    assert len(left) == len(right), "Number of layers must match"
-    
-    for layer_id in range(len(left)):
-        left_k, left_v = left[layer_id]
-        right_k, right_v = right[layer_id]
-        
-        # Reshape for comparison
-        left_k_flat = left_k.reshape(-1, num_kv_heads, kv_lora_rank)
-        left_v_flat = left_v.reshape(-1, num_kv_heads, qk_rope_head_dim)
-        right_k_flat = right_k.reshape(-1, num_kv_heads, kv_lora_rank)
-        right_v_flat = right_v.reshape(-1, num_kv_heads, qk_rope_head_dim)
-        
-        # Verify we have enough tokens
-        assert left_k_flat.shape[0] >= num_tokens
-        assert left_v_flat.shape[0] >= num_tokens
-        assert right_k_flat.shape[0] >= num_tokens
-        assert right_v_flat.shape[0] >= num_tokens
-        
-        # Verify K and V equality
-        assert torch.all(
-            left_k_flat[slot_mapping, :, :] == right_k_flat[slot_mapping, :, :]
-        ), f"K cache mismatch at layer {layer_id}"
-        assert torch.all(
-            left_v_flat[slot_mapping, :, :] == right_v_flat[slot_mapping, :, :]
-        ), f"V cache mismatch at layer {layer_id}"
-
-
-def check_dsa_kv_cache_equal(
-    left: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
-    right: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]],
-    slot_mapping: torch.Tensor,
-    num_kv_heads: int,
-    kv_lora_rank: int,
-    qk_rope_head_dim: int,
-    dsa_head_dim: int = 128,
-):
-    """
-    Verify that two DSA format KV caches are identical for the given slot mappings.
-    """
-    num_tokens = slot_mapping.shape[0]
-    assert len(left) == len(right), "Number of layers must match"
-    
-    for layer_id in range(len(left)):
-        left_k, left_v, left_dsa_k = left[layer_id]
-        right_k, right_v, right_dsa_k = right[layer_id]
-        
-        # Reshape for comparison
-        left_k_flat = left_k.reshape(-1, num_kv_heads, kv_lora_rank)
-        left_v_flat = left_v.reshape(-1, num_kv_heads, qk_rope_head_dim)
-        left_dsa_k_flat = left_dsa_k.reshape(-1, 1, dsa_head_dim)
-        
-        right_k_flat = right_k.reshape(-1, num_kv_heads, kv_lora_rank)
-        right_v_flat = right_v.reshape(-1, num_kv_heads, qk_rope_head_dim)
-        right_dsa_k_flat = right_dsa_k.reshape(-1, 1, dsa_head_dim)
-        
-        # Verify we have enough tokens
-        assert left_k_flat.shape[0] >= num_tokens
-        assert left_v_flat.shape[0] >= num_tokens
-        assert left_dsa_k_flat.shape[0] >= num_tokens
-        assert right_k_flat.shape[0] >= num_tokens
-        assert right_v_flat.shape[0] >= num_tokens
-        assert right_dsa_k_flat.shape[0] >= num_tokens
-        
-        # Verify K, V, and DSA_K equality
-        assert torch.all(
-            left_k_flat[slot_mapping, :, :] == right_k_flat[slot_mapping, :, :]
-        ), f"K cache mismatch at layer {layer_id}"
-        assert torch.all(
-            left_v_flat[slot_mapping, :, :] == right_v_flat[slot_mapping, :, :]
-        ), f"V cache mismatch at layer {layer_id}"
-        assert torch.all(
-            left_dsa_k_flat[slot_mapping, :, :] == right_dsa_k_flat[slot_mapping, :, :]
-        ), f"DSA_K cache mismatch at layer {layer_id}"

@@ -58,7 +58,7 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
 
   switch (config.kvcache_format) {
   case kvcache_ops::KVCacheFormat::MERGED_KV:
-    config.kv_size = 1;
+    config.kv_size = 2;
     config.hidden_dims = key_value.size(-1);
     break;
   case kvcache_ops::KVCacheFormat::SEPARATE_KV:
