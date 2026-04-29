@@ -21,6 +21,7 @@ import torch
 
 if TYPE_CHECKING:
     # Third Party
+    from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -36,7 +37,16 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         logger.debug("Initializing LMCacheAscendConnectorV1Impl")
         super().__init__(vllm_config, role, parent)
         self.store_async = self.config.store_async
+        self._wait_for_save_done = True
+        self._finished_req_ids_waiting_for_save: set[str] = set()
+        self._late_finished_sending: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
+
+    @_lmcache_nvtx_annotate
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        self.current_layer = 0
+        self._wait_for_save_done = False
+        super().start_load_kv(forward_context, **kwargs)
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
@@ -46,6 +56,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         if self.kv_role == "kv_consumer":
+            self._wait_for_save_done = True
             return
 
         if self.use_layerwise:
@@ -59,6 +70,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                 if layerwise_storer is not None:
                     next(layerwise_storer)
                 self.lmcache_engine.lookup_unpin(request.req_id)
+            self._wait_for_save_done = True
+            self._replay_finished_stores_after_save()
             return
 
         assert len(self.kv_caches) > 0
@@ -148,12 +161,58 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                 if request.disagg_spec:
                     request.disagg_spec.num_transferred_tokens = len(token_ids)
 
+        self._wait_for_save_done = True
+        self._replay_finished_stores_after_save()
+
+    def _may_register_store_after_wait_for_save(self, request: "Request") -> bool:
+        if self.kv_role == "kv_consumer":
+            return False
+        save_spec = request.save_spec
+        if save_spec is None:
+            return False
+        if not save_spec.can_save and self.kv_role != "kv_producer":
+            return False
+        return save_spec.skip_leading_tokens != len(request.token_ids)
+
+    def _replay_finished_stores_after_save(self) -> None:
+        if not self._finished_req_ids_waiting_for_save or self.lmcache_engine is None:
+            return
+
+        finished_sending = self.lmcache_engine.get_finished_stores(
+            self._finished_req_ids_waiting_for_save
+        )
+        if finished_sending:
+            self._late_finished_sending |= finished_sending
+        self._finished_req_ids_waiting_for_save = set()
+
+    @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if self.lmcache_engine is None:
             return None, None
-        finished_sending = self.lmcache_engine.get_finished_stores(finished_req_ids)
+        query_req_ids = set(finished_req_ids)
+        if not self._wait_for_save_done:
+            # NOTE (gingfung): The is a workaround logic for the case
+            # where the requests is deferred (i.e. spec_decode or MTP)
+            # and the model_runner call get_finished before wait_for_save.
+            connector_metadata = self._parent._get_connector_metadata()
+            assert isinstance(connector_metadata, LMCacheConnectorMetadata)
+
+            waiting_for_save = {
+                request.req_id
+                for request in connector_metadata.requests
+                if request.req_id in finished_req_ids
+                and self._may_register_store_after_wait_for_save(request)
+            }
+            if waiting_for_save:
+                self._finished_req_ids_waiting_for_save |= waiting_for_save
+                query_req_ids -= waiting_for_save
+
+        finished_sending = self.lmcache_engine.get_finished_stores(query_req_ids)
+        if self._late_finished_sending:
+            finished_sending |= self._late_finished_sending
+            self._late_finished_sending = set()
         return (
             finished_sending if finished_sending else None,
             None,
