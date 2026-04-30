@@ -95,7 +95,7 @@ def check_paged_kv_cache_equal(
 
         # Handle different KV cache formats
         if kv_format == 3:  # MLA_KV: (k_cache, v_cache) with different shapes
-            # MLA format: k_cache=[blocks, block_size, kv_lora_rank], 
+            # MLA format: k_cache=[blocks, block_size, kv_lora_rank],
             #             v_cache=[blocks, block_size, qk_rope_head_dim]
             left_k = left_kv[0].reshape(-1, kv_lora_rank)
             left_v = left_kv[1].reshape(-1, qk_rope_head_dim)
@@ -111,7 +111,7 @@ def check_paged_kv_cache_equal(
             right_k = right_kv[0].reshape(-1, kv_lora_rank)
             right_v = right_kv[1].reshape(-1, qk_rope_head_dim)
             right_dsa = right_kv[2].reshape(-1, 128)
-            
+
             assert len(left_dsa.shape) == 2
             assert len(right_dsa.shape) == 2
             assert left_dsa.shape[token_dim] >= num_tokens
@@ -215,7 +215,7 @@ def generate_mla_kv_cache(
     Generate MLA (Multilayer Attention) format KV cache.
     k.shape = [num_blocks, block_size, num_kv_heads, kv_lora_rank]
     v.shape = [num_blocks, block_size, num_kv_heads, qk_rope_head_dim]
-    
+
     Returns: List of tuples, each tuple is (k_cache, v_cache) for one layer
     """
     ret = []
@@ -245,7 +245,7 @@ def generate_dsa_kv_cache(
     k.shape = [num_blocks, block_size, num_kv_heads, kv_lora_rank]
     v.shape = [num_blocks, block_size, num_kv_heads, qk_rope_head_dim]
     dsa_k.shape = [num_blocks, block_size, 1, dsa_head_dim]
-    
+
     Returns: List of tuples, each tuple is (k_cache, v_cache, dsa_k_cache) for one layer
     """
     ret = []

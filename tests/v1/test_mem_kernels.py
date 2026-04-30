@@ -14,10 +14,10 @@ import lmcache_ascend.c_ops as lmc_ops
 # Local
 from .utils import (
     check_paged_kv_cache_equal,
+    generate_dsa_kv_cache,
     generate_kv_cache_paged_list_tensors,
     generate_kv_cache_paged_list_tuple_tensors,
     generate_mla_kv_cache,
-    generate_dsa_kv_cache,
 )
 
 

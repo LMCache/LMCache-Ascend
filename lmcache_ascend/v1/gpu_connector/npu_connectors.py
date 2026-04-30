@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, List, Optional, Set, Tuple, Union
+from typing import Any, List, Optional, Set, Union
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -19,9 +19,9 @@ from lmcache.v1.metadata import LMCacheMetadata
 import torch
 
 # First Party
+from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
-from lmcache_ascend.v1.kv_format import KVCacheFormat
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)

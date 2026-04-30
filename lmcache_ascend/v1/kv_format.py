@@ -4,8 +4,8 @@ from enum import Enum, auto
 from typing import List, Tuple, Union
 
 # Third Party
-import torch
 from lmcache.logging import init_logger
+import torch
 
 logger = init_logger(__name__)
 
