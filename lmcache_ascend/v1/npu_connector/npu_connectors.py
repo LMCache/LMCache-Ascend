@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from enum import Enum, auto
-from typing import Any, List, Optional, Set, Tuple, Union
+from typing import Any, List, Optional, Set, Union
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -21,6 +20,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 import torch
 
 # First Party
+from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 import lmcache_ascend.c_ops as lmc_ops
@@ -38,82 +38,6 @@ def is_310p():
 
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
-
-
-class KVCacheFormat(Enum):
-    """
-    The storage format enumeration of KV cache is used to distinguish
-    the KV cache data structures of different versions of vLLM.
-
-    The order of enum values MUST match the KVCacheFormat
-    definition in kernels/types.h to ensure correct interoperability
-    between Python and C++ code.
-    """
-
-    UNDEFINED = 0
-
-    MERGED_KV = auto()
-    """merge format (eg: vLLM 0.9.2 ...)
-    layer: [num_kv, num_blocks, block_size, num_heads, head_dim]
-    """
-
-    SEPARATE_KV = auto()
-    """Separation format (eg: vLLM 0.11.0+ ...)
-    layer: tuple: (K_tensor, V_tensor)
-    - K_tensor.shape = [num_blocks, block_size, num_heads, head_dim]
-    - V_tensor.shape = [num_blocks, block_size, num_heads, head_dim]
-
-    eg: kvcaches[0] = (K, V)
-
-    SGLang NPU Layer-Concatenated
-    kvcaches = [K_all_layers, V_all_layers]
-    - K_tensor.shape = [layer_nums, num_blocks, block_size, num_heads, head_dim]
-    - V_tensor.shape = [layer_nums, num_blocks, block_size, num_heads, head_dim]
-    """
-
-    def is_separate_format(self) -> bool:
-        return self == KVCacheFormat.SEPARATE_KV
-
-    def is_merged_format(self) -> bool:
-        return self == KVCacheFormat.MERGED_KV
-
-    @staticmethod
-    def detect(
-        kvcaches: List[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]],
-        use_mla: bool = False,
-    ) -> "KVCacheFormat":
-        if not kvcaches:
-            return KVCacheFormat.UNDEFINED
-
-        first_cache = kvcaches[0]
-
-        # SGLang NPU: kvcaches = [K_tensor, V_tensor]
-        if isinstance(kvcaches, list) and len(kvcaches) == 2:
-            if isinstance(first_cache, torch.Tensor) and first_cache.ndim == 5:
-                return KVCacheFormat.SEPARATE_KV
-
-        if isinstance(first_cache, tuple):
-            return KVCacheFormat.SEPARATE_KV
-        elif isinstance(first_cache, torch.Tensor):
-            ndim = first_cache.ndim
-            shape = first_cache.shape
-
-            # MLA detect
-            # MLA Shape: [num_blocks, block_size, head_size] (3D)
-            #         or: [1, num_blocks, block_size, head_size] (4D with first dim = 1)
-            is_mla_shape = (ndim == 3) or (ndim == 4 and shape[0] == 1)
-            if use_mla or is_mla_shape:
-                return KVCacheFormat.MERGED_KV
-
-            # Flash Attention：[2, num_blocks, block_size, num_heads, head_size]
-            if ndim == 5 and shape[0] == 2:
-                return KVCacheFormat.MERGED_KV
-
-            # Flash Infer：[num_blocks, 2, block_size, num_heads, head_size]
-            if ndim == 5 and shape[1] == 2:
-                return KVCacheFormat.MERGED_KV
-
-        return KVCacheFormat.UNDEFINED
 
 
 class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
@@ -510,9 +434,15 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         - chunk_size: The MAX size of the chunk to be copied to GPU.
         - dtype: The data type of the intermediate buffer.
         """
-        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
-
+        # Initialize kv_format before calling super().__init__
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
+
+        # Initialize MLA/DSA parameters
+        self.kv_lora_rank: int = 0
+        self.qk_rope_head_dim: int = 0
+        self.dsa_head_dim: int = 0
+
+        super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
 
         if is_310p():
             assert "num_kv_head" in kwargs, ("num_kv_head should be provided in 310p",)
@@ -571,7 +501,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 "Unable to determine the format of input kv_caches."
             )
 
-        if self.kv_format.is_separate_format():
+        if self.kv_format.is_tuple_format():
             self.kvcaches_device = kv_caches[0][0].device
         else:
             self.kvcaches_device = kv_caches[0].device
@@ -582,7 +512,28 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if idx in self.kv_cache_pointers_on_gpu:
             return self.kv_cache_pointers_on_gpu[idx]
 
-        if self.kv_format == KVCacheFormat.SEPARATE_KV:
+        self.kv_size = self.kv_format.get_kv_size()
+        pointers_list = []
+
+        if self.kv_format == KVCacheFormat.DSA_KV:
+            for cache_tuple in kv_caches:
+                k_cache, v_cache, dsa_k_cache = cache_tuple
+                pointers_list.append(k_cache.data_ptr())
+                pointers_list.append(v_cache.data_ptr())
+                pointers_list.append(dsa_k_cache.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers * self.kv_size, dtype=torch.int64, device="cpu"
+            )
+        elif self.kv_format == KVCacheFormat.MLA_KV:
+            for k_cache, v_cache in kv_caches:
+                pointers_list.append(k_cache.data_ptr())
+                pointers_list.append(v_cache.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers * self.kv_size, dtype=torch.int64, device="cpu"
+            )
+        elif self.kv_format == KVCacheFormat.SEPARATE_KV:
             self.kv_size = 2
             pointers_list = []
             for k, v in kv_caches:
@@ -609,13 +560,24 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
         first_tensor = (
-            kv_caches[0][0] if self.kv_format.is_separate_format() else kv_caches[0]
+            kv_caches[0][0] if self.kv_format.is_tuple_format() else kv_caches[0]
         )
 
-        if self.use_mla:
-            # kv_caches[0].shape: [num_pages, page_size, head_size]
-            # kv_caches[0].shape: [1, num_pages, page_size, head_size] (vllm-Ascend)
-            self.page_buffer_size = kv_caches[0].shape[-3] * kv_caches[0].shape[-2]
+        if self.use_mla or self.kv_format in (
+            KVCacheFormat.MLA_KV,
+            KVCacheFormat.DSA_KV,
+        ):
+            if self.kv_format == KVCacheFormat.MLA_KV:
+                k_cache, v_cache = kv_caches[0]
+                self.page_buffer_size = k_cache.shape[0] * k_cache.shape[1]
+                self.kv_lora_rank = k_cache.shape[-1]
+                self.qk_rope_head_dim = v_cache.shape[-1]
+            elif self.kv_format == KVCacheFormat.DSA_KV:
+                k_cache, v_cache, dsa_k_cache = kv_caches[0]
+                self.page_buffer_size = k_cache.shape[0] * k_cache.shape[1]
+                self.kv_lora_rank = k_cache.shape[-1]
+                self.qk_rope_head_dim = v_cache.shape[-1]
+                self.dsa_head_dim = dsa_k_cache.shape[-1]
         else:
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
                 # kv_caches[0]: [tuple(k,v)]
@@ -818,7 +780,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.page_buffer_size,
             False,
             self.use_mla,
-            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
+            self.kv_format.value,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.dsa_head_dim,
         )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -869,7 +834,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.page_buffer_size,
                     True,
                     self.use_mla,
-                    self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
+                    self.kv_format.value,
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                    self.dsa_head_dim,
                 )
             else:
                 assert self.gpu_buffer.device == self.kvcaches_device
@@ -883,7 +851,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.page_buffer_size,
                     True,  # from_gpu
                     self.use_mla,
-                    self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
+                    self.kv_format.value,
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                    self.dsa_head_dim,
                 )
         no_sync = kwargs.get("no_sync", False)
         if not no_sync and not memory_obj.tensor.is_cuda:
@@ -1110,8 +1081,19 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.store_stream.synchronize()
 
     def get_shape(self, num_tokens: int) -> torch.Size:
-        kv_size = 1 if self.use_mla else 2
-        return torch.Size([kv_size, self.num_layers, num_tokens, self.hidden_dim_size])
+        if self.kv_format == KVCacheFormat.MLA_KV:
+            total_hidden_dims = self.kv_lora_rank + self.qk_rope_head_dim
+            return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
+        elif self.kv_format == KVCacheFormat.DSA_KV:
+            total_hidden_dims = (
+                self.kv_lora_rank + self.qk_rope_head_dim + self.dsa_head_dim
+            )
+            return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
+        else:
+            kv_size = 2
+            return torch.Size(
+                [kv_size, self.num_layers, num_tokens, self.hidden_dim_size]
+            )
 
 
 class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):

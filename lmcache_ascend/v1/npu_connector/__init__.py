@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Optional
+from typing import Optional
 
 # Third Party
 from lmcache.logging import init_logger
@@ -37,7 +37,6 @@ def CreateNPUConnector(
     metadata: LMCacheMetadata,
     engine: EngineType,
     layout_hints: Optional[LayoutHints] = None,
-    vllm_config: Optional[Any] = None,
 ) -> GPUConnectorInterface:
     """Factory function to create NPU connectors on Ascend.
 
