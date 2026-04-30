@@ -72,12 +72,18 @@ struct MultiLayerKVConfig {
 
   int page_buffer_size;
   bool direction;
+
+  int64_t k_hidden_dims;
+  int64_t v_hidden_dims;
+  int64_t dsa_hidden_dims;
 };
 
 MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,
-    int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw);
+    int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw,
+    int64_t k_hidden_dims = 0, int64_t v_hidden_dims = 0,
+    int64_t dsa_hidden_dims = 0);
 
 void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
                                    const torch::Tensor &key_value,

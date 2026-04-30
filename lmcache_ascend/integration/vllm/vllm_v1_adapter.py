@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Third Party
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    LMCacheConnectorMetadata,
-)
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from vllm.distributed.parallel_state import get_pp_group
