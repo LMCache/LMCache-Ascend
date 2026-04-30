@@ -138,7 +138,7 @@ You can choose `Manual Installation` or `Build Docker Image`.
 
 #### Manual Installation
 1. Prepare Base Environment
-** For SGLang **
+
 It is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
 
 ```bash
