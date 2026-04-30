@@ -1,10 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
+
+# The version.py should be independent library, and we always import the
+# version library first.  Such assumption is critical for some customization.
+from ._version import __version__ as __version__  # noqa: F401  # isort:skip
+from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # isort:skip
+
+# Standard
+import sys
+
 # First Party
 from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.2"
+LMCACHE_UPSTREAM_TAG = "v0.4.3"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -293,12 +302,35 @@ def _patch_gpu_connector():
     In LMCache 0.4.2, engine initialization uses CreateGPUConnector()
     as a factory function. We patch it to return Ascend NPU connectors
     instead of the default CUDA ones.
+
+    ``permute_kv_caches_to_contiguous`` must be patched on
+    ``lmcache.v1.gpu_connector.utils`` *before* importing
+    ``lmcache.v1.gpu_connector``, so the import in ``gpu_connectors`` binds
+    the Ascend implementation. If ``gpu_connectors`` was already loaded,
+    also replace its cached reference (same pattern as ``CreateGPUConnector``
+    on ``lmcache.v1.manager``).
     """
+    # Standard
+
+    # Third Party
+    import lmcache.v1.gpu_connector.utils as gpu_utils
+
+    # First Party
+    from lmcache_ascend.v1.npu_connector.utils import permute_kv_caches_to_contiguous
+
+    gpu_utils.permute_kv_caches_to_contiguous = permute_kv_caches_to_contiguous
+
+    _gpu_connectors_mod = sys.modules.get("lmcache.v1.gpu_connector.gpu_connectors")
+    if _gpu_connectors_mod is not None:
+        _gpu_connectors_mod.permute_kv_caches_to_contiguous = (
+            permute_kv_caches_to_contiguous
+        )
+
     # Third Party
     import lmcache.v1.gpu_connector as lm_gpu_connector
 
     # First Party
-    from lmcache_ascend.v1.gpu_connector import CreateNPUConnector
+    from lmcache_ascend.v1.npu_connector import CreateNPUConnector
 
     lm_gpu_connector.CreateGPUConnector = CreateNPUConnector
 
