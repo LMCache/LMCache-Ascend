@@ -150,13 +150,6 @@ class KVCacheFormat(Enum):
             ndim = first_cache.ndim
             shape = first_cache.shape
 
-            # MLA detect (single tensor format)
-            # MLA Shape: [num_blocks, block_size, head_size] (3D)
-            #         or: [1, num_blocks, block_size, head_size] (4D with first dim = 1)
-            is_mla_shape = (ndim == 3) or (ndim == 4 and shape[0] == 1)
-            if use_mla or is_mla_shape:
-                return KVCacheFormat.MERGED_KV
-
             # Flash Attention: [2, num_blocks, block_size, num_heads, head_size]
             if ndim == 5 and shape[0] == 2:
                 return KVCacheFormat.MERGED_KV
