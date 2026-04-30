@@ -14,8 +14,10 @@ import lmcache_ascend.c_ops as lmc_ops
 # Local
 from .utils import (
     check_paged_kv_cache_equal,
+    generate_dsa_kv_cache,
     generate_kv_cache_paged_list_tensors,
     generate_kv_cache_paged_list_tuple_tensors,
+    generate_mla_kv_cache,
 )
 
 
@@ -32,6 +34,7 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
 
     num_blocks = 256
     dtype = torch.bfloat16
+    hidden_dim_size = num_heads * head_size
     kv_cache = generate_kv_cache_paged_list_tensors(
         num_blocks,
         device,
@@ -106,6 +109,9 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
             True,
             False,
             1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_new_list.append(memory_obj_new)
 
@@ -150,6 +156,9 @@ def test_multi_layer_kernel_kvcache_merged_fmt(
             False,
             False,
             1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
 
     check_paged_kv_cache_equal(
@@ -172,6 +181,7 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
 
     num_blocks = 1000
     dtype = torch.bfloat16
+    hidden_dim_size = num_heads * head_size
     kv_cache = generate_kv_cache_paged_list_tuple_tensors(
         num_blocks, device, num_layers, num_heads, head_size, block_size, dtype
     )
@@ -219,6 +229,9 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
             True,
             False,
             2,  # SEPARATE_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_list.append(memory_obj_new)
 
@@ -259,6 +272,9 @@ def test_multi_layer_kernel_kvcache_separate_fmt(
             False,  # to gpu
             False,
             2,
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
 
     check_paged_kv_cache_equal(
@@ -339,6 +355,9 @@ def test_fused_multi_layer_kvcache_merged_fmt(
             True,  # from_gpu
             False,
             1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_baseline_list.append(memory_obj)
 
@@ -367,6 +386,9 @@ def test_fused_multi_layer_kvcache_merged_fmt(
             True,  # from_gpu
             False,
             1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_fused_list.append(memory_obj)
 
@@ -404,6 +426,9 @@ def test_fused_multi_layer_kvcache_merged_fmt(
             False,  # to_gpu
             False,
             1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
 
     check_paged_kv_cache_equal(
@@ -480,8 +505,11 @@ def test_fused_multi_layer_kvcache_separate_fmt(
             kv_cache[0][0].device,
             page_buffer_size,
             True,  # from_gpu
-            False,
+            False,  # use_mla
             2,  # SEPARATE_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_baseline_list.append(memory_obj)
 
@@ -509,8 +537,11 @@ def test_fused_multi_layer_kvcache_separate_fmt(
             kv_cache[0][0].device,
             page_buffer_size,
             True,  # from_gpu
-            False,
+            False,  # use_mla
             2,  # SEPARATE_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
         memory_obj_fused_list.append(memory_obj)
 
@@ -542,8 +573,11 @@ def test_fused_multi_layer_kvcache_separate_fmt(
             kv_cache_new[0][0].device,
             page_buffer_size,
             False,  # to_gpu
-            False,
+            False,  # use_mla
             2,  # SEPARATE_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
         )
 
     check_paged_kv_cache_equal(
@@ -1169,3 +1203,288 @@ def test_batched_fused_single_layer_kernel_separate_kv(
         del cpu_memory_objs
         del cpu_tensors
         torch.npu.empty_cache()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 1024])
+@pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("chunk_size", [256])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [128])
+def test_multi_layer_kv_transfer_mla_format(
+    num_tokens,
+    num_kv_heads,
+    chunk_size,
+    num_layers,
+    block_size,
+    kv_lora_rank,
+    qk_rope_head_dim,
+):
+    """
+    Test MLA (Multilayer Attention) format KV cache transfer.
+    - from_gpu: Extract KV cache from paged memory to CPU buffer
+    - to_gpu: Write KV cache from CPU buffer back to paged memory
+    - Verify correctness
+    """
+    device = "npu"
+    num_blocks = 1000
+    dtype = torch.bfloat16
+
+    # Generate MLA format KV cache
+    kv_cache_src = generate_mla_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_size=block_size,
+        dtype=dtype,
+    )
+    page_buffer_size = num_blocks * block_size
+
+    slot_mapping = random.sample(range(0, page_buffer_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+
+    pinned_cpu_size = 4 * 1024 * 1024 * 1024
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    # Prepare kv cache pointers
+    kv_cache_pointers = torch.empty(
+        num_layers * 2, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache = kv_cache_src[i]
+        kv_cache_pointers[i * 2 + 0] = k_cache.data_ptr()
+        kv_cache_pointers[i * 2 + 1] = v_cache.data_ptr()
+    kv_cache_pointers = kv_cache_pointers.npu()
+
+    # from_gpu: Extract KV cache
+    memory_obj_list = []
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
+    start_event.record()
+
+    total_hidden_dims = kv_lora_rank + qk_rope_head_dim
+    for slot_temp in slot_mapping_chunked:
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_temp), total_hidden_dims])
+        memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            kv_cache_pointers,
+            slot_temp,
+            kv_cache_src[0][0].device,
+            page_buffer_size,
+            True,  # from_gpu
+            False,
+            3,  # MLA_KV
+            kv_lora_rank,  # k_hidden_dims
+            qk_rope_head_dim,  # v_hidden_dims
+            0,  # dsa_hidden_dims
+        )
+        memory_obj_list.append(memory_obj)
+
+    end_event.record()
+    torch.npu.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"\nMLA from_gpu time: {elapsed_time_ms:.6f} ms")
+
+    # Generate destination KV cache
+    kv_cache_dst = generate_mla_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        block_size=block_size,
+        dtype=dtype,
+    )
+
+    # Prepare destination pointers
+    kv_cache_pointers_dst = torch.empty(
+        num_layers * 2, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache = kv_cache_dst[i]
+        kv_cache_pointers_dst[i * 2 + 0] = k_cache.data_ptr()
+        kv_cache_pointers_dst[i * 2 + 1] = v_cache.data_ptr()
+    kv_cache_pointers_dst = kv_cache_pointers_dst.npu()
+
+    # to_gpu: Write back
+    for chunk_id, slot_temp in enumerate(slot_mapping_chunked):
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj_list[chunk_id].tensor,
+            kv_cache_pointers_dst,
+            slot_temp,
+            kv_cache_dst[0][0].device,
+            page_buffer_size,
+            False,  # to_gpu
+            False,
+            3,  # MLA_KV
+            kv_lora_rank,  # k_hidden_dims
+            qk_rope_head_dim,  # v_hidden_dims
+            0,  # dsa_hidden_dims
+        )
+
+    # Verify correctness
+    check_paged_kv_cache_equal(
+        kv_cache_src,
+        kv_cache_dst,
+        slot_mapping,
+        num_heads=num_kv_heads,
+        head_size=128,
+        kv_format=3,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+    )
+
+    mem_allocator.close()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 1024])
+@pytest.mark.parametrize("num_kv_heads", [8])
+@pytest.mark.parametrize("chunk_size", [256])
+@pytest.mark.parametrize("num_layers", [1, 32])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [128])
+@pytest.mark.parametrize("dsa_head_dim", [128])
+def test_multi_layer_kv_transfer_dsa_format(
+    num_tokens,
+    num_kv_heads,
+    chunk_size,
+    num_layers,
+    block_size,
+    kv_lora_rank,
+    qk_rope_head_dim,
+    dsa_head_dim,
+):
+    """
+    Test DSA (Deep Sparse Attention) format KV cache transfer.
+    - from_gpu: Extract KV cache from paged memory to CPU buffer
+    - to_gpu: Write KV cache from CPU buffer back to paged memory
+    - Verify correctness
+    """
+    device = "npu"
+    num_blocks = 1000
+    dtype = torch.bfloat16
+
+    # Generate DSA format KV cache
+    kv_cache_src = generate_dsa_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+        block_size=block_size,
+        dtype=dtype,
+    )
+    page_buffer_size = num_blocks * block_size
+
+    slot_mapping = random.sample(range(0, page_buffer_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+
+    pinned_cpu_size = 4 * 1024 * 1024 * 1024
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    # Prepare kv cache pointers
+    kv_cache_pointers = torch.empty(
+        num_layers * 3, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache, dsa_k_cache = kv_cache_src[i]
+        kv_cache_pointers[i * 3 + 0] = k_cache.data_ptr()
+        kv_cache_pointers[i * 3 + 1] = v_cache.data_ptr()
+        kv_cache_pointers[i * 3 + 2] = dsa_k_cache.data_ptr()
+    kv_cache_pointers = kv_cache_pointers.npu()
+
+    # from_gpu: Extract KV cache
+    memory_obj_list = []
+    start_event = torch.npu.Event(enable_timing=True)
+    end_event = torch.npu.Event(enable_timing=True)
+    start_event.record()
+
+    total_hidden_dims = kv_lora_rank + qk_rope_head_dim + dsa_head_dim
+    for slot_temp in slot_mapping_chunked:
+        mem_obj_shape = torch.Size([1, num_layers, len(slot_temp), total_hidden_dims])
+        memory_obj = mem_allocator.allocate(mem_obj_shape, dtype)
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            kv_cache_pointers,
+            slot_temp,
+            kv_cache_src[0][0].device,
+            page_buffer_size,
+            True,  # from_gpu
+            False,
+            4,  # DSA_KV
+            kv_lora_rank,  # k_hidden_dims
+            qk_rope_head_dim,  # v_hidden_dims
+            dsa_head_dim,  # dsa_hidden_dims
+        )
+        memory_obj_list.append(memory_obj)
+
+    end_event.record()
+    torch.npu.synchronize()
+    elapsed_time_ms = start_event.elapsed_time(end_event)
+    print(f"\nDSA from_gpu time: {elapsed_time_ms:.6f} ms")
+
+    # Generate destination KV cache
+    kv_cache_dst = generate_dsa_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+        block_size=block_size,
+        dtype=dtype,
+    )
+
+    # Prepare destination pointers
+    kv_cache_pointers_dst = torch.empty(
+        num_layers * 3, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache, dsa_k_cache = kv_cache_dst[i]
+        kv_cache_pointers_dst[i * 3 + 0] = k_cache.data_ptr()
+        kv_cache_pointers_dst[i * 3 + 1] = v_cache.data_ptr()
+        kv_cache_pointers_dst[i * 3 + 2] = dsa_k_cache.data_ptr()
+    kv_cache_pointers_dst = kv_cache_pointers_dst.npu()
+
+    # to_gpu: Write back
+    for chunk_id, slot_temp in enumerate(slot_mapping_chunked):
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj_list[chunk_id].tensor,
+            kv_cache_pointers_dst,
+            slot_temp,
+            kv_cache_dst[0][0].device,
+            page_buffer_size,
+            False,  # to_gpu
+            False,
+            4,  # DSA_KV
+            kv_lora_rank,  # k_hidden_dims
+            qk_rope_head_dim,  # v_hidden_dims
+            dsa_head_dim,  # dsa_hidden_dims
+        )
+
+    # Verify correctness
+    check_paged_kv_cache_equal(
+        kv_cache_src,
+        kv_cache_dst,
+        slot_mapping,
+        num_heads=num_kv_heads,
+        head_size=128,
+        kv_format=4,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+    )
+
+    mem_allocator.close()

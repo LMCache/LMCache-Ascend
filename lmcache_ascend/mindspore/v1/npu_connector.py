@@ -28,7 +28,8 @@ import numpy as np
 import torch
 
 # First Party
-from lmcache_ascend.v1.npu_connector.npu_connectors import KVCacheFormat, is_310p
+from lmcache_ascend.v1.kv_format import KVCacheFormat
+from lmcache_ascend.v1.npu_connector.npu_connectors import is_310p
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
