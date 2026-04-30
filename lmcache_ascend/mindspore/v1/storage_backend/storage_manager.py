@@ -23,7 +23,7 @@ from lmcache.v1.storage_backend.storage_manager import (
 import torch
 
 # First Party
-from lmcache_ascend.v1.gpu_connector.npu_connectors import is_310p
+from lmcache_ascend.v1.npu_connector.npu_connectors import is_310p
 
 if TYPE_CHECKING:
     # Third Party
