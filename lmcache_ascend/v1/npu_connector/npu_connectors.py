@@ -1077,7 +1077,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.from_gpu_310p(memory_obj, start, end, **kwargs)
             else:
                 self.from_gpu(memory_obj, start, end, **kwargs)
-
         self.store_stream.synchronize()
 
     def get_shape(self, num_tokens: int) -> torch.Size:
