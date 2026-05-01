@@ -24,7 +24,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.v1.gpu_connector.npu_connectors import (
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
     SGLangLayerwiseNPUConnector,
     VLLMPagedMemLayerwiseNPUConnector,
     VLLMPagedMemNPUConnectorV2,
