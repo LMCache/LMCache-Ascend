@@ -34,10 +34,10 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 - **Hardware**: Atlas 800I A2 Inference series. (A3 Inference/Training and 300I Duo are experimental).
 - **OS**: Linux-based.
 - **Software**:
-  - **Python**: >= 3.10, <= 3.11
+  - **Python**: >= 3.10
   - **CANN Toolkit**: >= 8.2.RC1
   - **Ascend Driver**: >= 24.1.0
-  - **PyTorch**: >= 2.7.1 (For vLLM 0.10.2+)
+  - **PyTorch**: >= 2.7.1
   - **vLLM**: >=v0.11.0 & **vLLM-Ascend**: >=v0.11.0
 
 ### Compatibility Matrix
@@ -67,20 +67,42 @@ Please ensure your environment matches the versions below.
 
 ## Getting Started
 
-### Clone LMCache-Ascend Repo
+### for vLLM-Ascend
 
-Our repo contains a kvcache ops submodule for ease of maintenance, therefore we recommend cloning the repo with submodules.
+You can choose `Manual Installation` or `Build Docker Image`.
+
+#### Manual Installation
+1. Prepare Base Environment
+
+It is recommended to use the official [vLLM-Ascend image](https://quay.io/repository/ascend/vllm-ascend?tab=tags) as a base:
 
 ```bash
-cd /workspace
-git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
+# Pull and run the official vLLM-Ascend image
+docker pull quay.io/ascend/vllm-ascend:v0.18.0rc1
+docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.18.0rc1 /bin/bash
 ```
 
-### Docker(for vLLM)
+2. Install LMCache Repo
+
+- from pip
+```bash
+NO_CUDA_EXT=1 pip install lmcache==0.4.2
+```
+
+3. Install LMCache-Ascend Repo
+
+```bash
+git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+cd LMCache-Ascend
+pip install -v --no-build-isolation -e .
+```
+
+#### Build Docker Image
 
 Build the image using the provided Dockerfile:
 ```bash
-cd /workspace/LMCache-Ascend
+git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+cd LMCache-Ascend
 docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler .
 ```
 
@@ -110,22 +132,14 @@ docker run -itd \
 
 For further info about deployment notes, please refer to the [guide about deployment](docs/deployment.md)
 
-### Manual Installation
-Assuming your working directory is ```/workspace``` and base environment(vllm/vllm-ascend or sglang) have already been installed.
+### for SGLang
 
+You can choose `Manual Installation` or `Build Docker Image`.
+
+#### Manual Installation
 1. Prepare Base Environment
 
-** For vLLM-Ascend **
-If you are using vllm-ascend, it is recommended to use the official [vLLM-Ascend image](https://quay.io/repository/ascend/vllm-ascend?tab=tags) as a base:
-
-```bash
-# Pull and run the official vLLM-Ascend image
-docker pull quay.io/ascend/vllm-ascend:v0.18.0rc1
-docker run -it --privileged --net=host --name lmcache-vllm-dev quay.io/ascend/vllm-ascend:v0.18.0rc1 /bin/bash
-```
-
-** For SGLang **
-If you are using SGLang, it is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
+It is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
 
 ```bash
 # Pull and run the official SGLang image
@@ -143,7 +157,8 @@ NO_CUDA_EXT=1 pip install lmcache==0.4.2
 3. Install LMCache-Ascend Repo
 
 ```bash
-cd /workspace/LMCache-Ascend
+git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
 
@@ -156,6 +171,7 @@ LMCache-Ascend integrates with vLLM via a dynamic KVConnector.
 
 ##### Online serving
 ```bash
+export PYTHONHASHSEED=0
 python \
     -m vllm.entrypoints.openai.api_server \
     --port 8100 \
