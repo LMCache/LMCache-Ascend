@@ -118,7 +118,6 @@ class KVCacheFormat(Enum):
             # DSA_KV: tuple with 3 elements (k_cache, v_cache, dsa_k_cache)
             if tuple_len == 3:
                 k_cache, v_cache, dsa_k_cache = first_cache
-                assert k_cache.shape[2] == 1, "DSA_KV num_kv_heads != 1"
                 if all(isinstance(t, torch.Tensor) for t in first_cache):
                     if k_cache.shape != v_cache.shape:
                         logger.debug(
