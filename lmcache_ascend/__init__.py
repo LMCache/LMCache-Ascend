@@ -271,6 +271,56 @@ def _patch_cacheblend():
     LMCBlenderBuilder.get_or_create = partial(get_or_create_blender, LMCBlenderBuilder)
 
 
+def _patch_cachegen():
+    # Third Party
+    import lmcache.storage_backend.serde.cachegen_decoder as cachegen_decoder
+    import lmcache.storage_backend.serde.cachegen_encoder as cachegen_encoder
+
+    # First Party
+    from lmcache_ascend.serde.pac import pac_decode_function, pac_encode_function
+
+    cachegen_encoder.encode_function = pac_encode_function
+    cachegen_decoder.decode_function_gpu = pac_decode_function
+
+
+def _patch_remote_backend():
+    # Standard
+    from typing import List, Optional
+
+    # Third Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.storage_backend.remote_backend import RemoteBackend
+
+    # The core remote backend implementation deserializes an NPU resident tensor that
+    # isn't managed by a parent allocator. To mesh with the rest of LMCache it needs to
+    # be a host registered CPU tensor.
+    #
+    # Patch the get function with that functionality - allocate managed CPU memory,
+    # copy over the data
+    old_batched_get_blocking = RemoteBackend.batched_get_blocking
+
+    def new_batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        source_bufs = old_batched_get_blocking(self, keys)
+
+        allocator = self.get_allocator_backend()
+        target_bufs = []
+        for source_buf in source_bufs:
+            shape = source_buf.tensor.shape
+            dtype = source_buf.tensor.dtype
+
+            target_buf = allocator.allocate(shape, dtype)
+            target_buf.tensor.copy_(source_buf.tensor, non_blocking=True)
+            target_bufs.append(target_buf)
+
+        return target_bufs
+
+    RemoteBackend.batched_get_blocking = new_batched_get_blocking
+
+
 def _patch_multi_process():
     # Third Party
     import lmcache.v1.multiprocess.custom_types as lm_mp_types
@@ -511,6 +561,9 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_gpu_connector()
 
     _patch_hash_token()
+
+    _patch_cachegen()
+    _patch_remote_backend()
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_storage_backend_init()
