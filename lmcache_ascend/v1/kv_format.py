@@ -130,7 +130,6 @@ class KVCacheFormat(Enum):
             # MLA_KV or SEPARATE_KV: tuple with 2 elements
             if tuple_len == 2:
                 k_cache, v_cache = first_cache
-                assert k_cache.shape[2] == 1, "MLA_KV num_kv_heads != 1"
                 if isinstance(k_cache, torch.Tensor) and isinstance(
                     v_cache, torch.Tensor
                 ):
