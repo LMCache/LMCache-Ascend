@@ -286,19 +286,27 @@ class AscendLMCacheEngine(LMCacheEngine):
         if not memory_objs:
             return
 
-        with store_stats.profile_from_gpu():
-            self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+        put_submitted = False
+        try:
+            with store_stats.profile_from_gpu():
+                self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
 
-        with store_stats.profile_put():
-            transfer_spec = kwargs.get("transfer_spec", None)
-            # TODO: we implicitly rely on batched_put to call ref_count_down
-            # this management should be done in a cleaner way
-            self.storage_manager.batched_put(
-                keys,
-                memory_objs,
-                transfer_spec=transfer_spec,
-                location=self.store_location,
-            )
+            with store_stats.profile_put():
+                transfer_spec = kwargs.get("transfer_spec", None)
+                # TODO: we implicitly rely on batched_put to call ref_count_down
+                # this management should be done in a cleaner way
+                self.storage_manager.batched_put(
+                    keys,
+                    memory_objs,
+                    transfer_spec=transfer_spec,
+                    location=self.store_location,
+                )
+                put_submitted = True
+        except Exception:
+            if not put_submitted:
+                for mem_obj in memory_objs:
+                    mem_obj.ref_count_down()
+            raise
 
         self.stats_monitor.on_store_finished(
             store_stats,

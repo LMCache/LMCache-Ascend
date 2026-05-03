@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.v1.request import RequestStatus
 import torch
 
 if TYPE_CHECKING:
@@ -56,6 +57,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
         if self.kv_role == "kv_consumer":
+            if self.lmcache_engine is not None:
+                for request in connector_metadata.requests:
+                    self.lmcache_engine.lookup_unpin(request.req_id)
             self._wait_for_save_done = True
             return
 
@@ -87,79 +91,89 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         for request in connector_metadata.requests:
             self.lmcache_engine.lookup_unpin(request.req_id)
 
-            save_spec = request.save_spec
-            if (
-                save_spec is None or not save_spec.can_save
-            ) and self.kv_role != "kv_producer":
-                continue
+            try:
+                save_spec = request.save_spec
+                if (
+                    save_spec is None or not save_spec.can_save
+                ) and self.kv_role != "kv_producer":
+                    continue
 
-            token_ids = request.token_ids
+                token_ids = request.token_ids
 
-            slot_mapping = request.slot_mapping
-            assert isinstance(slot_mapping, torch.Tensor)
-            assert len(slot_mapping) == len(token_ids)
+                slot_mapping = request.slot_mapping
+                assert isinstance(slot_mapping, torch.Tensor)
+                assert len(slot_mapping) == len(token_ids)
 
-            # lmcache-ascend start ---------------------
-            slot_mapping = slot_mapping.pin_memory()
-            with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
-                slot_mapping_npu = slot_mapping.to(
-                    device="npu", dtype=torch.long, non_blocking=True
-                )
-            # lmcache-ascend end ---------------------
-
-            skip_leading_tokens = save_spec.skip_leading_tokens
-
-            if skip_leading_tokens == len(token_ids):
-                continue
-            skip_leading_tokens = (
-                skip_leading_tokens
-                // self._lmcache_chunk_size
-                * self._lmcache_chunk_size
-            )
-
-            store_mask = torch.ones(len(token_ids), dtype=torch.bool)
-            store_mask[:skip_leading_tokens] = False
-
-            logger.info(
-                "Storing KV cache for %d out of %d tokens "
-                "(skip_leading_tokens=%d) for request %s",
-                len(token_ids) - skip_leading_tokens,
-                len(token_ids),
-                skip_leading_tokens,
-                request.req_id,
-            )
-
-            is_last_prefill = request.is_last_prefill
-            if is_last_prefill:
-                if request.disagg_spec:
-                    request.disagg_spec.is_last_prefill = True
-            else:
-                if not self.enable_blending:
-                    token_len = len(token_ids)
-                    aligned_token_len = (
-                        token_len // self._lmcache_chunk_size * self._lmcache_chunk_size
+                # lmcache-ascend start ---------------------
+                slot_mapping = slot_mapping.pin_memory()
+                with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
+                    slot_mapping_npu = slot_mapping.to(
+                        device="npu", dtype=torch.long, non_blocking=True
                     )
-                    token_ids = token_ids[:aligned_token_len]
-                    store_mask = store_mask[:aligned_token_len]
-                    slot_mapping = slot_mapping[:aligned_token_len]
+                # lmcache-ascend end ---------------------
 
-            self.lmcache_engine.store(
-                token_ids,
-                mask=store_mask,
-                kvcaches=kvcaches,
-                slot_mapping=slot_mapping,
-                offset=skip_leading_tokens,
-                transfer_spec=request.disagg_spec,
-                request_configs=request.request_configs,
-                req_id=request.req_id,
-                ordering_event=ordering_event,
-                slot_mapping_npu=slot_mapping_npu,
-            )
+                skip_leading_tokens = save_spec.skip_leading_tokens
 
-            if get_pp_group().is_last_rank:
-                save_spec.skip_leading_tokens = len(token_ids)
-                if request.disagg_spec:
-                    request.disagg_spec.num_transferred_tokens = len(token_ids)
+                if skip_leading_tokens == len(token_ids):
+                    continue
+                skip_leading_tokens = (
+                    skip_leading_tokens
+                    // self._lmcache_chunk_size
+                    * self._lmcache_chunk_size
+                )
+
+                store_mask = torch.ones(len(token_ids), dtype=torch.bool)
+                store_mask[:skip_leading_tokens] = False
+
+                logger.info(
+                    "Storing KV cache for %d out of %d tokens "
+                    "(skip_leading_tokens=%d) for request %s",
+                    len(token_ids) - skip_leading_tokens,
+                    len(token_ids),
+                    skip_leading_tokens,
+                    request.req_id,
+                )
+
+                is_last_prefill = request.is_last_prefill
+                if is_last_prefill:
+                    if request.disagg_spec:
+                        request.disagg_spec.is_last_prefill = True
+                else:
+                    if not self.enable_blending:
+                        token_len = len(token_ids)
+                        aligned_token_len = (
+                            token_len
+                            // self._lmcache_chunk_size
+                            * self._lmcache_chunk_size
+                        )
+                        token_ids = token_ids[:aligned_token_len]
+                        store_mask = store_mask[:aligned_token_len]
+                        slot_mapping = slot_mapping[:aligned_token_len]
+
+                self.lmcache_engine.store(
+                    token_ids,
+                    mask=store_mask,
+                    kvcaches=kvcaches,
+                    slot_mapping=slot_mapping,
+                    offset=skip_leading_tokens,
+                    transfer_spec=request.disagg_spec,
+                    request_configs=request.request_configs,
+                    req_id=request.req_id,
+                    ordering_event=ordering_event,
+                    slot_mapping_npu=slot_mapping_npu,
+                )
+
+                if get_pp_group().is_last_rank:
+                    save_spec.skip_leading_tokens = len(token_ids)
+                    if request.disagg_spec:
+                        request.disagg_spec.num_transferred_tokens = len(token_ids)
+            except Exception:
+                # Do not let one failing request abort the save loop
+                logger.exception(
+                    "wait_for_save failed for request %s; skipping save",
+                    request.req_id,
+                )
+                continue
 
         self._wait_for_save_done = True
         self._replay_finished_stores_after_save()
@@ -219,17 +233,22 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         )
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
-        if (
-            not self.store_async
-            or self.kv_role == "kv_consumer"
-            or self.lmcache_engine is None
-        ):
+        if self.lmcache_engine is None:
             return
 
         logger.debug(
             "LMCache-Ascend handling preemptions: req_ids=%s",
             sorted(preempted_req_ids),
         )
+
+        # Lookup pins are request-scoped and normally released in wait_for_save().
+        # A preempted request may leave that path before its metadata is replayed.
+        for req_id in preempted_req_ids:
+            self.lmcache_engine.lookup_unpin(req_id)
+
+        if not self.store_async or self.kv_role == "kv_consumer":
+            return
+
         waited_req_ids = self.lmcache_engine.wait_for_pending_stores(preempted_req_ids)
         if waited_req_ids:
             logger.info(
@@ -243,5 +262,22 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         _, return_params = super().request_finished(request, block_ids)
+
+        if (
+            request.status == RequestStatus.FINISHED_ABORTED
+            and self.lmcache_engine is not None
+        ):
+            self.lmcache_engine.lookup_unpin(request.request_id)
+
+            if self.store_async and self.kv_role != "kv_consumer":
+                try:
+                    self.lmcache_engine.wait_for_pending_stores({request.request_id})
+                except Exception:
+                    logger.warning(
+                        "wait_for_pending_stores failed for aborted request %s",
+                        request.request_id,
+                        exc_info=True,
+                    )
+
         delay_free = self.store_async and self.kv_role != "kv_consumer"
         return delay_free, return_params
