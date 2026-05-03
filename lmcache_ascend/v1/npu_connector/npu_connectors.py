@@ -813,8 +813,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
-        if "slot_mapping" not in kwargs:
-            raise ValueError("'slot_mapping' should be provided in kwargs.")
+        if "slot_mapping_npu" not in kwargs:
+            raise ValueError("'slot_mapping_npu' should be provided in kwargs.")
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping_npu"]
         with torch.npu.stream(self.store_stream):
