@@ -938,6 +938,8 @@ class AscendP2PBackend(P2PBackend):
             return []
 
         hit_mem_objs = mem_objs[:num_hit_chunks]
+        for hit_mem_obj in hit_mem_objs:
+            hit_mem_obj.pin()
 
         if num_hit_chunks > 0 and self.pull_mode:
             success = await self._handle_pull_mode_transfer(

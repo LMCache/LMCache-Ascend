@@ -270,8 +270,8 @@ class CustomAscendCmakeBuildExt(build_ext):
             int(p) for p in re.findall(r"\d+", cann_version or "")
         )
 
-        self._cann_version_no_hccl = _is_cann_85_or_later(cann_version_tuple)
-        env_path = _get_ascend_env_path(self._cann_version_no_hccl)
+        self._cann_version_8_5 = _is_cann_85_or_later(cann_version_tuple)
+        env_path = _get_ascend_env_path(self._cann_version_8_5)
 
         _soc_version = _get_npu_soc()
         arch = platform.machine()
@@ -280,11 +280,12 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
 
-        if self._cann_version_no_hccl:
+        hcomm_src_path = os.environ.get("HCOMM_SRC_PATH", "")
+        if hcomm_src_path:
+            logger.info(f"CANN {cann_version}: building HCCL agent (hcomm headers)")
+        if self._cann_version_8_5:
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
             logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
-        else:
-            logger.info(f"CANN {cann_version}: building HCCL transfer channel")
 
         try:
             # if pybind11 is installed via pip
@@ -342,7 +343,10 @@ class CustomAscendCmakeBuildExt(build_ext):
             torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
             cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
 
-        if self._cann_version_no_hccl:
+        if hcomm_src_path:
+            cmake_cmd += [f"  -DHCOMM_SRC_PATH={hcomm_src_path}"]
+
+        if self._cann_version_8_5:
             cmake_cmd += ["  -DUSE_HIXL=ON"]
             cmake_cmd += ["  -DUSE_HCOMM_ONESIDED=ON"]
 
@@ -370,11 +374,11 @@ class CustomAscendCmakeBuildExt(build_ext):
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
-        if self._cann_version_no_hccl:
+        if hcomm_src_path:
+            expected_patterns.append("hccl_npu_comms*.so")
+        if self._cann_version_8_5:
             expected_patterns.append("hixl_npu_comms*.so")
             expected_patterns.append("hcomm_onesided*.so")
-        else:
-            expected_patterns.append("hccl_npu_comms*.so")
 
         # Search for files matching our patterns
         so_files = []
