@@ -101,6 +101,9 @@ class AscendLMCacheEngine(LMCacheEngine):
             # duplicate reports after the scheduler frees blocks.
             self._reported_finished_store_ids: set = set()
 
+        # Serialize between store and lookup.
+        self._engine_state_lock = threading.RLock()
+
         self._device_id: Optional[int] = None
 
         if self.kv_events_enabled and self.is_store_async:
@@ -198,8 +201,6 @@ class AscendLMCacheEngine(LMCacheEngine):
             )
             return
 
-        store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
-
         starts: List[int] = []
         ends: List[int] = []
         keys: List[CacheEngineKey] = []
@@ -212,75 +213,78 @@ class AscendLMCacheEngine(LMCacheEngine):
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        with store_stats.profile_process_tokens():
-            prev_key = 0
-            for start, end, key in self.token_database.process_tokens(
-                tokens,
-                hashes,
-                offsets,
-                mask,
-                request_configs=request_configs,
-            ):
-                assert isinstance(key, CacheEngineKey)
-                # Allocate the memory object
-                num_tokens = end - start
-                kv_shapes = self.metadata.get_shapes(num_tokens)
-                kv_dtypes = self.metadata.get_dtypes()
+        with self._engine_state_lock:
+            store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-                # TODO (Jiayi): should be batched in the future
-                memory_obj = self.storage_manager.allocate(
-                    kv_shapes,
-                    kv_dtypes,
-                    busy_loop=self.config.get_extra_config_value(
-                        "force_store_wait", False
-                    ),
-                    fmt=self.fmt,
-                )
-                if memory_obj is None:
-                    logger.warning(
-                        "Local cpu memory under pressure so"
-                        " choosing to store only "
-                        f" {len(memory_objs)}"
-                        " total chunks of KV cache."
+            with store_stats.profile_process_tokens():
+                prev_key = 0
+                for start, end, key in self.token_database.process_tokens(
+                    tokens,
+                    hashes,
+                    offsets,
+                    mask,
+                    request_configs=request_configs,
+                ):
+                    assert isinstance(key, CacheEngineKey)
+                    # Allocate the memory object
+                    num_tokens = end - start
+                    kv_shapes = self.metadata.get_shapes(num_tokens)
+                    kv_dtypes = self.metadata.get_dtypes()
+
+                    # TODO (Jiayi): should be batched in the future
+                    memory_obj = self.storage_manager.allocate(
+                        kv_shapes,
+                        kv_dtypes,
+                        busy_loop=self.config.get_extra_config_value(
+                            "force_store_wait", False
+                        ),
+                        fmt=self.fmt,
                     )
-                    break
-
-                starts.append(start)
-                ends.append(end)
-                keys.append(key)
-                memory_objs.append(memory_obj)
-                tot_kv_size += memory_obj.get_size()
-                tot_token_num += num_tokens
-
-                # Create KV event
-                if self.kv_events_enabled:
-                    stored_event = CacheStoreEvent(
-                        block_hashes=[key.chunk_hash],
-                        parent_block_hash=None if start == 0 else prev_key,
-                        token_ids=[],
-                        block_size=num_tokens,
-                        lora_id=None,
-                        medium="cpu",
-                        lora_name=None,
-                    )
-                    if tokens is not None:
-                        stored_event.token_ids = convert_tokens_to_list(
-                            tokens,
-                            start,
-                            end,
+                    if memory_obj is None:
+                        logger.warning(
+                            "Local cpu memory under pressure so"
+                            " choosing to store only "
+                            f" {len(memory_objs)}"
+                            " total chunks of KV cache."
                         )
-                        if isinstance(tokens, torch.Tensor):
-                            stored_event.medium = tokens.device
-                    elif hashes is not None:
-                        stored_event.token_ids = hashes[start : end + 1]
-                    logger.debug(
-                        (
-                            "Added kv cache event '%s' to kv cache events queue"
-                            % stored_event
+                        break
+
+                    starts.append(start)
+                    ends.append(end)
+                    keys.append(key)
+                    memory_objs.append(memory_obj)
+                    tot_kv_size += memory_obj.get_size()
+                    tot_token_num += num_tokens
+
+                    # Create KV event
+                    if self.kv_events_enabled:
+                        stored_event = CacheStoreEvent(
+                            block_hashes=[key.chunk_hash],
+                            parent_block_hash=None if start == 0 else prev_key,
+                            token_ids=[],
+                            block_size=num_tokens,
+                            lora_id=None,
+                            medium="cpu",
+                            lora_name=None,
                         )
-                    )
-                    self.kv_events.append(stored_event)
-                    prev_key = key.chunk_hash
+                        if tokens is not None:
+                            stored_event.token_ids = convert_tokens_to_list(
+                                tokens,
+                                start,
+                                end,
+                            )
+                            if isinstance(tokens, torch.Tensor):
+                                stored_event.medium = tokens.device
+                        elif hashes is not None:
+                            stored_event.token_ids = hashes[start : end + 1]
+                        logger.debug(
+                            (
+                                "Added kv cache event '%s' to kv cache events queue"
+                                % stored_event
+                            )
+                        )
+                        self.kv_events.append(stored_event)
+                        prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
@@ -291,27 +295,29 @@ class AscendLMCacheEngine(LMCacheEngine):
             with store_stats.profile_from_gpu():
                 self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
 
-            with store_stats.profile_put():
-                transfer_spec = kwargs.get("transfer_spec", None)
-                # TODO: we implicitly rely on batched_put to call ref_count_down
-                # this management should be done in a cleaner way
-                self.storage_manager.batched_put(
-                    keys,
-                    memory_objs,
-                    transfer_spec=transfer_spec,
-                    location=self.store_location,
+            with self._engine_state_lock:
+                with store_stats.profile_put():
+                    transfer_spec = kwargs.get("transfer_spec", None)
+                    # TODO: we implicitly rely on batched_put to call ref_count_down
+                    # this management should be done in a cleaner way
+                    self.storage_manager.batched_put(
+                        keys,
+                        memory_objs,
+                        transfer_spec=transfer_spec,
+                        location=self.store_location,
+                    )
+                    put_submitted = True
+
+                self.stats_monitor.on_store_finished(
+                    store_stats,
+                    tot_token_num,
                 )
-                put_submitted = True
         except Exception:
             if not put_submitted:
                 for mem_obj in memory_objs:
                     mem_obj.ref_count_down()
             raise
 
-        self.stats_monitor.on_store_finished(
-            store_stats,
-            tot_token_num,
-        )
         tot_time = store_stats.time_to_store()
 
         logger.info(
@@ -406,6 +412,32 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.kv_events_enabled and self.kv_events:
             return self.kv_events.drain()
         return []
+
+    def lookup(
+        self,
+        tokens: Optional[Union[torch.Tensor, List[int]]] = None,
+        hashes: Optional[List[int]] = None,
+        offsets: Optional[List[int]] = None,
+        search_range: Optional[List[str]] = None,
+        lookup_id: Optional[str] = None,
+        pin: bool = False,
+        request_configs: Optional[dict] = None,
+    ) -> int:
+        # Serialize against the store-worker thread's
+        with self._engine_state_lock:
+            return super().lookup(
+                tokens=tokens,
+                hashes=hashes,
+                offsets=offsets,
+                search_range=search_range,
+                lookup_id=lookup_id,
+                pin=pin,
+                request_configs=request_configs,
+            )
+
+    def lookup_unpin(self, lookup_id: str) -> None:
+        with self._engine_state_lock:
+            super().lookup_unpin(lookup_id)
 
     @torch.inference_mode()
     def store(
