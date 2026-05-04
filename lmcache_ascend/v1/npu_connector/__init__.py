@@ -58,22 +58,24 @@ def CreateNPUConnector(
 
         if config.use_layerwise:
             if config.enable_blending:
-                return VLLMBufferLayerwiseNPUConnector.from_metadata(
+                conn = VLLMBufferLayerwiseNPUConnector.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
             else:
-                return VLLMPagedMemLayerwiseNPUConnector.from_metadata(
+                conn = VLLMPagedMemLayerwiseNPUConnector.from_metadata(
                     metadata, use_gpu, device, layout_hints=layout_hints
                 )
+            return conn
 
         if config.use_gpu_connector_v3:
             raise NotImplementedError(
                 "GPU Connector v3 is not supported yet. Please contact LMCache-Ascend."
             )
         else:
-            return VLLMPagedMemNPUConnectorV2.from_metadata(
+            conn = VLLMPagedMemNPUConnectorV2.from_metadata(
                 metadata, use_gpu, device, layout_hints=layout_hints
             )
+            return conn
     elif engine == EngineType.SGLANG:
         # First Party
         from lmcache_ascend.v1.npu_connector.npu_connectors import (
@@ -86,7 +88,7 @@ def CreateNPUConnector(
         kv_dtype = metadata.kv_dtype
 
         if config.use_layerwise:
-            return SGLangLayerwiseNPUConnector(
+            conn = SGLangLayerwiseNPUConnector(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
@@ -95,7 +97,7 @@ def CreateNPUConnector(
                 device=device,
             )
         else:
-            return SGLangNPUConnector(
+            conn = SGLangNPUConnector(
                 hidden_dim_size,
                 num_layer,
                 use_gpu=use_gpu,
@@ -103,5 +105,6 @@ def CreateNPUConnector(
                 dtype=kv_dtype,
                 device=device,
             )
+        return conn
     else:
         raise RuntimeError(f"Unsupported engine type for Ascend: {engine}")

@@ -174,6 +174,15 @@ def _patch_config():
         "This config is only used when pd_pull_mode is set to True.",
     }
 
+    # Add store async
+    lmcache.v1.config._CONFIG_DEFINITIONS["store_async"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to use store kvcache asynchronously. "
+        "If True, the kvcache will be stored asynchronously. ",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
@@ -358,21 +367,45 @@ def _patch_get_vllm_torch_dev():
     lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
 
 
-def _patch_wait_for_save():
+def _patch_vllm_v1_adapter():
     # Third Party
-    import lmcache.integration.vllm.vllm_v1_adapter
+    from vllm.distributed.kv_transfer.kv_connector.v1 import (
+        lmcache_connector as vllm_lmcache_connector,
+    )
+    import lmcache.integration.vllm.vllm_v1_adapter as lmc_vllm_v1_adapter
 
     # First Party
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-        wait_for_save as ascend_wait_for_save,
+        LMCacheAscendConnectorV1Impl as ascend_LMCacheAscendConnectorV1Impl,
     )
 
-    # Fixes a bug where disagg_spec.num_transferred_tokens (initialized to 0)
-    # overrides save_spec.skip_leading_tokens via min(), causing redundant
-    # full re-saves when there is an existing cache hit.
-    lmcache.integration.vllm.vllm_v1_adapter.LMCacheConnectorV1Impl.wait_for_save = (
-        ascend_wait_for_save
-    )
+    lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
+
+    def handle_preemptions(self, preempted_req_ids):
+        method = getattr(self._lmcache_engine, "handle_preemptions", None)
+        if callable(method):
+            method(preempted_req_ids)
+
+    vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
+
+
+def _patch_cache_engine():
+    # Third Party
+    import lmcache.v1.cache_engine as lmc_cache_engine
+
+    # First Party
+    from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
+
+    lmc_cache_engine.LMCacheEngine = AscendLMCacheEngine
+
+    for mod_name in (
+        "lmcache.v1.manager",
+        "lmcache.integration.vllm.vllm_service_factory",
+        "lmcache.v1.standalone.standalone_service_factory",
+    ):
+        mod = sys.modules.get(mod_name)
+        if mod is not None and hasattr(mod, "LMCacheEngine"):
+            mod.LMCacheEngine = AscendLMCacheEngine
 
 
 def _patch_hash_token():
@@ -528,7 +561,9 @@ if not LMCACHE_ASCEND_PATCHED:
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()
 
-        _patch_wait_for_save()
+        _patch_vllm_v1_adapter()
+
+        _patch_cache_engine()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
