@@ -213,78 +213,77 @@ class AscendLMCacheEngine(LMCacheEngine):
         if request_configs is not None and len(request_configs) != 0:
             assert isinstance(request_configs, dict)
 
-        with self._engine_state_lock:
-            store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
+        store_stats = self.stats_monitor.on_store_request(num_to_store_tokens)
 
-            with store_stats.profile_process_tokens():
-                prev_key = 0
-                for start, end, key in self.token_database.process_tokens(
-                    tokens,
-                    hashes,
-                    offsets,
-                    mask,
-                    request_configs=request_configs,
-                ):
-                    assert isinstance(key, CacheEngineKey)
-                    # Allocate the memory object
-                    num_tokens = end - start
-                    kv_shapes = self.metadata.get_shapes(num_tokens)
-                    kv_dtypes = self.metadata.get_dtypes()
+        with store_stats.profile_process_tokens():
+            prev_key = 0
+            for start, end, key in self.token_database.process_tokens(
+                tokens,
+                hashes,
+                offsets,
+                mask,
+                request_configs=request_configs,
+            ):
+                assert isinstance(key, CacheEngineKey)
+                # Allocate the memory object
+                num_tokens = end - start
+                kv_shapes = self.metadata.get_shapes(num_tokens)
+                kv_dtypes = self.metadata.get_dtypes()
 
-                    # TODO (Jiayi): should be batched in the future
-                    memory_obj = self.storage_manager.allocate(
-                        kv_shapes,
-                        kv_dtypes,
-                        busy_loop=self.config.get_extra_config_value(
-                            "force_store_wait", False
-                        ),
-                        fmt=self.fmt,
+                # TODO (Jiayi): should be batched in the future
+                memory_obj = self.storage_manager.allocate(
+                    kv_shapes,
+                    kv_dtypes,
+                    busy_loop=self.config.get_extra_config_value(
+                        "force_store_wait", False
+                    ),
+                    fmt=self.fmt,
+                )
+                if memory_obj is None:
+                    logger.warning(
+                        "Local cpu memory under pressure so"
+                        " choosing to store only "
+                        f" {len(memory_objs)}"
+                        " total chunks of KV cache."
                     )
-                    if memory_obj is None:
-                        logger.warning(
-                            "Local cpu memory under pressure so"
-                            " choosing to store only "
-                            f" {len(memory_objs)}"
-                            " total chunks of KV cache."
-                        )
-                        break
+                    break
 
-                    starts.append(start)
-                    ends.append(end)
-                    keys.append(key)
-                    memory_objs.append(memory_obj)
-                    tot_kv_size += memory_obj.get_size()
-                    tot_token_num += num_tokens
+                starts.append(start)
+                ends.append(end)
+                keys.append(key)
+                memory_objs.append(memory_obj)
+                tot_kv_size += memory_obj.get_size()
+                tot_token_num += num_tokens
 
-                    # Create KV event
-                    if self.kv_events_enabled:
-                        stored_event = CacheStoreEvent(
-                            block_hashes=[key.chunk_hash],
-                            parent_block_hash=None if start == 0 else prev_key,
-                            token_ids=[],
-                            block_size=num_tokens,
-                            lora_id=None,
-                            medium="cpu",
-                            lora_name=None,
+                # Create KV event
+                if self.kv_events_enabled:
+                    stored_event = CacheStoreEvent(
+                        block_hashes=[key.chunk_hash],
+                        parent_block_hash=None if start == 0 else prev_key,
+                        token_ids=[],
+                        block_size=num_tokens,
+                        lora_id=None,
+                        medium="cpu",
+                        lora_name=None,
+                    )
+                    if tokens is not None:
+                        stored_event.token_ids = convert_tokens_to_list(
+                            tokens,
+                            start,
+                            end,
                         )
-                        if tokens is not None:
-                            stored_event.token_ids = convert_tokens_to_list(
-                                tokens,
-                                start,
-                                end,
-                            )
-                            if isinstance(tokens, torch.Tensor):
-                                stored_event.medium = tokens.device
-                        elif hashes is not None:
-                            stored_event.token_ids = hashes[start : end + 1]
-                        logger.debug(
-                            (
-                                "Added kv cache event '%s' to kv cache events queue"
-                                % stored_event
-                            )
+                        if isinstance(tokens, torch.Tensor):
+                            stored_event.medium = tokens.device
+                    elif hashes is not None:
+                        stored_event.token_ids = hashes[start : end + 1]
+                    logger.debug(
+                        (
+                            "Added kv cache event '%s' to kv cache events queue"
+                            % stored_event
                         )
-                        self.kv_events.append(stored_event)
-                        prev_key = key.chunk_hash
+                    )
+                    self.kv_events.append(stored_event)
+                    prev_key = key.chunk_hash
 
         # memory_objs might be empty, directly return to avoid sending tokens
         if not memory_objs:
