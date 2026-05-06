@@ -13,7 +13,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.3"
+LMCACHE_UPSTREAM_TAG = "v0.4.4"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -190,6 +190,37 @@ def _patch_config():
         "env_converter": int,
         "description": "Maximum number of pending async store tasks in queue. "
         "Set 0 for an unbounded queue; values > 0 enable bounded backpressure.",
+    }
+
+    # v0.4.4: New config fields from upstream
+    lmcache.v1.config._CONFIG_DEFINITIONS["local_disk_path_sharding"] = {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_skip_proxy_notification"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["gds_buffer_size"] = {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["use_gds"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["gds_backend"] = {
+        "type": str,
+        "default": "cufile",
+        "env_converter": str,
     }
 
     namespace_extras = {
