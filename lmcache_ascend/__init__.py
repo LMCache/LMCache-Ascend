@@ -183,6 +183,15 @@ def _patch_config():
         "If True, the kvcache will be stored asynchronously. ",
     }
 
+    # Add async store queue size. 0 keeps queue unbounded.
+    lmcache.v1.config._CONFIG_DEFINITIONS["store_async_max_queue_size"] = {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": "Maximum number of pending async store tasks in queue. "
+        "Set 0 for an unbounded queue; values > 0 enable bounded backpressure.",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,

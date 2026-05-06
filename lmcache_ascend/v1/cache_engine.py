@@ -85,6 +85,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             broadcast_object_fn,
         )
         self.is_store_async = self.config.store_async
+        self._store_queue_maxsize = max(0, int(self.config.store_async_max_queue_size))
         if self.is_store_async:
             self._store_queue: Optional[queue.Queue] = None
             self._store_worker_thread: Optional[threading.Thread] = None
@@ -112,7 +113,7 @@ class AscendLMCacheEngine(LMCacheEngine):
     def _ensure_store_worker(self) -> None:
         if self._store_queue is not None:
             return
-        self._store_queue = queue.Queue()
+        self._store_queue = queue.Queue(maxsize=self._store_queue_maxsize)
         self._store_worker_thread = threading.Thread(
             target=self._store_worker_loop,
             daemon=True,
@@ -125,6 +126,12 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.is_store_async:
             self._device_id = torch.npu.current_device()
             self._ensure_store_worker()
+            queue_mode = "unbounded" if self._store_queue_maxsize == 0 else "bounded"
+            logger.info(
+                "Ascend async store queue initialized: mode=%s maxsize=%d",
+                queue_mode,
+                self._store_queue_maxsize,
+            )
 
     def _store_worker_loop(self) -> None:
         if not self.is_store_async:
@@ -511,12 +518,10 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._pending_store_reqs[req_id] = (
                     self._pending_store_reqs.get(req_id, 0) + 1
                 )
-                logger.debug(
-                    "Enqueued async store for req %s; pending=%d tokens=%d",
-                    req_id,
-                    self._pending_store_reqs[req_id],
-                    num_to_store_tokens,
-                )
+                pending = self._pending_store_reqs[req_id]
+
+            enqueued = False
+            try:
                 self._store_queue.put(
                     (
                         req_id,
@@ -528,6 +533,23 @@ class AscendLMCacheEngine(LMCacheEngine):
                         kwargs,
                     )
                 )
+                enqueued = True
+            finally:
+                if not enqueued:
+                    with self._store_lock:
+                        cnt = self._pending_store_reqs.get(req_id, 1) - 1
+                        if cnt <= 0:
+                            self._pending_store_reqs.pop(req_id, None)
+                        else:
+                            self._pending_store_reqs[req_id] = cnt
+                        self._store_cv.notify_all()
+
+            logger.debug(
+                "Enqueued async store for req %s; pending=%d tokens=%d",
+                req_id,
+                pending,
+                num_to_store_tokens,
+            )
         # lmcache-ascend end ---------------------
 
     def close(self) -> None:
@@ -536,7 +558,23 @@ class AscendLMCacheEngine(LMCacheEngine):
         # ``storage_manager.close()`` runs inside ``super().close()``.
         if self._store_queue is not None:
             try:
-                self._store_queue.put(None)
+                # Bounded queues can be full here; avoid blocking forever
+                # while still preferring graceful drain.
+                while True:
+                    try:
+                        self._store_queue.put_nowait(None)
+                        break
+                    except queue.Full:
+                        if (
+                            self._store_worker_thread is None
+                            or not self._store_worker_thread.is_alive()
+                        ):
+                            logger.warning(
+                                "Ascend store queue is full and worker is not alive; "
+                                "cannot enqueue shutdown signal cleanly."
+                            )
+                            break
+                        time.sleep(0.01)
                 if self._store_worker_thread is not None:
                     self._store_worker_thread.join(timeout=10)
                     if self._store_worker_thread.is_alive():
