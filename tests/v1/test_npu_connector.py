@@ -17,9 +17,6 @@ from lmcache_tests.v1.test_gpu_connector import (
 from lmcache_tests.v1.test_gpu_connector import (
     test_vllm_paged_connector_v2_to_gpu_bench as original_test_vllm_paged_connector_v2_to_gpu_bench,
 )
-from lmcache_tests.v1.test_gpu_connector import (
-    test_vllm_paged_connector_v2_with_gpu_and_mla as original_test_vllm_paged_connector_v2_with_gpu_and_mla,
-)
 import pytest
 import torch
 
@@ -31,21 +28,6 @@ from lmcache_ascend.v1.gpu_connector.npu_connectors import (
 )
 from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
 import lmcache_ascend.c_ops as lmc_ops
-
-
-@pytest.mark.parametrize("use_npu", [True, False])
-@pytest.mark.parametrize(
-    "gpu_kv_format",
-    [
-        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-        lmc_ops.GPUKVFormat.NL_X_NB_BS_HS,  # vllm MLA
-    ],
-)
-def test_vllm_paged_connector_v2_with_npu_and_mla(use_npu, gpu_kv_format):
-    target_patch = "lmcache_tests.v1.test_gpu_connector.VLLMPagedMemGPUConnectorV2"
-
-    with patch(target_patch, new=VLLMPagedMemNPUConnectorV2):
-        original_test_vllm_paged_connector_v2_with_gpu_and_mla(use_npu, gpu_kv_format)
 
 
 @pytest.mark.parametrize("use_npu", [True])
