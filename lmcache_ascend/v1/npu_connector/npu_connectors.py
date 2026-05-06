@@ -813,10 +813,25 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
 
-        if "slot_mapping_npu" not in kwargs:
-            raise ValueError("'slot_mapping_npu' should be provided in kwargs.")
+        if "slot_mapping_npu" in kwargs:
+            slot_mapping: torch.Tensor = kwargs["slot_mapping_npu"]
+        elif "slot_mapping" in kwargs:
+            slot_mapping = kwargs["slot_mapping"]
+            if not isinstance(slot_mapping, torch.Tensor):
+                raise ValueError("'slot_mapping' should be a torch.Tensor.")
+            # for Ascend kernels to keep test inputs backward compatible.
+            if slot_mapping.device.type != "npu":
+                with torch.npu.stream(self.store_stream):
+                    slot_mapping = slot_mapping.to(
+                        self.kvcaches_device,
+                        non_blocking=True,
+                    )
+        else:
+            raise ValueError(
+                "'slot_mapping_npu' should be provided in kwargs "
+                "(or 'slot_mapping' for compatibility)."
+            )
 
-        slot_mapping: torch.Tensor = kwargs["slot_mapping_npu"]
         with torch.npu.stream(self.store_stream):
             kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
