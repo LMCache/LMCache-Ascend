@@ -424,6 +424,11 @@ class ProxyMemoryObj(MemoryObj):
             return self._backing_obj.unpin()
         return False
 
+    def parent(self):
+        if self._backing_obj is not None:
+            return self._backing_obj.parent()
+        return None
+
     def ref_count_up(self) -> None:
         # No-op: proxy lifecycle is managed by the transfer context,
         # not by the standard MemoryObj ref-count protocol.  Making

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     # Third Party
     from lmcache.v1.cache_engine import LMCacheEngine
     from lmcache.v1.config import LMCacheEngineConfig
-    from lmcache.v1.gpu_connector import GPUConnectorInterface
+    from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
 
 logger = init_logger(__name__)
 

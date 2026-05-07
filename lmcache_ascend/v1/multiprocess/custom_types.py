@@ -19,14 +19,14 @@ class AscendIPCWrapper(CudaIPCWrapper):
     """
 
     def __init__(self, tensor: torch.Tensor) -> None:
-        assert tensor.storage_offset() == 0
-        assert tensor.is_contiguous()
         storage = tensor.untyped_storage()
         handle = storage._share_npu_()
 
         self.handle = handle
         self.dtype = tensor.dtype
-        self.shape = tensor.shape
+        self.shape = tuple(tensor.shape)
+        self.stride = tuple(tensor.stride())
+        self.storage_offset = int(tensor.storage_offset())
         device_index = tensor.device.index
         self.device_uuid = AscendIPCWrapper._get_device_uuid(device_index)
 
@@ -103,11 +103,11 @@ class AscendIPCWrapper(CudaIPCWrapper):
     def to_tensor(self):
         """
         Note:
-            This function may break if torch cuda is not initialized.
-            We should call `torch.cuda.init()` before using this function.
+            This function may break if torch npu is not initialized.
+            We should call `torch.npu.init()` before using this function.
         """
         device = AscendIPCWrapper._get_device_index_from_uuid(self.device_uuid)
         storage = torch.UntypedStorage._new_shared_npu(device, *self.handle[1:])
-        t = torch.tensor(0, device=device, dtype=self.dtype)
-        t.set_(storage)
-        return t.view(self.shape)
+        t = torch.empty((), device=device, dtype=self.dtype)
+        t.set_(storage, self.storage_offset, self.shape, self.stride)
+        return t

@@ -29,11 +29,10 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
 MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,
-    int page_buffer_size, bool direction, bool use_mla,
-    int kvcache_format_raw) {
+    int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw,
+    int64_t k_hidden_dims, int64_t v_hidden_dims, int64_t dsa_hidden_dims) {
   MultiLayerKVConfig config;
 
-  // it is actually a uint8_t**. we will reinterpret it inside the kernel
   config.page_buffer_ptrs =
       get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
   config.slot_mapping_ptr =
@@ -41,8 +40,6 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
 
   config.num_layers = key_value.size(1);
   config.num_tokens = slot_mapping.size(0);
-  config.hidden_dims = key_value.size(-1);
-  config.kv_size = use_mla ? 1 : 2;
 
   config.kvcache_format =
       static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
@@ -54,6 +51,31 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
   config.slot_type = slot_mapping.scalar_type();
 
   config.socName = aclrtGetSocName();
+
+  config.k_hidden_dims = k_hidden_dims;
+  config.v_hidden_dims = v_hidden_dims;
+  config.dsa_hidden_dims = dsa_hidden_dims;
+
+  switch (config.kvcache_format) {
+  case kvcache_ops::KVCacheFormat::MERGED_KV:
+    config.kv_size = 2;
+    config.hidden_dims = key_value.size(-1);
+    break;
+  case kvcache_ops::KVCacheFormat::SEPARATE_KV:
+    config.kv_size = 2;
+    config.hidden_dims = key_value.size(-1);
+    break;
+  case kvcache_ops::KVCacheFormat::MLA_KV:
+    config.kv_size = 2;
+    config.hidden_dims = config.k_hidden_dims;
+    break;
+  case kvcache_ops::KVCacheFormat::DSA_KV:
+    config.kv_size = 3;
+    config.hidden_dims = config.k_hidden_dims;
+    break;
+  default:
+    TORCH_CHECK(false, "Unsupported KVCacheFormat: ", kvcache_format_raw);
+  }
 
   return config;
 }
@@ -78,8 +100,16 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   constexpr int32_t numBuffsOnDev = 2;
   // step 1. use per tokens buff size to derive how many tokens can be allocated
   // per loop
+  int64_t max_hidden_dims = config.hidden_dims;
+  if (config.kvcache_format == kvcache_ops::KVCacheFormat::MLA_KV) {
+    max_hidden_dims = std::max(config.k_hidden_dims, config.v_hidden_dims);
+  } else if (config.kvcache_format == kvcache_ops::KVCacheFormat::DSA_KV) {
+    max_hidden_dims = std::max(
+        {config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims});
+  }
+
   int64_t baseBuffSize =
-      numBuffsOnDev * config.hidden_dims * key_value.element_size();
+      numBuffsOnDev * max_hidden_dims * key_value.element_size();
 
   if (ubSize < static_cast<uint64_t>(baseBuffSize)) {
     std::string errStr =

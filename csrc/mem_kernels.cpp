@@ -36,12 +36,15 @@ void multi_layer_kv_transfer(
     const torch::Tensor &key_value_ptrs, // [num_layers]
     const torch::Tensor &slot_mapping,   // [num_tokens]
     const torch::Device &paged_memory_device, const int page_buffer_size,
-    const bool direction, const bool use_mla, const int kvcache_format_raw) {
+    const bool direction, const bool use_mla, const int kvcache_format_raw,
+    const int64_t k_hidden_dims, const int64_t v_hidden_dims,
+    const int64_t dsa_hidden_dims) {
   uint8_t *key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
 
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-      page_buffer_size, direction, use_mla, kvcache_format_raw);
+      page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
+      v_hidden_dims, dsa_hidden_dims);
 
   // Calculate UB buffer parameters
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
@@ -58,7 +61,8 @@ void multi_layer_kv_transfer(
         config.stream, config.page_buffer_ptrs, key_value_ptr,
         config.slot_mapping_ptr, config.hidden_dims, config.kv_size,
         config.num_layers, config.page_buffer_size, config.num_tokens,
-        config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction);
+        config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction,
+        config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims);
     return 0;
   });
   cmd.Run();
@@ -72,7 +76,9 @@ void fused_multi_layer_kv_transfer(
     const torch::Tensor &slot_mapping,   // [num_tokens]
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, // true: from_gpu, false: to_gpu
-    const bool use_mla, const int kvcache_format_raw) {
+    const bool use_mla, const int kvcache_format_raw,
+    const int64_t k_hidden_dims, const int64_t v_hidden_dims,
+    const int64_t dsa_hidden_dims) {
   // get host cpu buffer pointer for aclrtMemcpyAsync
   uint8_t *key_value_ptr = static_cast<uint8_t *>(key_value.data_ptr());
   uint8_t *staging_cache_ptr =
@@ -80,25 +86,46 @@ void fused_multi_layer_kv_transfer(
 
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
-      page_buffer_size, direction, use_mla, kvcache_format_raw);
+      page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
+      v_hidden_dims, dsa_hidden_dims);
 
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
                                 key_value_ptrs);
 
   // Calculate and verify the CPU buffer size
-  size_t cpu_buffer_size = static_cast<size_t>(config.kv_size) *
-                           config.num_layers * config.num_tokens *
-                           config.hidden_dims * key_value.element_size();
+  // For MLA_KV and DSA_KV, K/V have different hidden_dims
+  // Use staging_cache's actual size for verification
+  size_t staging_cache_size =
+      static_cast<size_t>(staging_cache.numel()) * staging_cache.element_size();
 
-  TORCH_CHECK(
-      staging_cache.numel() * staging_cache.element_size() >= cpu_buffer_size,
-      "staging_cache size insufficient: need ", cpu_buffer_size, " bytes, got ",
-      staging_cache.numel() * staging_cache.element_size());
+  size_t required_size = 0;
+  switch (config.kvcache_format) {
+  case kvcache_ops::KVCacheFormat::MLA_KV:
+    required_size = static_cast<size_t>(config.num_layers) * config.num_tokens *
+                    (config.k_hidden_dims + config.v_hidden_dims) *
+                    key_value.element_size();
+    break;
+  case kvcache_ops::KVCacheFormat::DSA_KV:
+    required_size =
+        static_cast<size_t>(config.num_layers) * config.num_tokens *
+        (config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims) *
+        key_value.element_size();
+    break;
+  default:
+    required_size = static_cast<size_t>(config.kv_size) * config.num_layers *
+                    config.num_tokens * config.hidden_dims *
+                    key_value.element_size();
+    break;
+  }
+
+  TORCH_CHECK(staging_cache_size >= required_size,
+              "staging_cache size insufficient: need ", required_size,
+              " bytes, got ", staging_cache_size);
 
   at_npu::native::OpCommand cmd;
   cmd.Name("fused_multi_layer_kv_transfer_kernel_v2");
   cmd.SetCustomHandler([config, staging_cache_ptr, key_value_ptr,
-                        cpu_buffer_size]() -> int {
+                        required_size]() -> int {
     auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
     auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
 
@@ -108,8 +135,8 @@ void fused_multi_layer_kv_transfer(
 
     // Step 1: H2D memcpy (to_gpu) currently not used
     if (isH2D) {
-      ret = aclrtMemcpyAsync(staging_cache_ptr, cpu_buffer_size, key_value_ptr,
-                             cpu_buffer_size, ACL_MEMCPY_HOST_TO_DEVICE,
+      ret = aclrtMemcpyAsync(staging_cache_ptr, required_size, key_value_ptr,
+                             required_size, ACL_MEMCPY_HOST_TO_DEVICE,
                              config.stream);
       TORCH_CHECK(ret == ACL_ERROR_NONE,
                   "H2D memcpy failed: cpu_buffer -> staging_cache, ret=", ret);
@@ -121,12 +148,13 @@ void fused_multi_layer_kv_transfer(
         config.stream, config.page_buffer_ptrs, staging_cache_ptr,
         config.slot_mapping_ptr, config.hidden_dims, config.kv_size,
         config.num_layers, config.page_buffer_size, config.num_tokens,
-        config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction);
+        config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction,
+        config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims);
 
     // Step 3: D2H memcpy (from_gpu)
     if (!isH2D) {
-      ret = aclrtMemcpyAsync(key_value_ptr, cpu_buffer_size, staging_cache_ptr,
-                             cpu_buffer_size, ACL_MEMCPY_DEVICE_TO_HOST,
+      ret = aclrtMemcpyAsync(key_value_ptr, required_size, staging_cache_ptr,
+                             required_size, ACL_MEMCPY_DEVICE_TO_HOST,
                              config.stream);
       TORCH_CHECK(ret == ACL_ERROR_NONE,
                   "D2H memcpy failed: staging_cache -> cpu_buffer, ret=", ret);

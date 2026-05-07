@@ -29,7 +29,9 @@ void multi_layer_kv_transfer_kernel_v2(
     uint8_t *slotmappings, const int64_t hiddenDims, const int32_t kvs,
     const int32_t numLayers, const int64_t pageBuffSize,
     const int32_t numTokensChunk, const int64_t perLoopBuffer,
-    const int32_t maxTokensPerLoop, const bool page2L);
+    const int32_t maxTokensPerLoop, const bool page2L,
+    const int64_t kHiddenDims = 0, const int64_t vHiddenDims = 0,
+    const int64_t dsaHiddenDims = 0);
 
 void single_layer_kv_transfer_kernel_v2(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
@@ -67,14 +69,18 @@ void multi_layer_kv_transfer(
     const torch::Tensor &key_value_ptrs, // [num_layers]
     const torch::Tensor &slot_mapping,   // [num_tokens]
     const torch::Device &paged_memory_device, const int page_buffer_size,
-    const bool direction, const bool use_mla, const int kvcache_format_raw);
+    const bool direction, const bool use_mla, const int kvcache_format_raw,
+    const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
+    const int64_t dsa_hidden_dims = 0);
 
 void fused_multi_layer_kv_transfer(
     torch::Tensor &key_value,
     torch::Tensor &staging_cache, // staging buffer
     const torch::Tensor &key_value_ptrs, const torch::Tensor &slot_mapping,
     const torch::Device &paged_memory_device, const int page_buffer_size,
-    const bool direction, const bool use_mla, const int kvcache_format_raw);
+    const bool direction, const bool use_mla, const int kvcache_format_raw,
+    const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
+    const int64_t dsa_hidden_dims = 0);
 
 void multi_layer_kv_transfer_310p(
     torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]

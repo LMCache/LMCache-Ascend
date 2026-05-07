@@ -41,9 +41,7 @@ logger = init_logger(__name__)
 
 
 def _make_key(key_id: str = "test_key") -> CacheEngineKey:
-    return CacheEngineKey(
-        "vllm", "test_model", 2, 0, hash(key_id), torch.bfloat16, None
-    )
+    return CacheEngineKey("test_model", 2, 0, hash(key_id), torch.bfloat16, None)
 
 
 DEFAULT_SHAPE = torch.Size([2, 2, 256, 512])
@@ -127,10 +125,8 @@ def _make_p2p_backend_stub(
     backend.dtypes = kv_dtypes
     backend.fmt = fmt
 
-    backend._allocate_memory_for_keys = (
-        lambda keys, cum_chunk_lengths: AscendP2PBackend._allocate_memory_for_keys(
-            backend, keys, cum_chunk_lengths
-        )
+    backend._allocate_memory_for_keys = lambda keys, cum_chunk_lengths: (
+        AscendP2PBackend._allocate_memory_for_keys(backend, keys, cum_chunk_lengths)
     )
 
     return backend

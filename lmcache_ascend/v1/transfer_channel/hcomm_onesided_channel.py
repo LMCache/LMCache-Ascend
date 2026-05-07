@@ -152,6 +152,22 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
+        with self._state_lock:
+            already_has_peer = peer_id in self._peers
+        if already_has_peer:
+            if init_side_msg is None:
+                return None
+            init_tmp_socket = get_zmq_socket(
+                self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
+            )
+            try:
+                return self.send_init_side_msg(init_tmp_socket, init_side_msg)
+            except Exception as e:
+                logger.error("Failed to send init side message: %s", e)
+                return None
+            finally:
+                init_tmp_socket.close()
+
         init_tmp_socket = get_zmq_socket(
             self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
         )
@@ -225,6 +241,24 @@ class HcommOneSidedChannel(BaseMultiBufferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
+        with self._state_lock:
+            already_has_peer = peer_id in self._peers
+        if already_has_peer:
+            if init_side_msg is None:
+                return None
+            init_tmp_socket = get_zmq_socket(
+                self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
+            )
+            try:
+                return await self.async_send_init_side_msg(
+                    init_tmp_socket, init_side_msg
+                )
+            except Exception as e:
+                logger.error("Failed to send init side message: %s", e)
+                return None
+            finally:
+                init_tmp_socket.close()
+
         init_tmp_socket = get_zmq_socket(
             self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
         )

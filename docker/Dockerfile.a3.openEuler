@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,10 +14,11 @@
 # limitations under the License.
 #
 
-FROM hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-800I-A2-mindspore2.7.1.post1-openeuler24.03-lts-sp2-20260116
+FROM quay.io/ascend/vllm-ascend:v0.18.0rc1-a3-openeuler
 
 ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 ARG PIP_NO_CACHE_DIR=1
+ARG SOC_VERSION=Ascend910_9382
 
 ENV LMCACHE_TRACK_USAGE=false
 
@@ -25,10 +26,12 @@ WORKDIR /workspace
 
 COPY . /workspace/LMCache-Ascend/
 
-RUN yum install -y numactl-devel && rm -rf /var/cache/yum && \
-    NO_CUDA_EXT=1 pip install lmcache==0.4.2 --no-deps && \
-    cd LMCache-Ascend && export SOC_VERSION=Ascend910B3 && \
-    USE_MINDSPORE=1 pip install -r requirement_ms.txt --no-build-isolation -v -e .
+# Install LMCache && LMCache-Ascend
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.2 && \
+    cd /workspace/LMCache-Ascend && \
+    export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux:$CPLUS_INCLUDE_PATH && \
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
+    pip install -v --no-build-isolation -e .
 
 CMD ["/bin/bash"]
 
