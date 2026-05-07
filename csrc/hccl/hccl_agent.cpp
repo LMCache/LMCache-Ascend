@@ -70,9 +70,6 @@ HcclResult HcclAgent::Init() {
   }
 
   ACL_CHECK(rtGetDevicePhyIdByIndex(devId_, &phyId_));
-  std::cerr << "[HcclAgent::Init] devId=" << devId_ << " phyId=" << phyId_
-            << " sizeof(HcclIpAddress)=" << sizeof(hccl::HcclIpAddress)
-            << std::endl;
 
   HCCL_CHECK(
       HcclNetInit(NICDeployment::NIC_DEPLOYMENT_DEVICE, phyId_, devId_, false));
