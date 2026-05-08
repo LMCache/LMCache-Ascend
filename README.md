@@ -124,7 +124,7 @@ Build the image using the provided Dockerfile:
 ```bash
 git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0-openeuler .
 ```
 
 Once that is built, run it with the following cmd
@@ -149,7 +149,7 @@ docker run -it \
 -v /data:/data \
 --name lmcache-ascend-test \
 --entrypoint /bin/bash \
-lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler
+lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0-openeuler
 
 ```
 
