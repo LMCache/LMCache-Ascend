@@ -97,8 +97,7 @@ docker run -it \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
 -v /usr/src/kernels:/usr/src/kernels:ro \
--v /home/jjy:/home/jjy \
--v /mnt:/mnt \
+-v /data:/data \
 --name lmcache-ascend-test \
 --entrypoint /bin/bash \
 quay.io/ascend/vllm-ascend:v0.18.0
@@ -147,8 +146,7 @@ docker run -it \
 -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
 -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
 -v /usr/src/kernels:/usr/src/kernels:ro \
--v /home/jjy:/home/jjy \
--v /mnt:/mnt \
+-v /data:/data \
 --name lmcache-ascend-test \
 --entrypoint /bin/bash \
 lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0rc1-openeuler
