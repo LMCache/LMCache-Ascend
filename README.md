@@ -186,8 +186,6 @@ ktc = KVTransferConfig(
 
 ### for SGLang
 
-You can choose `Manual Installation` or `Build Docker Image`.
-
 #### Manual Installation
 1. Prepare Base Environment
 
