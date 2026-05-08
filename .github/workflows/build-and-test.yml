@@ -32,6 +32,8 @@ jobs:
       # TODO (gingfung): use strategy matrix for version tests
       image: quay.io/ascend/vllm-ascend:v0.18.0rc1
       env:
+        GIT_SSL_CAINFO: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+        PIP_CERT: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
         SOC_VERSION: Ascend910B4
         PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
         LMCACHE_TRACK_USAGE: false
