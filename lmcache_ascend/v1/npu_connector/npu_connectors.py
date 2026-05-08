@@ -501,7 +501,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 "Unable to determine the format of input kv_caches."
             )
 
-        if self.kv_format.is_separate_format():
+        if self.kv_format.is_tuple_format():
             self.kvcaches_device = kv_caches[0][0].device
         else:
             self.kvcaches_device = kv_caches[0].device
