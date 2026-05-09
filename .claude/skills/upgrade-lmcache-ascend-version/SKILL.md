@@ -335,7 +335,7 @@ Find and replace in ALL of these files:
 - `docker/Dockerfile.a2.openEuler` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
 - `docker/Dockerfile.a3.openEuler` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
 - `docker/Dockerfile.a3` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
-- `docker/Dockerfile.310p.openEuler` — line 62: `LMCACHE_TAG={old}` → `LMCACHE_TAG={new}`, line 63 clone command stays the same
+- docker/Dockerfile.310p.openEuler - line 30: pip install lmcache=={old} -> pip install lmcache=={new}
 - `docker/mindspore/Dockerfile.310p.openEuler` — line 29: `pip install lmcache=={old}` → `pip install lmcache=={new}`
 - `docker/mindspore/Dockerfile.a2.openEuler` — line 29: `pip install lmcache=={old}` → `pip install lmcache=={new}`
 
