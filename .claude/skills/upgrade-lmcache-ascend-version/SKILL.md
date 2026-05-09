@@ -141,6 +141,33 @@ When re-applying diffs to the new version:
 
 ---
 
+## Type Annotations: Mirror Upstream Exactly
+
+**Principle: Apart from parts that LMCache-Ascend explicitly needs to modify, all type annotations should remain consistent with upstream LMCache.**
+
+When applying diffs to patched files:
+- If upstream adds type annotations to a parameter (e.g., `skip_backends: Optional[AbstractSet[str]]`), the LMCache-Ascend version **must also have** that type annotation
+- If upstream adds a new import for typing (e.g., `from collections.abc import AbstractSet`), add it to LMCache-Ascend's imports
+- Only deviate from upstream types when the NPU-specific code genuinely requires different types
+
+Example of correct patching:
+```python
+# upstream has:
+def CreateStorageBackends(
+    config: LMCacheEngineConfig,
+    skip_backends: Optional[AbstractSet[str]] = None,  # type added in upstream
+    ...
+):
+# LMCache-Ascend must also have:
+def CreateStorageBackends(
+    config: LMCacheEngineConfig,
+    skip_backends: Optional[AbstractSet[str]] = None,  # same as upstream
+    ...
+):
+```
+
+---
+
 ## Phase 4 — Apply Diffs to New LMCache
 
 For each patch, apply the computed changes to the new upstream source:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
+from collections.abc import AbstractSet
 from typing import TYPE_CHECKING, Optional
 import asyncio
 
@@ -52,8 +53,8 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,  # noqa: F821
-    skip_backends=None,
-    existing_backends=None,
+    skip_backends: Optional[AbstractSet[str]] = None,
+    existing_backends: Optional[OrderedDict[str, StorageBackendInterface]] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_npu_worker(metadata):
         dst_device = f"npu:{torch.npu.current_device()}"
