@@ -332,12 +332,12 @@ There are typically 2 occurrences (910B job and 910C job).
 Update all Dockerfiles in `docker/` that reference the old upstream LMCache version:
 
 Find and replace in ALL of these files:
-- `docker/Dockerfile.a2.openEuler` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
-- `docker/Dockerfile.a3.openEuler` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
-- `docker/Dockerfile.a3` — line 30: `pip install lmcache=={old}` → `pip install lmcache=={new}`
-- docker/Dockerfile.310p.openEuler - line 30: pip install lmcache=={old} -> pip install lmcache=={new}
-- `docker/mindspore/Dockerfile.310p.openEuler` — line 29: `pip install lmcache=={old}` → `pip install lmcache=={new}`
-- `docker/mindspore/Dockerfile.a2.openEuler` — line 29: `pip install lmcache=={old}` → `pip install lmcache=={new}`
+- `docker/Dockerfile.a2.openEuler` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
+- `docker/Dockerfile.a3.openEuler` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
+- `docker/Dockerfile.a3` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
+- `docker/Dockerfile.310p.openEuler` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
+- `docker/mindspore/Dockerfile.310p.openEuler` - line 29: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
+- `docker/mindspore/Dockerfile.a2.openEuler` - line 29: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
 
 Use the `Edit` tool with `replace_all: true` on each file for the `pip install lmcache==` or `LMCACHE_TAG=` lines.
 
@@ -464,19 +464,4 @@ The skill will update these files:
 - `docker/Dockerfile.310p.openEuler`
 - `docker/mindspore/Dockerfile.310p.openEuler`
 - `docker/mindspore/Dockerfile.a2.openEuler`
-- `README.md`
-- `lmcache_ascend/v1/blend/utils.py`
-- `lmcache_ascend/v1/multiprocess/custom_types.py`
-- `lmcache_ascend/v1/kv_layer_groups.py`
-- `lmcache_ascend/v1/gpu_connector/__init__.py`
-- `lmcache_ascend/v1/rpc_utils.py`
-- `lmcache_ascend/v1/tokens_hash.py`
-- `lmcache_ascend/v1/token_database.py`
-- `lmcache_ascend/v1/lookup_client/lmcache_lookup_client.py`
-- `lmcache_ascend/v1/system_detection.py`
-- `lmcache_ascend/v1/memory_management.py`
-- `lmcache_ascend/integration/vllm/utils.py`
-- `lmcache_ascend/integration/vllm/vllm_v1_adapter.py`
-- `lmcache_ascend/integration/sglang/sglang_adapter.py`
-- `.github/workflows/build-and-test.yml`
 - `README.md`
