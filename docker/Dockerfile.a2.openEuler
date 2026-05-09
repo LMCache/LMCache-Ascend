@@ -27,7 +27,7 @@ WORKDIR /workspace
 COPY . /workspace/LMCache-Ascend/
 
 # Install LMCache && LMCache-Ascend
-RUN NO_CUDA_EXT=1 pip install lmcache==0.4.2 && \
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.3 && \
     cd /workspace/LMCache-Ascend && \
     export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux:$CPLUS_INCLUDE_PATH && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \

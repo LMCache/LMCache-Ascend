@@ -13,7 +13,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.3"
+LMCACHE_UPSTREAM_TAG = "v0.4.4"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -240,6 +240,8 @@ def _patch_ops():
             NL_X_NB_BS_HS = 3
             TWO_X_NL_X_NBBS_NH_HS = 4
             NL_X_NBBS_ONE_HS = 5
+            NL_X_TWO_NB_NH_BS_HS = 6
+            NL_X_NB_TWO_NH_BS_HS = 7
 
         ascend_c_ops.GPUKVFormat = GPUKVFormat
 

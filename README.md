@@ -47,20 +47,20 @@ Please ensure your environment matches the versions below.
 #### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.3** | **>=v0.14.0** | **>=2.7.1** | 🚧 **Experimental** |
-| **v0.4.2** | **v0.4.2** | **>=v0.11.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
+| **main** | **v0.4.4** | **>=v0.14.0** | **>=2.7.1** | 🚧 **Experimental** |
+| **v0.4.3** | **v0.4.3** | **>=v0.14.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
 
 #### For PyTorch / SGLang
 | LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.3** | **0.5.8** | **2.8.0.post2.dev20251113** | 🚧 **Experimental** |
-| **v0.4.2** | **v0.4.2** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
+| **main** | **v0.4.4** | **0.5.8** | **2.8.0.post2.dev20251113** | 🚧 **Experimental** |
+| **v0.4.3** | **v0.4.3** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
 
 #### for MindSpore
 | LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.3** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
-| **v0.4.2** | **v0.4.2** | **v0.11.0** | **2.7.1.post1** | ✅ **Verified (Recommended)** |
+| **main** | **v0.4.4** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
+| **v0.4.3** | **v0.4.3** | **v0.11.0** | **2.7.1.post1** | ✅ **Verified (Recommended)** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
 
@@ -107,13 +107,13 @@ quay.io/ascend/vllm-ascend:v0.18.0
 
 - from pip
 ```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.2
+NO_CUDA_EXT=1 pip install lmcache==0.4.3
 ```
 
 3. Install LMCache-Ascend Repo
 
 ```bash
-git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
@@ -122,9 +122,9 @@ pip install -v --no-build-isolation -e .
 
 Build the image using the provided Dockerfile:
 ```bash
-git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0-openeuler .
+docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.3-vllm-ascend-v0.18.0-openeuler .
 ```
 
 Once that is built, run it with the following cmd
@@ -149,7 +149,7 @@ docker run -it \
 -v /data:/data \
 --name lmcache-ascend-test \
 --entrypoint /bin/bash \
-lmcache-ascend:v0.4.2-vllm-ascend-v0.18.0-openeuler
+lmcache-ascend:v0.4.3-vllm-ascend-v0.18.0-openeuler
 
 ```
 
@@ -201,13 +201,13 @@ docker run -it --privileged --net=host --name lmcache-sglang-dev quay.io/ascend/
 
 - from pip
 ```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.2
+NO_CUDA_EXT=1 pip install lmcache==0.4.3
 ```
 
 3. Install LMCache-Ascend Repo
 
 ```bash
-git clone --recurse-submodules -b v0.4.2 https://github.com/LMCache/LMCache-Ascend.git
+git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
@@ -244,7 +244,7 @@ git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 2. Build Docker Image
 ```bash
 cd /workspace/LMCache-Ascend
-docker build -f docker/mindspore/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.2-mindspore2.7.1.post1-openeuler .
+docker build -f docker/mindspore/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.3-mindspore2.7.1.post1-openeuler .
 ```
 
 3. Start Container
@@ -268,7 +268,7 @@ docker run -itd \
     -v /home:/home \
     --name lmcache-ascend-ms \
     --entrypoint /bin/bash \
-    lmcache-ascend:v0.4.2-mindspore2.7.1.post1-openeuler
+    lmcache-ascend:v0.4.3-mindspore2.7.1.post1-openeuler
 
 docker exec -it -u root lmcache-ascend-ms bash
 ```
@@ -305,7 +305,7 @@ docker exec -it -u root lmcache-ascend-ms bash
 2. Install LMCache
 
 ```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.2 --no-deps
+NO_CUDA_EXT=1 pip install lmcache==0.4.3 --no-deps
 ```
 
 3. Install LMCache-Ascend
