@@ -7,9 +7,6 @@ description: |
   version's structure. Use whenever the user wants to upgrade the plugin for a
   new LMCache release, e.g. "upgrade to LMCache v0.5.0", "bump upstream version",
   "adapt to LMCache v0.6.0", "new LMCache version requires updates".
-  Do NOT use for simple version number bumps without source changes — only use
-  when the upstream LMCache source code has changed and the patches need to be
-  re-applied.
 compatibility: |
   Requires git SSH access to git@github.com:LMCache/LMCache.git.
   Requires /tmp/lmcache_old and /tmp/lmcache_new for cloned sources.
@@ -45,9 +42,10 @@ Common cascading patterns:
 
 Read these files to understand the current versions:
 - `lmcache_ascend/__init__.py` — find `LMCACHE_UPSTREAM_TAG` (e.g. `v0.4.2`)
-- `lmcache_ascend/_version.py` — find `__version__` (e.g. `0.3.13.dev2`)
 
-Then ask the user for the **target upstream LMCache version** using `AskUserQuestion`.
+**Extract target version from the user's prompt first.** If the prompt mentions a specific
+version (e.g. "upgrade to LMCache v0.4.3" or "v0.4.3"), use that as the target.
+Only ask the user via `AskUserQuestion` if no version is specified in the prompt.
 
 ---
 
@@ -74,31 +72,30 @@ Use `Bash` to run these commands. The `--depth 1` flag minimizes clone time.
 
 For each of the following patches, read the three-way comparison and compute the diff:
 
-### Patch table
+### Patch Table (Dynamic)
 
-| # | __init__.py patch function | old_lmcache source file | lmcache_ascend target file |
-|---|---------------------------|------------------------|---------------------------|
-| 1 | `_patch_config` | `lmcache/v1/config.py` (mutates dict) | (in-place, no file) |
-| 2 | `_patch_torch_capability` | (in-place on torch.npu) | (no file) |
-| 3 | `_patch_ops` | `lmcache/c_ops.*` | `lmcache_ascend/c_ops.*` — SKIP c_ops |
-| 4 | `_patch_storage_backend_init` | `lmcache/v1/storage_backend/__init__.py` | `lmcache_ascend/v1/storage_backend/__init__.py` |
-| 5 | `_patch_transfer_channel` | `lmcache/v1/transfer_channel/__init__.py` | `lmcache_ascend/v1/transfer_channel/__init__.py` |
-| 6 | `_patch_cacheblend` | `lmcache/v1/compute/blend/utils.py` | `lmcache_ascend/v1/blend/utils.py` |
-| 7 | `_patch_multi_process` | `lmcache/v1/multiprocess/custom_types.py` | `lmcache_ascend/v1/multiprocess/custom_types.py` |
-| 8 | `_patch_kv_layer_group` | `lmcache/v1/kv_layer_groups.py` | `lmcache_ascend/v1/kv_layer_groups.py` |
-| 9 | `_patch_gpu_connector` | `lmcache/v1/gpu_connector/__init__.py` | `lmcache_ascend/v1/gpu_connector/__init__.py` |
-| 10 | `_patch_get_vllm_torch_dev` | `lmcache/integration/vllm/utils.py` | `lmcache_ascend/integration/vllm/utils.py` |
-| 11 | `_patch_wait_for_save` | `lmcache/integration/vllm/vllm_v1_adapter.py` | `lmcache_ascend/integration/vllm/vllm_v1_adapter.py` |
-| 12 | `_patch_hash_token` | `lmcache/v1/tokens_hash.py` | `lmcache_ascend/v1/tokens_hash.py` |
-| 13 | `_patch_lookup_client` | `lmcache/v1/lookup_client/lmcache_lookup_client.py` | `lmcache_ascend/v1/lookup_client/lmcache_lookup_client.py` |
-| 14 | `_patch_sys_detection` | `lmcache/v1/system_detection.py` | `lmcache_ascend/v1/system_detection.py` |
-| 15 | `_patch_sgl` | `lmcache/integration/sglang/sglang_adapter.py` | `lmcache_ascend/integration/sglang/sglang_adapter.py` |
-| 16 | `_patch_rpc_utils` | `lmcache/v1/rpc_utils.py` | `lmcache_ascend/v1/rpc_utils.py` |
+The patch functions are **not hardcoded** — they are derived at runtime by analyzing the current `lmcache_ascend/__init__.py`.
 
-For each patchable entry (4–16):
+At the start of Phase 3, **read the current `__init__.py` and automatically extract** all `_patch_*` function names and their corresponding source paths from the patch execution section. Use this to build a dynamic patch table for the current upgrade.
+
+To extract the patch table:
+1. Read `lmcache_ascend/__init__.py`
+2. Find all `_patch_*` function definitions
+3. Find all `_patch_*` calls in the patch execution section
+4. Map each patch function to its target file based on the patterns in the existing code
+
+### How to derive the patch table dynamically
+
+The current `__init__.py` contains patch functions. Each patch function typically contains:
+- A comment indicating the source file it patches (e.g., `# Patched from lmcache/v1/storage_backend/__init__.py`)
+- The actual patched source path embedded in imports or references
+
+Use these indicators to build the mapping rather than hardcoding it.
+
+For each patchable entry:
 
 1. Read `/tmp/lmcache_old/lmcache/{path}` — the original lmcache source at old tag
-2. Read `/mnt/sdb/jjy/LMCache-Ascend/lmcache_ascend/{path}` — the current lmcache_ascend implementation
+2. Read `lmcache_ascend/{path}` — the current lmcache_ascend implementation (current directory)
 3. Compute the **diff**: what lines were changed/added/removed in lmcache_ascend vs the old upstream
 4. Read `/tmp/lmcache_new/lmcache/{path}` — the new upstream source
 5. **CRITICAL: Analyze cascading effects** (see below)
@@ -222,8 +219,8 @@ it will have cascading effects.
 #### Q2: Does this patch's NPU target file have subclasses or wrappers?
 Check if any NPU code **inherits from** or **wraps** the changed class:
 ```bash
-grep -r "VLLMPagedMemGPUConnectorV2\|VLLMBufferLayerwiseGPUConnector\|VLLMPagedMemLayerwiseGPUConnector" /mnt/sdb/jjy/LMCache-Ascend/lmcache_ascend/
-grep -r "class.*Connector.*GPUConnector" /mnt/sdb/jjy/LMCache-Ascend/lmcache_ascend/
+grep -r "VLLMPagedMemGPUConnectorV2\|VLLMBufferLayerwiseGPUConnector\|VLLMPagedMemLayerwiseGPUConnector" lmcache_ascend/
+grep -r "class.*Connector.*GPUConnector" lmcache_ascend/
 ```
 
 #### Q3: Does the NPU subclass override the changed method?
@@ -265,7 +262,7 @@ patch config needs updating.
 ## Phase 5 — Write New Files to lmcache_ascend/
 
 For each generated new implementation, use the `Write` tool to write it to the
-appropriate path under `/mnt/sdb/jjy/LMCache-Ascend/lmcache_ascend/`.
+appropriate path under `lmcache_ascend/` (current directory).
 
 Path mapping for writes:
 - Diff output for `lmcache/v1/foo.py` → write to `lmcache_ascend/v1/foo.py`
@@ -297,7 +294,7 @@ If a patch target no longer exists in the new lmcache (function deleted, class r
 
 Ensure the execution order in `__init__.py` is preserved. Required ordering:
 1. `_patch_config` (always first)
-2. `_patch_torch_capability` (pytorch framework)
+2. `_patch_torch_capability` (pytorch framework only)
 3. `_patch_ops` (always)
 4. For vllm runtime: `_patch_get_vllm_torch_dev`, then `_patch_gpu_connector`
 5. `_patch_hash_token` (always)
@@ -305,10 +302,12 @@ Ensure the execution order in `__init__.py` is preserved. Required ordering:
 7. `_patch_kv_layer_group` (always)
 8. For sglang runtime: `_patch_sgl`
 9. For vllm runtime + pytorch: `_patch_sys_detection`
-10. For vllm runtime: `_patch_wait_for_save`
+10. For vllm runtime: `_patch_vllm_v1_adapter`, then `_patch_cache_engine`
 
-Key dependency: `gpu_connector` must come BEFORE `storage_backend` and `cacheblend`,
-because `CreateStorageBackends` calls `CreateNPUConnector` internally.
+Key dependency: For vllm, `gpu_connector` must be patched before `storage_backend_init`
+because `CreateStorageBackends` (patched by `storage_backend_init`) calls `CreateNPUConnector`
+internally at runtime. The patch order ensures the NPU factory is registered before
+`CreateStorageBackends` can use it.
 
 ---
 
@@ -440,28 +439,23 @@ rm -rf /tmp/lmcache_old /tmp/lmcache_new
 
 ## Summary of Generated/Updated Files
 
-The skill will update these files:
-- `lmcache_ascend/__init__.py` — `LMCACHE_UPSTREAM_TAG`, patch functions
-- `lmcache_ascend/v1/storage_backend/__init__.py`
-- `lmcache_ascend/v1/transfer_channel/__init__.py`
-- `lmcache_ascend/v1/blend/utils.py`
-- `lmcache_ascend/v1/multiprocess/custom_types.py`
-- `lmcache_ascend/v1/kv_layer_groups.py`
-- `lmcache_ascend/v1/gpu_connector/__init__.py`
-- `lmcache_ascend/v1/rpc_utils.py`
-- `lmcache_ascend/v1/tokens_hash.py`
-- `lmcache_ascend/v1/token_database.py`
-- `lmcache_ascend/v1/lookup_client/lmcache_lookup_client.py`
-- `lmcache_ascend/v1/system_detection.py`
-- `lmcache_ascend/v1/memory_management.py`
-- `lmcache_ascend/integration/vllm/utils.py`
-- `lmcache_ascend/integration/vllm/vllm_v1_adapter.py`
-- `lmcache_ascend/integration/sglang/sglang_adapter.py`
-- `.github/workflows/build-and-test.yml`
-- `docker/Dockerfile.a2.openEuler`
-- `docker/Dockerfile.a3.openEuler`
-- `docker/Dockerfile.a3`
-- `docker/Dockerfile.310p.openEuler`
-- `docker/mindspore/Dockerfile.310p.openEuler`
-- `docker/mindspore/Dockerfile.a2.openEuler`
-- `README.md`
+The skill updates files based on the dynamically derived patch table. After extracting the patch functions from `__init__.py`, only the files that actually need patching are updated. All file paths are relative to the current directory (lmcache_ascend/).
+
+Typical files that may be updated include:
+- `__init__.py` — `LMCACHE_UPSTREAM_TAG`, patch functions
+- `v1/storage_backend/__init__.py`
+- `v1/transfer_channel/__init__.py`
+- `v1/blend/utils.py`
+- `v1/multiprocess/custom_types.py`
+- `v1/kv_layer_groups.py`
+- `v1/gpu_connector/__init__.py`
+- `v1/rpc_utils.py`
+- `v1/tokens_hash.py`
+- `v1/token_database.py`
+- `v1/lookup_client/lmcache_lookup_client.py`
+- `v1/system_detection.py`
+- `v1/memory_management.py`
+- `integration/vllm/utils.py`
+- `integration/vllm/vllm_v1_adapter.py`
+- `integration/sglang/sglang_adapter.py`
+- CI and documentation files (`.github/workflows/build-and-test.yml`, `README.md`, `docker/Dockerfile.*`)
