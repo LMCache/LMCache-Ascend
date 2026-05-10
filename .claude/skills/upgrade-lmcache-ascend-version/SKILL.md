@@ -138,29 +138,44 @@ When re-applying diffs to the new version:
 
 ---
 
-## Type Annotations: Mirror Upstream Exactly
 
-**Principle: Apart from parts that LMCache-Ascend explicitly needs to modify, all type annotations should remain consistent with upstream LMCache.**
+## Preserve Upstream Exactly — Only Diff Lines May Change
 
-When applying diffs to patched files:
-- If upstream adds type annotations to a parameter (e.g., `skip_backends: Optional[AbstractSet[str]]`), the LMCache-Ascend version **must also have** that type annotation
-- If upstream adds a new import for typing (e.g., `from collections.abc import AbstractSet`), add it to LMCache-Ascend's imports
-- Only deviate from upstream types when the NPU-specific code genuinely requires different types
+**Principle: Apart from parts that LMCache-Ascend explicitly needs to modify, all code — including comments, type annotations, and imports — must remain identical to upstream LMCache.**
 
-Example of correct patching:
+When applying diffs to patched files, LMCache-Ascend should only diverge from upstream in the **exact lines** that constitute the diff. Everything else (whitespace, comments, docstrings, type hints, imports, line ordering) stays the same.
+
+Concretely:
+
+| Category | Rule |
+|----------|------|
+| **Type annotations** | If upstream adds a type to a parameter (e.g., `skip_backends: Optional[AbstractSet[str]]`), the LMCache-Ascend version **must also have** that type annotation. Only deviate when NPU-specific code genuinely requires different types. |
+| **Imports** | If upstream adds a new import (e.g., `from typing import AbstractSet`), add it to LMCache-Ascend's imports. Do not remove or reorder upstream imports unless the diff explicitly requires it. |
+| **Comments/docstrings** | Do not add, remove, or modify upstream comments or docstrings outside of lines that are already part of the diff. The `# LMC-A: <reason>` comment only goes on lines that actually differ from upstream. |
+| **Line ordering** | Keep the same line order as upstream. If the diff inserts 3 lines at line 50, insert them at the same location — do not reorder surrounding code. |
+| **Whitespace** | Preserve upstream indentation and spacing exactly. Only change whitespace on lines that are part of the diff. |
+
+### Why this matters
+
+If LMCache-Ascend modifies code outside the diff, it becomes impossible to cleanly see what NPU-specific changes were actually made. A future upgrade would compute a larger-than-necessary diff, making it hard to distinguish intentional NPU changes from incidental formatting/style changes. Upstream may also add new code (e.g., new parameters with type annotations) that LMCache-Ascend should inherit automatically — not override accidentally.
+
+### Example of correct patching
+
 ```python
 # upstream has:
 def CreateStorageBackends(
     config: LMCacheEngineConfig,
     skip_backends: Optional[AbstractSet[str]] = None,  # type added in upstream
-    ...
 ):
-# LMCache-Ascend must also have:
+    ...
+
+# LMCache-Ascend must also have (only diff lines are marked):
 def CreateStorageBackends(
     config: LMCacheEngineConfig,
     skip_backends: Optional[AbstractSet[str]] = None,  # same as upstream
-    ...
 ):
+    # LMC-A: Use NPU device instead of CUDA
+    device, device_type = (torch.npu, "npu")  # only this line differs
 ```
 
 ---
