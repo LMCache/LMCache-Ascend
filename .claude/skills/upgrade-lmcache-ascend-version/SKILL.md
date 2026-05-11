@@ -129,7 +129,7 @@ When re-applying diffs to the new version:
 
 - If the patch only adds NPU-specific behavior to an otherwise identical function: **keep the same name**
 - If the patch replaces a GPU class with an NPU one: rename `GPUConnector` → `NPUConnector`, `CudaIPCWrapper` → `AscendIPCWrapper`
-- If patching a class method: use `ClassName_method_name` naming (e.g. `GPUMemoryAllocator__init__`)
+- If patching a class method: use `ClassName_method_name` naming (e.g. `GPUMemoryAllocator___init__`)
 - Add `# LMC-A: <reason>` comment on every line that differs from the new upstream source. Example:
   ```python
   # LMC-A: Return NPU device instead of CUDA for Ascend compatibility
@@ -209,12 +209,18 @@ This patch adds entries to `lmcache.v1.config._CONFIG_DEFINITIONS`. To handle:
 
 ### 4d. c_ops handling
 
-DO NOT attempt to diff/rebuild the `.so` file. Instead:
-1. Compare old and new lmcache's `c_ops` Python stub files (`.pyi` or thin Python wrappers)
-2. If the new lmcache added new pybind functions that are not in the ascend `c_ops.so`:
-   - Read `lmcache_ascend/c_ops.pyi`
-   - Add empty stub signatures for any new functions
-   - Add `# LMC-A: <reason>` comments
+**For csrc/pybind.cpp:**
+1. Read `/tmp/lmcache_old/csrc/pybind.cpp` and `/tmp/lmcache_new/csrc/pybind.cpp`
+2. Identify new function signatures added in the new upstream version
+3. Read `lmcache_ascend/csrc/pybind.cpp`
+4. Add the new function declarations with a placeholder implementation:
+   ```cpp
+   // LMC-A: Not yet implemented for Ascend
+   PyErr_SetString(PyExc_NotImplementedError, "Will Implement Soon...");
+   throw py::error_already_set();
+   ```
+   Add `# LMC-A: <reason>` comment at the top of each new function block explaining
+   why it was added (e.g., "Added by upstream LMCache v0.5.0 — placeholder for NPU implementation").
 
 ### 4e. Cascading Effects Checklist (for every changed patch)
 
@@ -419,7 +425,6 @@ Files to update:
 Run the test suite to verify the upgraded code:
 
 ```bash
-cd /mnt/sdb/jjy/LMCache-Ascend
 python3 -m pip install -v --no-build-isolation -e . 2>&1 | tail -5
 python3 -m pytest -v tests/v1 -x --tb=short 2>&1 | tail -30
 ```
