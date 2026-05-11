@@ -11,7 +11,7 @@
 #include <random>
 #include <vector>
 
-#include "hccl/hccl_socket.h"
+#include "hccl_socket.h"
 
 void FillRandom(char *buffer, size_t length) {
   if (length == 0 || buffer == nullptr) {

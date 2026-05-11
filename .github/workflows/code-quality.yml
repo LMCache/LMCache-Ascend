@@ -37,6 +37,7 @@ jobs:
             files.pythonhosted.org:443
             atomgit.com:443
             api.github.com:443
+            gitcode.com:443
 
       - name: Checkout code
         uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0

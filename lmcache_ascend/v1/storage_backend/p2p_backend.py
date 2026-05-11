@@ -2,11 +2,15 @@
 # Standard
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
+import threading
 
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.observability import LMCStatsMonitor
-from lmcache.utils import CacheEngineKey
+from lmcache.utils import (
+    CacheEngineKey,
+    start_loop_in_thread_with_exceptions,
+)
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -113,7 +117,14 @@ class AscendP2PBackend(P2PBackend):
         lmcache_worker: "LMCacheWorker",
     ):
         self.config = config
-        self.loop = loop
+        self.loop = asyncio.new_event_loop()
+        self.thread = threading.Thread(
+            target=start_loop_in_thread_with_exceptions,
+            args=(self.loop,),
+            name="ascend-p2p-event-loop",
+        )
+        self.thread.start()
+
         self.lmcache_worker = lmcache_worker
         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
         assert config.p2p_host is not None, "p2p_host must be specified"
@@ -283,11 +294,13 @@ class AscendP2PBackend(P2PBackend):
         self.done_peer_sockets: dict[str, tuple[asyncio.Lock, zmq.asyncio.Socket]] = {}
 
         asyncio.run_coroutine_threadsafe(
-            self._run_peer_request_handler_with_recovery(), loop
+            self._run_peer_request_handler_with_recovery(), self.loop
         )
-        asyncio.run_coroutine_threadsafe(self._run_done_handler_with_recovery(), loop)
         asyncio.run_coroutine_threadsafe(
-            self._sweep_expired_pending_pull_resources(), loop
+            self._run_done_handler_with_recovery(), self.loop
+        )
+        asyncio.run_coroutine_threadsafe(
+            self._sweep_expired_pending_pull_resources(), self.loop
         )
 
     async def _handle_peer_requests(self):
@@ -452,7 +465,7 @@ class AscendP2PBackend(P2PBackend):
                     )
                     should_release = False
                 else:
-                    logger.warning(
+                    logger.debug(
                         "Pull mode enabled but no hit chunks "
                         "for lookup_id %s, receiver_id %s",
                         lookup_id,
@@ -938,6 +951,8 @@ class AscendP2PBackend(P2PBackend):
             return []
 
         hit_mem_objs = mem_objs[:num_hit_chunks]
+        for hit_mem_obj in hit_mem_objs:
+            hit_mem_obj.pin()
 
         if num_hit_chunks > 0 and self.pull_mode:
             success = await self._handle_pull_mode_transfer(

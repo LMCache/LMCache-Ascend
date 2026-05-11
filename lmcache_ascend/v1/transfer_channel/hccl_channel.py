@@ -4,13 +4,11 @@ from typing import Dict, Optional, Union
 import asyncio
 import pickle
 import threading
-import time
 
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.rpc_utils import get_zmq_context, get_zmq_socket
-from lmcache.v1.transfer_channel.abstract import BaseTransferChannel
+from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
     InitSideRetMsgBase,
@@ -24,14 +22,13 @@ import zmq
 import lmcache_ascend.hccl_npu_comms as hcomm
 
 # Local
+from .base_channel import BaseMultiBufferChannel
 from .buffer_config import (
     BufferConfig,
-    BufferType,
     RemotePeerBufferList,
-    resolve_buffer_ref,
 )
 from .hccl_agent import HcclAgentWrapper
-from .transfer_spec import TS_RECEIVER_ID, TS_REMOTE_BUFFER_UUIDS, TS_REMOTE_MEM_INDEXES
+from .transfer_spec import TS_RECEIVER_ID
 
 logger = init_logger(__name__)
 
@@ -64,79 +61,55 @@ class HcclMemRegResponse(HcclMsgBase):
     )
 
 
+class HcclReadyRequest(HcclMsgBase):
+    local_id: str
+
+
+class HcclReadyResponse(HcclMsgBase):
+    ok: bool
+
+
+class HcclErrorResponse(HcclMsgBase):
+    ok: bool = False
+
+
 HcclMsg = Union[
-    HcclInitRequest, HcclInitResponse, HcclMemRegRequest, HcclMemRegResponse
+    HcclInitRequest,
+    HcclInitResponse,
+    HcclMemRegRequest,
+    HcclMemRegResponse,
+    HcclReadyRequest,
+    HcclReadyResponse,
+    HcclErrorResponse,
 ]
 
 
-class HcclChannel(BaseTransferChannel):
+class HcclChannel(BaseMultiBufferChannel):
+    _init_msg_type = Union[HcclMsg, SideMsg]
+    _channel_name = "hccl"
+
     def __init__(
         self,
         async_mode: bool = False,
         buffers: Optional[list[BufferConfig]] = None,
         **kwargs,
     ):
-        assert "role" in kwargs
-
-        self.role = kwargs["role"]
-
-        if buffers is None:
-            logger.warning(
-                "Buffers not provided, "
-                "using legacy initialization with buffer_ptr, "
-                "buffer_size, and align_bytes"
-            )
-            # Legacy initialization support
-            assert "buffer_ptr" in kwargs
-            assert "buffer_size" in kwargs
-            assert "align_bytes" in kwargs
-
-            buffers = [
-                BufferConfig(
-                    ptr=kwargs["buffer_ptr"],
-                    size=kwargs["buffer_size"],
-                    device_id=-1,  # Deprecated, not used in CPU implementation
-                    device_type=BufferType.CPU,
-                    align_bytes=kwargs["align_bytes"],
-                )
-            ]
-
-        # Take the page size from the first buffer (assuming uniform for now)
-        self.page_size = buffers[0].align_bytes
-
-        self.hccl_wrapper = HcclAgentWrapper(
-            buffers=buffers,
-        )
-        self.hccl_agent = self.hccl_wrapper.agent
-
-        # Used for P2P
-        self.peer_lookup_url = kwargs.get("peer_lookup_url", None)
-
-        self.running = True
-        self.conn_handles_dict = {}
-
-        self._state_lock = threading.Lock()
+        self.conn_handles_dict: Dict[str, object] = {}
         self.remote_index_addr_dict: Dict[str, RemotePeerBufferList] = {}
+        self._peer_ready_events: Dict[str, threading.Event] = {}
 
-        self.side_channels: list[zmq.Socket] = []
-        self.running_threads: list[threading.Thread] = []
+        super().__init__(async_mode=async_mode, buffers=buffers, **kwargs)
 
-        self.async_mode = async_mode
-        if self.async_mode:
-            self.zmq_context = get_zmq_context(use_asyncio=True)
-        else:
-            self.zmq_context = get_zmq_context(use_asyncio=False)
-        self.peer_init_url = kwargs["peer_init_url"]
-        self.event_loop = kwargs.get("event_loop", None)
+        self.transport_stream = torch.npu.Stream(self.handle_device)
 
-        self.transport_stream = torch.npu.Stream(torch.npu.current_device())
-        self.handle_device = torch.npu.current_device()
+    def _register_buffers(self, buffers: list[BufferConfig]) -> None:
+        self.hccl_wrapper = HcclAgentWrapper(buffers=buffers)
+        self.hccl_agent = self.hccl_wrapper.agent
+        self.mem_handles = self.hccl_wrapper.mem_handles
 
-        self._init_side_channels()
+    def _make_error_response(self) -> HcclErrorResponse:
+        return HcclErrorResponse(ok=False)
 
-    ############################################################
-    # Initialization functions
-    ############################################################
     def lazy_init_peer_connection(
         self,
         local_id: str,
@@ -144,7 +117,26 @@ class HcclChannel(BaseTransferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
-        # Initialize temporary socket for hccl initialization
+        with self._state_lock:
+            already_connected = peer_id in self.conn_handles_dict
+        if already_connected:
+            if init_side_msg is None:
+                return None
+            init_tmp_socket = get_zmq_socket(
+                self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
+            )
+            try:
+                return self.send_init_side_msg(init_tmp_socket, init_side_msg)
+            except Exception as e:
+                logger.error("Failed to send init side message: %s", e)
+                return None
+            finally:
+                init_tmp_socket.close()
+
+        with self._state_lock:
+            self.conn_handles_dict.pop(peer_id, None)
+            self.remote_index_addr_dict.pop(peer_id, None)
+
         init_tmp_socket = get_zmq_socket(
             self.zmq_context,
             peer_init_url,
@@ -153,7 +145,6 @@ class HcclChannel(BaseTransferChannel):
             "connect",
         )
 
-        # Build and send init request
         hccl_init_req = HcclInitRequest(
             local_id=local_id,
             client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
@@ -200,7 +191,15 @@ class HcclChannel(BaseTransferChannel):
                 server_mem_handles
             )
 
-        # Send side message if any
+        ready_req = HcclReadyRequest(local_id=local_id)
+        init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
+        ready_bytes = init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcclMsg)
+        if isinstance(ready_resp, HcclReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
+
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = self.send_init_side_msg(
@@ -218,7 +217,28 @@ class HcclChannel(BaseTransferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
-        # Initialize temporary socket for hccl initialization
+        with self._state_lock:
+            already_connected = peer_id in self.conn_handles_dict
+        if already_connected:
+            if init_side_msg is None:
+                return None
+            init_tmp_socket = get_zmq_socket(
+                self.zmq_context, peer_init_url, "tcp", zmq.REQ, "connect"
+            )
+            try:
+                return await self.async_send_init_side_msg(
+                    init_tmp_socket, init_side_msg
+                )
+            except Exception as e:
+                logger.error("Failed to send init side message: %s", e)
+                return None
+            finally:
+                init_tmp_socket.close()
+
+        with self._state_lock:
+            self.conn_handles_dict.pop(peer_id, None)
+            self.remote_index_addr_dict.pop(peer_id, None)
+
         init_tmp_socket = get_zmq_socket(
             self.zmq_context,
             peer_init_url,
@@ -227,7 +247,6 @@ class HcclChannel(BaseTransferChannel):
             "connect",
         )
 
-        # Build and send init request
         hccl_init_req = HcclInitRequest(
             local_id=local_id,
             client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
@@ -268,7 +287,15 @@ class HcclChannel(BaseTransferChannel):
                 server_mem_handles
             )
 
-        # Send side message if any
+        ready_req = HcclReadyRequest(local_id=local_id)
+        await init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
+        ready_bytes = await init_tmp_socket.recv()
+        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcclMsg)
+        if isinstance(ready_resp, HcclReadyResponse) and not ready_resp.ok:
+            raise ConnectionError(
+                f"Server failed to complete handshake for peer {peer_id}"
+            )
+
         init_ret_msg: Optional[InitSideRetMsgBase] = None
         if init_side_msg is not None:
             init_ret_msg = await self.async_send_init_side_msg(
@@ -278,19 +305,6 @@ class HcclChannel(BaseTransferChannel):
 
         init_tmp_socket.close()
         return init_ret_msg
-
-    def _init_side_channels(self):
-        if self.peer_init_url is None:
-            return
-
-        if self.async_mode:
-            # Start listening coroutine for initialization side channel
-            asyncio.run_coroutine_threadsafe(self._async_init_loop(), self.event_loop)
-        else:
-            # Start listening thread for initialization side channel
-            self.init_thread = threading.Thread(target=self._init_loop, daemon=True)
-            self.init_thread.start()
-            self.running_threads.append(self.init_thread)
 
     def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
         return receiver_or_sender_id in self.conn_handles_dict
@@ -308,10 +322,9 @@ class HcclChannel(BaseTransferChannel):
 
             client_meta = pickle.loads(req.client_meta_bytes)
             accept_started_event = threading.Event()
+            ready_event = threading.Event()
+            self._peer_ready_events[req.local_id] = ready_event
 
-            # In nixl, add_remote_agent is executed before returning the response.
-            # Note: just put in separate thread for now, make sure also works for
-            #       asyncio case later
             def complete_handshake():
                 torch.npu.set_device(self.handle_device)
 
@@ -323,7 +336,6 @@ class HcclChannel(BaseTransferChannel):
 
                     conn_handle = self.hccl_agent.accept(client_meta, server_meta)
 
-                    # Update the state once the connection is established
                     with self._state_lock:
                         self.conn_handles_dict[req.local_id] = conn_handle
                     logger.info(
@@ -331,6 +343,8 @@ class HcclChannel(BaseTransferChannel):
                     )
                 except Exception as e:
                     logger.error(f"Handshake failed: {e}")
+                finally:
+                    ready_event.set()
 
             t = threading.Thread(target=complete_handshake, daemon=True)
             t.start()
@@ -374,6 +388,15 @@ class HcclChannel(BaseTransferChannel):
             )
 
             logger.info("Replying mem register response")
+        elif isinstance(req, HcclReadyRequest):
+            event = self._peer_ready_events.get(req.local_id)
+            if event is not None:
+                event.wait(timeout=120)
+            ok = req.local_id in self.conn_handles_dict
+            if not ok:
+                logger.error("Ready check timed out for peer %s", req.local_id)
+            resp = HcclReadyResponse(ok=ok)
+
         elif isinstance(req, InitSideMsgBase):
             resp = self.handle_init_side_msg(req)
             logger.info("Replying P2P init side response")
@@ -382,212 +405,13 @@ class HcclChannel(BaseTransferChannel):
 
         return resp
 
-    def _init_loop(self):
-        # Initialize initialization side channels
-        self.init_side_channel = get_zmq_socket(
-            self.zmq_context,
-            self.peer_init_url,
-            "tcp",
-            zmq.REP,
-            "bind",
-        )
-        self.side_channels.append(self.init_side_channel)
-
-        torch.npu.set_device(self.handle_device)
-        self.init_side_channel.setsockopt(zmq.RCVTIMEO, 1000)
-
-        while self.running:
-            try:
-                req_bytes = self.init_side_channel.recv()
-            except zmq.Again:
-                continue
-            except Exception as e:
-                logger.error("Failed to receive in initialization loop: %s", str(e))
-                if self.running:
-                    time.sleep(0.01)
-                continue
-
-            try:
-                logger.info("Received initialization request")
-
-                req = msgspec.msgpack.decode(req_bytes, type=Union[HcclMsg, SideMsg])
-
-                resp = self._handle_init_msg(req)
-
-                self.init_side_channel.send(msgspec.msgpack.encode(resp))
-
-                logger.info("Sent initialization request response")
-
-            except Exception as e:
-                logger.error("Failed to process initialization loop: %s", str(e))
-                # Must send *something* to keep the REP socket in sync,
-                # otherwise it enters the "must send" state permanently
-                # and every subsequent recv() fails with
-                # "Operation cannot be accomplished in current state".
-                try:
-                    self.init_side_channel.send(b"")
-                except Exception:
-                    pass
-                if self.running:
-                    time.sleep(0.01)
-
-        self.init_side_channel.close()
-
-    async def _async_init_loop(self):
-        # Initialize initialization side channels
-        self.init_side_channel = get_zmq_socket(
-            self.zmq_context,
-            self.peer_init_url,
-            "tcp",
-            zmq.REP,
-            "bind",
-        )
-        self.side_channels.append(self.init_side_channel)
-        logger.info("Starting async initialization loop")
-
-        torch.npu.set_device(self.handle_device)
-
-        loop = asyncio.get_running_loop()
-
-        while self.running:
-            try:
-                req_bytes = await asyncio.wait_for(
-                    self.init_side_channel.recv(), timeout=1.0
-                )
-
-                logger.info("Received initialization request")
-
-                req = msgspec.msgpack.decode(req_bytes, type=Union[HcclMsg, SideMsg])
-
-                resp = await loop.run_in_executor(None, self._handle_init_msg, req)
-
-                logger.info("handled init msg")
-
-                await self.init_side_channel.send(msgspec.msgpack.encode(resp))
-
-                logger.info("Sent initialization request response")
-
-            except asyncio.TimeoutError:
-                continue
-
-            except Exception as e:
-                logger.error("Failed to process initialization loop: %s", str(e))
-                if self.running:
-                    time.sleep(0.01)
-
-        self.init_side_channel.close()
-
-    ############################################################
-    # Utility functions
-    ############################################################
-
-    def get_local_mem_indices(
-        self, objects: Union[list[bytes], list[MemoryObj]]
-    ) -> list[int]:
-        raise NotImplementedError("When using Ascend, this should not be used.")
-
-    def get_local_buffer_refs(
-        self, objects: Union[list[bytes], list[MemoryObj]]
-    ) -> tuple[list[str], list[int]]:
-        """Return (buffer_uuids, mem_indexes) for each object.
-
-        These references can be sent over the wire instead of mem indexes.
-        The remote peer resolves them.
-
-        Returns:
-            A tuple of (buffer_uuids, mem_indexes) parallel lists.
-        """
-        buffer_uuids: list[str] = []
-        mem_indexes: list[int] = []
-        if isinstance(objects[0], MemoryObj):
-            for mem_obj in objects:
-                assert mem_obj is not None and isinstance(mem_obj, MemoryObj), (
-                    "Expected MemoryObj, got {}".format(type(mem_obj))
-                )
-                buf_uuid, mem_idx = resolve_buffer_ref(
-                    self.hccl_wrapper.mem_handles,
-                    mem_obj.data_ptr,
-                    mem_obj.meta.address,
-                )
-                buffer_uuids.append(buf_uuid)
-                mem_indexes.append(mem_idx)
-        elif isinstance(objects[0], bytes):
-            raise NotImplementedError(
-                "Sending raw bytes is not supported in hccl channel"
-            )
-        return buffer_uuids, mem_indexes
-
-    ############################################################
-    # Send/Recv functions
-    ############################################################
-
-    ### Send and Recv must be called in pair ###
-    def batched_send(
-        self,
-        objects: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        raise NotImplementedError
-
-    def batched_recv(
-        self,
-        buffers: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        raise NotImplementedError
-
-    async def async_batched_send(
-        self,
-        objects: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        raise NotImplementedError
-
-    async def async_batched_recv(
-        self,
-        buffers: Union[list[bytes], list[MemoryObj]],
-        transfer_spec: Optional[dict] = None,
-    ) -> int:
-        raise NotImplementedError
-
-    ############################################################
-    # Read/Write functions
-    ############################################################
-
-    ### Read and Write only need to be called on one side ###
-
-    def _resolve_remote_addrs(self, transfer_spec: dict) -> list[int]:
-        """Resolve remote memory addresses from transfer_spec.
-
-        Supports the format (remote_buffer_uuids + remote_mem_indexes)
-
-        The format avoids passing raw pointers or single indexes over the wire by using
-        buffer UUIDs and bounded mem indexes, which are resolved
-        locally against the peer's registered memory handles.
-
-        Returns:
-            List of resolved remote memory addresses for RDMA operations.
-        """
-        if (
-            TS_REMOTE_BUFFER_UUIDS in transfer_spec
-            and TS_REMOTE_MEM_INDEXES in transfer_spec
-        ):
-            peer_id = transfer_spec[TS_RECEIVER_ID]
-            with self._state_lock:
-                remote_mem_handles = self.remote_index_addr_dict[peer_id]
-            return [
-                remote_mem_handles.resolve_addr(buf_uuid, page_idx)
-                for buf_uuid, page_idx in zip(
-                    transfer_spec[TS_REMOTE_BUFFER_UUIDS],
-                    transfer_spec[TS_REMOTE_MEM_INDEXES],
-                    strict=True,
-                )
-            ]
-        else:
-            raise ValueError(
-                "transfer_spec must contain either "
-                "(remote_buffer_uuids, remote_mem_indexes) or remote_addrs"
-            )
+    def _resolve_transfer(self, transfer_spec: dict):
+        """Return (conn_handle, remote_buffers) for the peer in transfer_spec."""
+        peer_id = transfer_spec[TS_RECEIVER_ID]
+        with self._state_lock:
+            conn_handle = self.conn_handles_dict[peer_id]
+            remote_buffers = self.remote_index_addr_dict[peer_id]
+        return conn_handle, remote_buffers
 
     def _build_write_ops(
         self,
@@ -598,10 +422,8 @@ class HcclChannel(BaseTransferChannel):
 
         Returns (conn_handle, write_ops) for use by write methods.
         """
-        with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec[TS_RECEIVER_ID]]
-
-        remote_addrs = self._resolve_remote_addrs(transfer_spec)
+        conn_handle, remote_buffers = self._resolve_transfer(transfer_spec)
+        remote_addrs = self._resolve_transfer_addrs(remote_buffers, transfer_spec)
 
         write_ops = []
         for mem_obj, remote_addr in zip(objects, remote_addrs, strict=False):
@@ -697,11 +519,8 @@ class HcclChannel(BaseTransferChannel):
 
         Returns (conn_handle, read_ops) for use by read methods.
         """
-        conn_handle = None
-        with self._state_lock:
-            conn_handle = self.conn_handles_dict[transfer_spec[TS_RECEIVER_ID]]
-
-        remote_addrs = self._resolve_remote_addrs(transfer_spec)
+        conn_handle, remote_buffers = self._resolve_transfer(transfer_spec)
+        remote_addrs = self._resolve_transfer_addrs(remote_buffers, transfer_spec)
 
         read_ops = []
         for mem_obj, remote_addr in zip(buffers, remote_addrs, strict=False):
@@ -748,11 +567,6 @@ class HcclChannel(BaseTransferChannel):
 
         return len(buffers)
 
-    ############################################################
-    # functions added for better pipelining control
-    # These allow submitting reads/writes without waiting for completion,
-    # and using events for synchronization
-    ############################################################
     def submit_batched_read(
         self,
         buffers: Union[list[bytes], list[MemoryObj]],
@@ -786,13 +600,13 @@ class HcclChannel(BaseTransferChannel):
         event.record(self.transport_stream)
         return event
 
-    ############################################################
-    # Cleanup-related functions
-    ############################################################
-
     def close(self):
         self.running = False
         for thread in self.running_threads:
             thread.join()
         self.zmq_context.term()
+        with self._state_lock:
+            self.conn_handles_dict.clear()
+            self.remote_index_addr_dict.clear()
+        self._peer_ready_events.clear()
         self.hccl_wrapper.close()
