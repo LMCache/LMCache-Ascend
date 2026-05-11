@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, AbstractSet, Optional
 import asyncio
 
 # Third Party
@@ -28,20 +28,20 @@ logger = init_logger(__name__)
 
 def is_npu_worker(metadata: LMCacheMetadata) -> bool:
     """
-    Check if the current role is worker and CUDA is available.
+    Check if the current role is worker and NPU is available.
 
     Args:
         metadata: The LMCache engine metadata.
 
     Returns:
-        True if the worker is not a scheduler and CUDA is available.
+        True if the worker is not a scheduler and NPU is available.
     """
     return metadata.role != "scheduler" and torch.npu.is_available()
 
 
 """
-NOTE (gingfung): Patching the CreateStorageBackends function 
-to replace with AscendP2PBackend when p2p is enabled on Ascend. 
+NOTE (gingfung): Patching the CreateStorageBackends function
+to replace with AscendP2PBackend when p2p is enabled on Ascend.
 Also remove NIXL as it is not supported.
 """
 
@@ -52,14 +52,15 @@ def CreateStorageBackends(
     loop: asyncio.AbstractEventLoop,
     dst_device: str = "cuda",
     lmcache_worker: Optional["LMCacheWorker"] = None,  # noqa: F821
-    skip_backends=None,
-    existing_backends=None,
+    skip_backends: Optional[AbstractSet[str]] = None,
+    existing_backends: Optional[OrderedDict[str, StorageBackendInterface]] = None,
 ) -> OrderedDict[str, StorageBackendInterface]:
     if is_npu_worker(metadata):
         dst_device = f"npu:{torch.npu.current_device()}"
     else:
         dst_device = "cpu"
     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+    _skip = skip_backends or set()
 
     if config.enable_pd:
         # First Party
@@ -76,12 +77,21 @@ def CreateStorageBackends(
     # TODO(Jiayi): The hierarchy is fixed for now
     # NOTE(Jiayi): The local_cpu backend is always created because
     # other backends might need it as a buffer.
+    # Reuse existing LocalCPUBackend when available so that
+    # dependent backends (disk, remote, p2p, …) keep working.
     local_cpu_backend: Optional[LocalCPUBackend] = None
+    if existing_backends and "LocalCPUBackend" in existing_backends:
+        _existing_cpu = existing_backends["LocalCPUBackend"]
+        if isinstance(_existing_cpu, LocalCPUBackend):
+            local_cpu_backend = _existing_cpu
+
     if metadata.role == "scheduler":
         # For scheduler role, local_cpu_backend is None
         pass
     elif not config.enable_pd or config.local_cpu:
-        if config.max_local_cpu_size > 0:
+        if "LocalCPUBackend" in _skip:
+            pass  # Skipped — already exists
+        elif config.max_local_cpu_size > 0:
             local_cpu_backend = LocalCPUBackend(
                 config,
                 metadata,
@@ -93,7 +103,7 @@ def CreateStorageBackends(
         else:
             logger.info("No cpu memory is allocated as max_local_cpu_size <= 0")
 
-    if config.enable_p2p:
+    if config.enable_p2p and "P2PBackend" not in _skip:
         if config.use_layerwise:
             raise ValueError(
                 "Invalid LMCache-Ascend config: `enable_p2p=true` is not compatible "
@@ -112,16 +122,60 @@ def CreateStorageBackends(
         backend_name = str(p2p_backend)
         storage_backends[backend_name] = p2p_backend
 
-    if config.local_disk and config.max_local_disk_size > 0:
+    if (
+        config.local_disk
+        and config.max_local_disk_size > 0
+        and "LocalDiskBackend" not in _skip
+    ):
         assert local_cpu_backend is not None
         local_disk_backend = LocalDiskBackend(
-            config, loop, local_cpu_backend, dst_device, lmcache_worker, metadata
+            config,
+            loop,
+            local_cpu_backend,
+            dst_device,
+            lmcache_worker,
+            metadata,
         )
 
         backend_name = str(local_disk_backend)
         storage_backends[backend_name] = local_disk_backend
 
-    if config.remote_url is not None:
+    # Handle remote storage plugins (new way)
+    if config.remote_storage_plugins and "RemoteBackend" not in _skip:
+        for plugin_name in config.remote_storage_plugins:
+            assert local_cpu_backend is not None, (
+                "Remote backend requires local CPU backend as a buffer."
+                "Please turn on local cpu backend with max_local_cpu_size > 0"
+            )
+            try:
+                remote_backend = RemoteBackend(
+                    config,
+                    metadata,
+                    loop,
+                    local_cpu_backend,
+                    dst_device,
+                    plugin_name=plugin_name,
+                )
+                backend_name = "RemoteBackend-%s" % plugin_name
+                storage_backends[backend_name] = remote_backend
+                logger.info(
+                    "Created remote backend for plugin: %s",
+                    plugin_name,
+                )
+            except Exception as e:
+                logger.error(
+                    "Failed to create remote backend for plugin %s: %s",
+                    plugin_name,
+                    e,
+                )
+
+    # Handle legacy remote_url (deprecated but still supported)
+    if config.remote_url is not None and "RemoteBackend" not in _skip:
+        # Log deprecation warning
+        logger.warning(
+            "remote_url is deprecated and will be removed in a future release. "
+            "Please use remote_storage_plugins instead."
+        )
         remote_backend = RemoteBackend(
             config,
             metadata,

@@ -14,12 +14,12 @@
 # limitations under the License.
 #
 
-FROM quay.io/ascend/vllm-ascend:v0.18.0rc1-openeuler
+FROM quay.io/ascend/vllm-ascend:v0.18.0-openeuler
 
 ARG PIP_INDEX_URL="https://mirrors.aliyun.com/pypi/simple"
 ARG PIP_NO_CACHE_DIR=1
-ARG SOC_VERSION=Ascend910B3
 
+ENV SOC_VERSION=Ascend910B3
 ENV LMCACHE_TRACK_USAGE=false
 
 WORKDIR /workspace
@@ -27,12 +27,10 @@ WORKDIR /workspace
 COPY . /workspace/LMCache-Ascend/
 
 # Install LMCache && LMCache-Ascend
-RUN NO_CUDA_EXT=1 pip install lmcache==0.4.2 && \
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.3 && \
     cd /workspace/LMCache-Ascend && \
     export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/`uname -i`-openEuler-linux:$CPLUS_INCLUDE_PATH && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     pip install -v --no-build-isolation -e .
 
 CMD ["/bin/bash"]
-
-
