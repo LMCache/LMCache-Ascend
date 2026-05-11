@@ -29,7 +29,7 @@ void pac_prepare_enc_metadata(const at::Tensor &input_sym,
               "Number of channels exceeds that supported be encode, contact "
               "LMCache Ascend about changing this limitation");
   TORCH_CHECK(nbins <= 32,
-              "Number of bins exceeds that supported be encode, contact."
+              "Number of bins exceeds that supported be encode, contact "
               "LMCache Ascend about changing this limitation");
   TORCH_CHECK(
       nchannels % 32 == 0,
@@ -37,7 +37,7 @@ void pac_prepare_enc_metadata(const at::Tensor &input_sym,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(input_sym));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto input_data_ptr = static_cast<uint8_t *>(input_sym.data_ptr());
@@ -81,7 +81,7 @@ void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
               "chunking the input."
               "Contact LMCache Ascend about changing this limitation");
   TORCH_CHECK(nbins <= 32,
-              "Number of bins exceeds that supported be encode, contact."
+              "Number of bins exceeds that supported be encode, contact "
               "LMCache Ascend about changing this limitation");
   TORCH_CHECK(
       nchannels % 32 == 0,
@@ -89,7 +89,7 @@ void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(input_sym));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto input_data_ptr = static_cast<uint8_t *>(input_sym.data_ptr());
@@ -97,7 +97,7 @@ void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
   auto output_lengths_data_ptr =
       static_cast<uint8_t *>(output_lengths.data_ptr());
 
-  auto workGM = torch::zeros({40 * 32}, input_sym.options().dtype(torch::kI32));
+  auto workGM = torch::zeros({40 * 32}, input_sym.options().dtype(torch::kI8));
   auto workGM_ptr = static_cast<uint8_t *>(workGM.data_ptr());
 
   const char *socName = aclrtGetSocName();
@@ -135,10 +135,10 @@ void pac_decode(const at::Tensor &meta_data, const at::Tensor &bytestreams,
               "Output tensor should be on the NPU");
   TORCH_CHECK(ntokens <= 256,
               "Number of tokens exceeds that supported be decode, handle by "
-              "chunking the input."
+              "chunking the input. "
               "Contact LMCache Ascend about changing this limitation");
   TORCH_CHECK(nbins <= 32,
-              "Number of bins exceeds that supported be decode, contact."
+              "Number of bins exceeds that supported be decode, contact "
               "LMCache Ascend about changing this limitation");
   TORCH_CHECK(
       nchannels % 32 == 0,
@@ -146,7 +146,7 @@ void pac_decode(const at::Tensor &meta_data, const at::Tensor &bytestreams,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(bytestreams));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto bytestreams_data_ptr = static_cast<uint8_t *>(bytestreams.data_ptr());

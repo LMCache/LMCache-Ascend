@@ -310,6 +310,7 @@ def _patch_remote_backend():
     # Third Party
     from lmcache.utils import CacheEngineKey
     from lmcache.v1.memory_management import MemoryObj
+    from lmcache.v1.storage_backend.naive_serde import CacheGenDeserializer
     from lmcache.v1.storage_backend.remote_backend import RemoteBackend
 
     # The core remote backend implementation deserializes an NPU resident tensor that
@@ -326,15 +327,19 @@ def _patch_remote_backend():
     ) -> List[Optional[MemoryObj]]:
         source_bufs = old_batched_get_blocking(self, keys)
 
-        allocator = self.get_allocator_backend()
-        target_bufs = []
-        for source_buf in source_bufs:
-            shape = source_buf.tensor.shape
-            dtype = source_buf.tensor.dtype
+        if isinstance(self.deserializer, CacheGenDeserializer):
+            allocator = self.get_allocator_backend()
 
-            target_buf = allocator.allocate(shape, dtype)
-            target_buf.tensor.copy_(source_buf.tensor, non_blocking=True)
-            target_bufs.append(target_buf)
+            target_bufs = []
+            for source_buf in source_bufs:
+                shape = source_buf.tensor.shape
+                dtype = source_buf.tensor.dtype
+
+                target_buf = allocator.allocate(shape, dtype)
+                target_buf.tensor.copy_(source_buf.tensor, non_blocking=True)
+                target_bufs.append(target_buf)
+        else:
+            target_bufs = source_bufs
 
         return target_bufs
 
