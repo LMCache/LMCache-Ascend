@@ -279,11 +279,15 @@ class CustomAscendCmakeBuildExt(build_ext):
         _cxx_compiler = os.getenv("CXX")
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
+        hcomm_src_path = os.path.join(ROOT_DIR, "third_party", "hcomm")
+        if not os.path.exists(hcomm_src_path):
+            raise RuntimeError(
+                f"HCCL source path not found at {hcomm_src_path}. "
+                "Please ensure the hcomm submodule is initialized and updated."
+            )
 
-        hcomm_src_path = os.environ.get("HCOMM_SRC_PATH", "")
-        if hcomm_src_path:
-            logger.info(f"CANN {cann_version}: building HCCL agent (hcomm headers)")
         if self._cann_version_8_5:
+            logger.info(f"CANN {cann_version}: building HCCL agent (hcomm headers)")
             logger.info(f"CANN {cann_version}: building HIXL transfer channel")
             logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
 
@@ -342,8 +346,6 @@ class CustomAscendCmakeBuildExt(build_ext):
             cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
             torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
             cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
-
-        if hcomm_src_path:
             cmake_cmd += [f"  -DHCOMM_SRC_PATH={hcomm_src_path}"]
 
         if self._cann_version_8_5:
@@ -374,9 +376,8 @@ class CustomAscendCmakeBuildExt(build_ext):
 
         # Expected file patterns (using glob patterns for flexibility)
         expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
-        if hcomm_src_path:
-            expected_patterns.append("hccl_npu_comms*.so")
         if self._cann_version_8_5:
+            expected_patterns.append("hccl_npu_comms*.so")
             expected_patterns.append("hixl_npu_comms*.so")
             expected_patterns.append("hcomm_onesided*.so")
 
