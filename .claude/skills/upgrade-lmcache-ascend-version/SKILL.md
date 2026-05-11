@@ -364,7 +364,7 @@ Use the `Edit` tool with `replace_all: true` on each file for the `pip install l
 ### 7c. Update README compatibility matrix
 
 Read `README.md`. The compatibility table has columns: LMCache-Ascend version,
-Upstream LMCache, vLLM/SGLang version, CANN version. Update:
+Upstream LMCache, vLLM/SGLang version. Update:
 - The row for the current branch (`main`) to show the new upstream LMCache version
 - If adding a new verified row, mirror the format of existing rows
 
@@ -381,16 +381,16 @@ version also went from 0.4.2 to 0.4.3).
 
 For each row in the compatibility matrix (SGLang and MindSpore sections),
 update only the **first two columns** (LMCache-Ascend version and Upstream
-LMCache) from the old version to the new version. Leave all other columns
-(vLLM/SGLang version, PyTorch/Torch-NPU/MindSpore, Status) **unchanged**.
+LMCache) from the old version to the new version. Leave the vLLM/SGLang version
+column **unchanged**.
 
 Example — before:
 ```
-| **v0.4.2** | **v0.4.2** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
+| **v0.4.2** | **v0.4.2** | **0.5.8** |
 ```
 After (only first two columns changed):
 ```
-| **v0.4.3** | **v0.4.3** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
+| **v0.4.3** | **v0.4.3** | **0.5.8** |
 ```
 
 #### Step 2 — Update README Installation Sections

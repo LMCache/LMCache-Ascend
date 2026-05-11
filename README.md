@@ -45,22 +45,22 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 Please ensure your environment matches the versions below.
 
 #### For PyTorch / vLLM
-| LMCache-Ascend | LMCache | vLLM Version | PyTorch / Torch-NPU | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.4** | **>=v0.14.0** | **>=2.7.1** | 🚧 **Experimental** |
-| **v0.4.3** | **v0.4.3** | **>=v0.14.0** | **>=2.7.1** | ✅ **Verified (Recommended)** |
+| LMCache-Ascend | LMCache | vLLM Version |
+| :--- | :--- | :--- |
+| **main** | **v0.4.4** | **>=v0.14.0** |
+| **v0.4.3** | **v0.4.3** | **>=v0.14.0** |
 
 #### For PyTorch / SGLang
-| LMCache-Ascend | LMCache | SGLang Version | PyTorch / Torch-NPU | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.4** | **0.5.8** | **2.8.0.post2.dev20251113** | 🚧 **Experimental** |
-| **v0.4.3** | **v0.4.3** | **0.5.8** | **2.8.0.post2.dev20251113** | ✅ **Verified (Recommended)** |
+| LMCache-Ascend | LMCache | SGLang Version |
+| :--- | :--- | :--- |
+| **main** | **v0.4.4** | **0.5.8** |
+| **v0.4.3** | **v0.4.3** | **0.5.8** |
 
-#### for MindSpore
-| LMCache-Ascend | LMCache | vLLM Version | MindSpore | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **main** | **v0.4.4** | **v0.11.0** | **2.7.1.post1** | 🚧 **Experimental** |
-| **v0.4.3** | **v0.4.3** | **v0.11.0** | **2.7.1.post1** | ✅ **Verified (Recommended)** |
+#### For MindSpore
+| LMCache-Ascend | LMCache | vLLM Version |
+| :--- | :--- | :--- |
+| **main** | **v0.4.4** | **v0.11.0** |
+| **v0.4.3** | **v0.4.3** | **v0.11.0** |
 
 > **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
 
