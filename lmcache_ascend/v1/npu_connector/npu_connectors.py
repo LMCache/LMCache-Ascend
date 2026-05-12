@@ -1260,8 +1260,9 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
+            mem_fmt = MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, mem_fmt
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
@@ -1395,8 +1396,9 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
+            mem_fmt = MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, mem_fmt
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
@@ -1564,7 +1566,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
                 "GPU buffer allocator should be initialized"
             )
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"
@@ -1679,7 +1681,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
                 "GPU buffer allocator should be initialized"
             )
             tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+                buffer_shape, self.dtype, MemoryFormat.KV_MLA_FMT if self.use_mla else MemoryFormat.KV_T2D
             )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate GPU buffer in GPUConnector"

@@ -192,6 +192,37 @@ def _patch_config():
         "Set 0 for an unbounded queue; values > 0 enable bounded backpressure.",
     }
 
+    # v0.4.4: New config fields from upstream
+    lmcache.v1.config._CONFIG_DEFINITIONS["local_disk_path_sharding"] = {
+        "type": str,
+        "default": "by_gpu",
+        "env_converter": str,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["pd_skip_proxy_notification"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["gds_buffer_size"] = {
+        "type": Optional[int],
+        "default": None,
+        "env_converter": int,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["use_gds"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+    }
+
+    lmcache.v1.config._CONFIG_DEFINITIONS["gds_backend"] = {
+        "type": str,
+        "default": "cufile",
+        "env_converter": str,
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
