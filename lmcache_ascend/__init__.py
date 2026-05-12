@@ -192,6 +192,27 @@ def _patch_config():
         "Set 0 for an unbounded queue; values > 0 enable bounded backpressure.",
     }
 
+    # Add enable_chunk_hashes_return config
+    lmcache.v1.config._CONFIG_DEFINITIONS["enable_chunk_hashes_return"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Whether to track chunk hashes during lookup and "
+        "include them in request_finished return params. "
+        "If True, chunk_hashes will be available in return_params. "
+        "Default is False (disabled, no impact on original functionality).",
+    }
+
+    # Add lookup_hashes_cache_size config
+    lmcache.v1.config._CONFIG_DEFINITIONS["lookup_hashes_cache_size"] = {
+        "type": int,
+        "default": 0,
+        "env_converter": int,
+        "description": "Maximum number of cached chunk hash entries. "
+        "When exceeded, the oldest entry is evicted to prevent unbounded "
+        "memory growth. Default is 0 (unlimited).",
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
@@ -530,6 +551,49 @@ def _patch_rpc_utils():
         _factory_mod.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
 
+def _patch_storage_manager():
+    # Prefetch all done callback: write loaded data back to hot cache
+    # so subsequent requests hit DDR instead of SSD/P2P.
+    # Third Party
+    from lmcache.v1.storage_backend.storage_manager import StorageManager
+
+    # First Party
+    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        patched_prefetch_all_done_callback,
+    )
+
+    StorageManager.prefetch_all_done_callback = patched_prefetch_all_done_callback
+
+
+def _patch_lookup_client_factory():
+    # Replace LMCacheAsyncLookupClient with Ascend subclass that caches
+    # chunk_hashes during lookup and exposes them via get_cached_hashes().
+    # Third Party
+    import lmcache.v1.lookup_client.lmcache_async_lookup_client as lmc_async
+
+    # First Party
+    from lmcache_ascend.v1.lookup_client.lmcache_async_lookup_client import (
+        LMCacheAsyncLookupClient,
+    )
+
+    lmc_async.LMCacheAsyncLookupClient = LMCacheAsyncLookupClient
+
+
+def _patch_api_server():
+    # Register /memory/prefetch and /memory/evict REST endpoints.
+    # Third Party
+    from lmcache.v1.internal_api_server.api_server import InternalAPIServer
+
+    # First Party
+    from lmcache_ascend.v1.internal_api_server import (
+        InternalAPIServer__init__,
+        _capture_original_init,
+    )
+
+    _capture_original_init(InternalAPIServer.__init__)
+    InternalAPIServer.__init__ = InternalAPIServer__init__
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
@@ -572,9 +636,13 @@ if not LMCACHE_ASCEND_PATCHED:
         if _build_info.__framework_name__ == "pytorch":
             _patch_sys_detection()
 
+        _patch_lookup_client_factory()
         _patch_vllm_v1_adapter()
 
         _patch_cache_engine()
+
+        _patch_storage_manager()
+        _patch_api_server()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
