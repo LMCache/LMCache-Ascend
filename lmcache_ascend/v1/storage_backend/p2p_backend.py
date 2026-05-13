@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from collections import OrderedDict
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 import asyncio
 import threading
+import time
+import uuid
 
 # Third Party
 from lmcache.logging import init_logger
@@ -10,6 +13,12 @@ from lmcache.observability import LMCStatsMonitor
 from lmcache.utils import (
     CacheEngineKey,
     start_loop_in_thread_with_exceptions,
+)
+from lmcache.v1.cache_controller.message import (
+    BatchedP2PLookupMsg,
+    BatchedP2PLookupRetMsg,
+    ErrorMsg,
+    Msg,
 )
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import (
@@ -292,6 +301,23 @@ class AscendP2PBackend(P2PBackend):
         # Per-peer done sockets (client side) keyed by target_peer_url.
         # Each value is (asyncio.Lock, zmq.asyncio.Socket).
         self.done_peer_sockets: dict[str, tuple[asyncio.Lock, zmq.asyncio.Socket]] = {}
+
+        # Sync control-plane path (scheduler lookup daemon thread)
+        # Use a dedicated sync ZMQ context/socket so it won't interfere with
+        # async sockets on event loops.
+        self._sync_ctx: zmq.Context = zmq.Context()
+        self._sync_dealer: Optional[zmq.Socket] = None
+        self._sync_lock = threading.Lock()
+        self._sync_lookup_cache_ttl: float = config.p2p_sync_lookup_cache_ttl
+        self._sync_lookup_cache_max_entries: int = (
+            config.p2p_sync_lookup_cache_max_entries
+        )
+        # key: tuple(key.to_string() for key in keys)
+        # val: (peer_init_url, location, num_hit_chunks, expire_at_monotonic)
+        self._sync_lookup_cache: OrderedDict[
+            tuple[str, ...],
+            tuple[str, str, int, float],
+        ] = OrderedDict()
 
         asyncio.run_coroutine_threadsafe(
             self._run_peer_request_handler_with_recovery(), self.loop
@@ -607,6 +633,138 @@ class AscendP2PBackend(P2PBackend):
             mem_objs.append(mem_obj)
             str_keys.append(key.to_string())
         return mem_objs, str_keys
+
+    def _make_sync_lookup_cache_key(
+        self,
+        keys: list[CacheEngineKey],
+    ) -> tuple[str, ...]:
+        return tuple(key.to_string() for key in keys)
+
+    def _reset_sync_dealer_locked(self) -> None:
+        if self._sync_dealer is not None:
+            try:
+                self._sync_dealer.close(linger=0)
+            except Exception as e:
+                logger.warning("Failed to close sync dealer socket: %s", e)
+            self._sync_dealer = None
+
+    def _prune_sync_lookup_cache_locked(self, now: float) -> None:
+        expired_keys = [
+            k
+            for k, (_, _, _, exp_at) in self._sync_lookup_cache.items()
+            if exp_at <= now
+        ]
+        for k in expired_keys:
+            self._sync_lookup_cache.pop(k, None)
+
+        while len(self._sync_lookup_cache) > self._sync_lookup_cache_max_entries:
+            self._sync_lookup_cache.popitem(last=False)
+
+    def _get_or_create_sync_dealer_locked(self) -> Optional[zmq.Socket]:
+        if self._sync_dealer is not None:
+            return self._sync_dealer
+
+        controller_reply_url = self.config.controller_reply_url
+        if controller_reply_url is None:
+            logger.error(
+                "controller_reply_url is not configured, "
+                "sync P2P batched lookup cannot query controller"
+            )
+            return None
+
+        sock = self._sync_ctx.socket(zmq.DEALER)
+        sock.setsockopt(zmq.RCVTIMEO, self.socket_recv_timeout_ms)
+        sock.setsockopt(zmq.SNDTIMEO, self.socket_send_timeout_ms)
+        sock.connect(f"tcp://{controller_reply_url}")
+        self._sync_dealer = sock
+        return self._sync_dealer
+
+    def _sync_query_controller(
+        self,
+        keys: list[CacheEngineKey],
+    ) -> tuple[str, str, str, int]:
+        """Query controller synchronously for prefix-hit layout info.
+
+        Returns: (lookup_id, peer_init_url, location, num_hit_chunks)
+        """
+        lookup_id = str(uuid.uuid4())
+        if not keys:
+            return lookup_id, "", "", 0
+
+        cache_key = self._make_sync_lookup_cache_key(keys)
+
+        with self._sync_lock:
+            now = time.monotonic()
+            cached = self._sync_lookup_cache.get(cache_key)
+            if cached is not None:
+                peer_init_url, location, num_hit_chunks, exp_at = cached
+                if exp_at > now:
+                    self._sync_lookup_cache.move_to_end(cache_key)
+                    return lookup_id, peer_init_url, location, num_hit_chunks
+                self._sync_lookup_cache.pop(cache_key, None)
+
+            self._prune_sync_lookup_cache_locked(now)
+            sock = self._get_or_create_sync_dealer_locked()
+            if sock is None:
+                return lookup_id, "", "", 0
+
+            msg = BatchedP2PLookupMsg(
+                instance_id=self.lmcache_instance_id,
+                worker_id=self.tp_rank,
+                hashes=[key.chunk_hash for key in keys],
+            )
+
+            try:
+                sock.send_multipart([b"", msgspec.msgpack.encode(msg)])
+                frames = sock.recv_multipart()
+                if not frames:
+                    return lookup_id, "", "", 0
+
+                ret_msg = msgspec.msgpack.decode(frames[-1], type=Msg)
+                if isinstance(ret_msg, ErrorMsg):
+                    logger.error(
+                        "Controller returned error for sync P2P lookup: %s",
+                        ret_msg.error,
+                    )
+                    return lookup_id, "", "", 0
+
+                if not isinstance(ret_msg, BatchedP2PLookupRetMsg):
+                    logger.error(
+                        "Unexpected controller reply type in sync P2P lookup: %s",
+                        type(ret_msg),
+                    )
+                    return lookup_id, "", "", 0
+
+                if not ret_msg.layout_info:
+                    return lookup_id, "", "", 0
+
+                _, location, num_hit_chunks, peer_init_url = ret_msg.layout_info[0]
+                self._sync_lookup_cache[cache_key] = (
+                    peer_init_url,
+                    location,
+                    num_hit_chunks,
+                    now + self._sync_lookup_cache_ttl,
+                )
+                self._sync_lookup_cache.move_to_end(cache_key)
+                self._prune_sync_lookup_cache_locked(now)
+                return lookup_id, peer_init_url, location, num_hit_chunks
+            except zmq.Again:
+                logger.warning("Sync P2P lookup to controller timed out")
+                return lookup_id, "", "", 0
+            except zmq.ZMQError as e:
+                logger.warning(
+                    "Sync P2P lookup hit ZMQ error, resetting sync dealer: %s",
+                    e,
+                )
+                self._reset_sync_dealer_locked()
+                return lookup_id, "", "", 0
+            except Exception as e:
+                logger.error(
+                    "Sync P2P lookup failed with unexpected error: %s",
+                    e,
+                    exc_info=True,
+                )
+                return lookup_id, "", "", 0
 
     async def _send_lookup_request_with_retry(
         self,
@@ -977,8 +1135,73 @@ class AscendP2PBackend(P2PBackend):
     ) -> None:
         raise NotImplementedError("Batched put is not implemented for AscendP2PBackend")
 
+    def batched_contains(
+        self,
+        keys: List[CacheEngineKey],
+        pin: bool = False,
+    ) -> int:
+        _, _, _, num_hit_chunks = self._sync_query_controller(keys)
+        return num_hit_chunks
+
+    def batched_get_blocking(
+        self,
+        keys: List[CacheEngineKey],
+    ) -> List[Optional[MemoryObj]]:
+        lookup_id, target_peer_url, location, num_hit_chunks = (
+            self._sync_query_controller(keys)
+        )
+        if num_hit_chunks <= 0 or not target_peer_url:
+            return [None] * len(keys)
+
+        hit_keys = keys[:num_hit_chunks]
+        cum_chunk_lengths = [i * self.chunk_size for i in range(num_hit_chunks + 1)]
+        transfer_spec = {"cum_chunk_lengths": cum_chunk_lengths}
+
+        try:
+            ensure_future = asyncio.run_coroutine_threadsafe(
+                self._ensure_peer_connection(target_peer_url), self.loop
+            )
+            ensure_future.result(timeout=5.0)
+        except Exception as e:
+            logger.error(
+                "Sync P2P batched_get_blocking failed to ensure peer connection "
+                "for lookup_id %s: %s",
+                lookup_id,
+                e,
+            )
+            return [None] * len(keys)
+
+        # batched_get_non_blocking consumes this mapping via lookup_id
+        self.lookup_id_to_peer_mapping[lookup_id] = (target_peer_url, location)
+
+        try:
+            get_future = asyncio.run_coroutine_threadsafe(
+                self.batched_get_non_blocking(lookup_id, hit_keys, transfer_spec),
+                self.loop,
+            )
+            hit_mem_objs = get_future.result(timeout=5.0)
+        except Exception as e:
+            self.lookup_id_to_peer_mapping.pop(lookup_id, None)
+            logger.error(
+                "Sync P2P batched_get_blocking failed for lookup_id %s: %s",
+                lookup_id,
+                e,
+            )
+            return [None] * len(keys)
+
+        # Keep the result aligned with input keys by padding misses with None.
+        return hit_mem_objs + [None] * (len(keys) - len(hit_mem_objs))
+
     def close(self) -> None:
         """Close the Ascend P2P backend, including dedicated done sockets."""
+        with self._sync_lock:
+            self._sync_lookup_cache.clear()
+            self._reset_sync_dealer_locked()
+            try:
+                self._sync_ctx.term()
+            except Exception as e:
+                logger.warning("Failed to terminate sync ZMQ context: %s", e)
+
         for peer_url, (_, sock) in self.done_peer_sockets.items():
             try:
                 sock.close(linger=0)
