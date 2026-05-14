@@ -247,6 +247,10 @@ class HcclChannel(BaseMultiBufferChannel):
             "connect",
         )
 
+        # The async transfer-channel loop may run on a different thread from the
+        # vLLM worker thread. NPU current device is thread-local.
+        torch.npu.set_device(self.handle_device)
+
         hccl_init_req = HcclInitRequest(
             local_id=local_id,
             client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),

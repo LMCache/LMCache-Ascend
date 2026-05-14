@@ -268,6 +268,7 @@ class AscendP2PBackend(P2PBackend):
 
         self.chunk_size = config.chunk_size
 
+        # Keep transfer-channel ZMQ I/O on the Ascend P2P backend loop.
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
@@ -279,7 +280,7 @@ class AscendP2PBackend(P2PBackend):
             tp_rank=self.tp_rank,
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,
-            event_loop=loop,
+            event_loop=self.loop,
         )
 
         self.running = asyncio.Event()

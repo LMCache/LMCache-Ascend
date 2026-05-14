@@ -453,6 +453,16 @@ def _patch_lookup_client():
     )
 
 
+def _patch_cache_controller_worker():
+    # Third Party
+    import lmcache.v1.cache_controller.worker as lmc_worker
+
+    # First Party
+    from lmcache_ascend.v1.cache_controller.worker import async_put_and_wait_msg
+
+    lmc_worker.LMCacheWorker.async_put_and_wait_msg = async_put_and_wait_msg
+
+
 def _patch_sys_detection():
     # Patching this as on some Ascend machines
     # as the kernel can set the NUMA node to -1.
@@ -562,6 +572,7 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_cacheblend()
         _patch_multi_process()
         _patch_lookup_client()
+        _patch_cache_controller_worker()
         _patch_rpc_utils()
 
     _patch_kv_layer_group()
