@@ -74,6 +74,11 @@ def _run_coroutine(loop: asyncio.AbstractEventLoop, coro):
     return future.result(timeout=10)
 
 
+async def _run_on_p2p_loop_inline(coro):
+    """Unit-test stand-in for AscendP2PBackend._run_on_p2p_loop."""
+    return await coro
+
+
 def _make_p2p_backend_stub(
     pull_mode: bool = False,
     delay_pull: bool = False,
@@ -124,6 +129,7 @@ def _make_p2p_backend_stub(
     backend.full_size_shapes = kv_shapes
     backend.dtypes = kv_dtypes
     backend.fmt = fmt
+    backend._run_on_p2p_loop = AsyncMock(side_effect=_run_on_p2p_loop_inline)
 
     backend._allocate_memory_for_keys = lambda keys, cum_chunk_lengths: (
         AscendP2PBackend._allocate_memory_for_keys(backend, keys, cum_chunk_lengths)
@@ -557,6 +563,7 @@ class TestAscendP2PBackendUnit:
         backend.memory_allocator = MagicMock()
         backend.lookup_id_to_peer_mapping = {"lu_delay": ("target_peer_url", "npu")}
         backend.transfer_channel = MagicMock()
+        backend._run_on_p2p_loop = AsyncMock(side_effect=_run_on_p2p_loop_inline)
 
         ret_msg = AscendBatchedLookupAndGetRetMsg(
             num_hit_chunks=2,
