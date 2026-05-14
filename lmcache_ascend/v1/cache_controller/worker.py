@@ -65,6 +65,18 @@ async def _async_put_and_wait_msg_on_worker_loop(
             serialized_ret_msg = frames[-1]
             ret_msg = msgspec.msgpack.decode(serialized_ret_msg, type=Msg)
             return ret_msg
+        except asyncio.CancelledError:
+            # Outer ``asyncio.wait_for`` / task cancellation can interrupt between
+            # send and recv, leaving the DEALER socket in an inconsistent state.
+            # Recreate immediately so the next request does not fail first.
+            logger.warning(
+                "LMCacheWorker controller request cancelled, recreating socket: "
+                "worker_id=%s msg_type=%s",
+                getattr(worker, "worker_id", None),
+                msg_type,
+            )
+            worker._recreate_req_socket()
+            raise
         except (asyncio.TimeoutError, zmq.Again) as e:
             logger.error(
                 "LMCacheWorker controller request timed out, recreating socket: "
