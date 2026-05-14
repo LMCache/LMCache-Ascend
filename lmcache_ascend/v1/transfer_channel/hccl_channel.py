@@ -97,6 +97,7 @@ class HcclChannel(BaseMultiBufferChannel):
         self.conn_handles_dict: Dict[str, object] = {}
         self.remote_index_addr_dict: Dict[str, RemotePeerBufferList] = {}
         self._peer_ready_events: Dict[str, threading.Event] = {}
+        self._peer_handshake_locks: Dict[str, asyncio.Lock] = {}
 
         super().__init__(async_mode=async_mode, buffers=buffers, **kwargs)
 
@@ -109,6 +110,13 @@ class HcclChannel(BaseMultiBufferChannel):
 
     def _make_error_response(self) -> HcclErrorResponse:
         return HcclErrorResponse(ok=False)
+
+    def _get_peer_handshake_lock(self, peer_id: str) -> asyncio.Lock:
+        lock = self._peer_handshake_locks.get(peer_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._peer_handshake_locks[peer_id] = lock
+        return lock
 
     def lazy_init_peer_connection(
         self,
@@ -217,6 +225,21 @@ class HcclChannel(BaseMultiBufferChannel):
         peer_init_url: str,
         init_side_msg: Optional[InitSideMsgBase] = None,
     ) -> Optional[InitSideRetMsgBase]:
+        async with self._get_peer_handshake_lock(peer_id):
+            return await self._async_lazy_init_peer_connection_locked(
+                local_id,
+                peer_id,
+                peer_init_url,
+                init_side_msg,
+            )
+
+    async def _async_lazy_init_peer_connection_locked(
+        self,
+        local_id: str,
+        peer_id: str,
+        peer_init_url: str,
+        init_side_msg: Optional[InitSideMsgBase] = None,
+    ) -> Optional[InitSideRetMsgBase]:
         with self._state_lock:
             already_connected = peer_id in self.conn_handles_dict
         if already_connected:
@@ -246,6 +269,10 @@ class HcclChannel(BaseMultiBufferChannel):
             zmq.REQ,
             "connect",
         )
+
+        # The async transfer-channel loop may run on a different thread from the
+        # vLLM worker thread. NPU current device is thread-local.
+        torch.npu.set_device(self.handle_device)
 
         hccl_init_req = HcclInitRequest(
             local_id=local_id,
