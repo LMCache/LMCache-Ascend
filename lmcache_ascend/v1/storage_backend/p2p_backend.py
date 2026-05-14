@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Coroutine, List, Optional, Sequence, Union
 import asyncio
 import threading
 
@@ -303,6 +303,45 @@ class AscendP2PBackend(P2PBackend):
         asyncio.run_coroutine_threadsafe(
             self._sweep_expired_pending_pull_resources(), self.loop
         )
+
+    def _is_on_p2p_loop(self) -> bool:
+        try:
+            return asyncio.get_running_loop() is self.loop
+        except RuntimeError:
+            return False
+
+    async def _run_on_p2p_loop(self, coro: Coroutine[Any, Any, Any]) -> Any:
+        if self._is_on_p2p_loop():
+            return await coro
+
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return await asyncio.wrap_future(future)
+
+    async def _wait_for_async_context(self) -> None:
+        while self.running.is_set() and self.async_context is None:
+            await asyncio.sleep(0.01)
+        if self.async_context is None:
+            raise RuntimeError("P2P async context is not initialized")
+
+    async def _ensure_peer_connection(
+        self,
+        target_peer_init_url: str,
+        force_update: bool = False,
+    ) -> None:
+        await self._run_on_p2p_loop(
+            self._ensure_peer_connection_on_loop(
+                target_peer_init_url,
+                force_update,
+            )
+        )
+
+    async def _ensure_peer_connection_on_loop(
+        self,
+        target_peer_init_url: str,
+        force_update: bool = False,
+    ) -> None:
+        await self._wait_for_async_context()
+        await super()._ensure_peer_connection(target_peer_init_url, force_update)
 
     async def _handle_peer_requests(self):
         """
@@ -722,13 +761,9 @@ class AscendP2PBackend(P2PBackend):
                 f"Unexpected response to AscendQueryDonePortMsg: {type(ret_msg)}"
             )
         done_url = ret_msg.done_url
-        logger.info(
-            "Discovered done port for peer %s: %s",
-            target_peer_url,
-            done_url,
-        )
 
-        ctx = get_zmq_context()
+        assert self.async_context is not None
+        ctx = self.async_context
         done_socket = get_zmq_socket_with_timeout(
             ctx,
             done_url,
@@ -748,6 +783,15 @@ class AscendP2PBackend(P2PBackend):
         await asyncio.sleep(0.05)
 
     async def _send_done_signal(
+        self,
+        lookup_id: str,
+        target_peer_url: str,
+    ) -> None:
+        await self._run_on_p2p_loop(
+            self._send_done_signal_on_loop(lookup_id, target_peer_url)
+        )
+
+    async def _send_done_signal_on_loop(
         self,
         lookup_id: str,
         target_peer_url: str,
@@ -892,8 +936,8 @@ class AscendP2PBackend(P2PBackend):
             pull_mode=self.pull_mode,
         )
 
-        ret_msg = await self._send_lookup_request_with_retry(
-            lookup_id, target_peer_url, msg
+        ret_msg = await self._run_on_p2p_loop(
+            self._send_lookup_request_with_retry(lookup_id, target_peer_url, msg)
         )
         if ret_msg is None or isinstance(ret_msg, P2PErrorMsg):
             if isinstance(ret_msg, P2PErrorMsg):
@@ -956,12 +1000,14 @@ class AscendP2PBackend(P2PBackend):
             hit_mem_obj.pin()
 
         if num_hit_chunks > 0 and self.pull_mode:
-            success = await self._handle_pull_mode_transfer(
-                lookup_id,
-                target_peer_url,
-                hit_mem_objs,
-                ret_msg.remote_buffer_uuids,
-                ret_msg.remote_mem_indexes,
+            success = await self._run_on_p2p_loop(
+                self._handle_pull_mode_transfer(
+                    lookup_id,
+                    target_peer_url,
+                    hit_mem_objs,
+                    ret_msg.remote_buffer_uuids,
+                    ret_msg.remote_mem_indexes,
+                )
             )
             if not success:
                 self._cleanup_memory_objects(mem_objs)
