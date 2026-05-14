@@ -289,6 +289,7 @@ class AscendP2PBackend(P2PBackend):
         self.async_peer_socket: Optional[zmq.asyncio.Socket] = None
         self.async_done_socket: Optional[zmq.asyncio.Socket] = None
         self.peer_done_url: Optional[str] = None
+        self._async_context_ready = asyncio.Event()
 
         # Per-peer done sockets (client side) keyed by target_peer_url.
         # Each value is (asyncio.Lock, zmq.asyncio.Socket).
@@ -317,9 +318,15 @@ class AscendP2PBackend(P2PBackend):
         future = asyncio.run_coroutine_threadsafe(coro, self.loop)
         return await asyncio.wrap_future(future)
 
+    def _set_async_context_ready(self) -> None:
+        if self._is_on_p2p_loop():
+            self._async_context_ready.set()
+            return
+        self.loop.call_soon_threadsafe(self._async_context_ready.set)
+
     async def _wait_for_async_context(self) -> None:
-        while self.running.is_set() and self.async_context is None:
-            await asyncio.sleep(0.01)
+        if self.async_context is None and self.running.is_set():
+            await self._async_context_ready.wait()
         if self.async_context is None:
             raise RuntimeError("P2P async context is not initialized")
 
@@ -352,6 +359,7 @@ class AscendP2PBackend(P2PBackend):
             "Starting P2P backend batched get handler at %s", self.peer_lookup_url
         )
         self.async_context = get_zmq_context()
+        self._set_async_context_ready()
         self.async_peer_socket = get_zmq_socket_with_timeout(
             self.async_context,
             self.peer_lookup_url,
@@ -402,7 +410,7 @@ class AscendP2PBackend(P2PBackend):
 
         Binds to an OS-assigned port so there are no port collisions.
         """
-        assert self.async_context is not None
+        await self._wait_for_async_context()
         self.async_done_socket = get_zmq_socket_with_timeout(
             self.async_context,
             f"{self.peer_host}:0",
@@ -430,8 +438,12 @@ class AscendP2PBackend(P2PBackend):
         Waits for the main handler to initialise ``async_context`` first,
         then keeps the done-signal handler alive across unexpected errors.
         """
-        while self.running.is_set() and self.async_context is None:
-            await asyncio.sleep(0.05)
+        try:
+            await self._wait_for_async_context()
+        except RuntimeError:
+            if self.running.is_set():
+                raise
+            return
 
         while self.running.is_set():
             try:
@@ -762,7 +774,7 @@ class AscendP2PBackend(P2PBackend):
             )
         done_url = ret_msg.done_url
 
-        assert self.async_context is not None
+        await self._wait_for_async_context()
         ctx = self.async_context
         done_socket = get_zmq_socket_with_timeout(
             ctx,
@@ -1026,6 +1038,8 @@ class AscendP2PBackend(P2PBackend):
 
     def close(self) -> None:
         """Close the Ascend P2P backend, including dedicated done sockets."""
+        self._set_async_context_ready()
+
         for peer_url, (_, sock) in self.done_peer_sockets.items():
             try:
                 sock.close(linger=0)
