@@ -7,7 +7,8 @@ NPU devices and are gated with ``@pytest.mark.skipif``.
 """
 
 # Standard
-from unittest.mock import AsyncMock, MagicMock
+from concurrent.futures import TimeoutError
+from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import threading
 
@@ -24,6 +25,7 @@ from lmcache.v1.storage_backend.p2p_backend import P2PErrorCode, P2PErrorMsg, Pe
 import msgspec
 import pytest
 import torch
+import zmq
 import zmq.asyncio
 
 # First Party
@@ -36,6 +38,7 @@ from lmcache_ascend.v1.storage_backend.p2p_backend import (
     AscendBatchedLookupAndPutMsg,
     AscendP2PMsg,
 )
+from lmcache_ascend.v1.transfer_context import P2PTransferContext
 
 logger = init_logger(__name__)
 
@@ -66,6 +69,21 @@ def _make_mock_mem_obj(
     mock.ref_count_up = MagicMock()
     mock.unpin = MagicMock()
     return mock
+
+
+def _make_proxy(context: MagicMock, chunk_index: int = 0) -> ProxyMemoryObj:
+    return ProxyMemoryObj(
+        backing_obj=None,
+        transfer_channel=MagicMock(),
+        target_peer_url="target_peer_url",
+        remote_buffer_uuid=f"remote-buffer-{chunk_index}",
+        remote_mem_index=chunk_index,
+        transfer_context=context,
+        chunk_index=chunk_index,
+        shapes=[DEFAULT_SHAPE],
+        dtypes=[DEFAULT_DTYPE],
+        fmt=MemoryFormat.KV_2LTD,
+    )
 
 
 def _run_coroutine(loop: asyncio.AbstractEventLoop, coro):
@@ -548,6 +566,100 @@ class TestAscendP2PBackendUnit:
         assert result[0] is mock_obj1
         assert result[1] is mock_obj2
 
+    def test_batched_get_non_blocking_uses_transfer_spec_target_peer(self, async_loop):
+        """Sync get path can pass target peer directly without shared mapping."""
+        backend = _make_p2p_backend_stub(
+            pull_mode=False, delay_pull=False, use_npu=False
+        )
+        backend.loop = async_loop
+        backend.lookup_id_to_peer_mapping = {}
+
+        mock_obj = _make_mock_mem_obj()
+        backend.local_cpu_backend.allocate = MagicMock(return_value=mock_obj)
+        backend.transfer_channel.get_local_buffer_refs.return_value = (["uuid-1"], [0])
+
+        ret_msg = AscendBatchedLookupAndGetRetMsg(num_hit_chunks=1)
+        backend._send_lookup_request_with_retry = AsyncMock(return_value=ret_msg)
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        transfer_spec = {
+            "cum_chunk_lengths": [0, 256],
+            "target_peer_url": "target_peer_url",
+        }
+        result = _run_coroutine(
+            async_loop,
+            AscendP2PBackend.batched_get_non_blocking(
+                backend, "lu_direct", [_make_key("k1")], transfer_spec
+            ),
+        )
+
+        assert result == [mock_obj]
+        mock_obj.pin.assert_called_once()
+        backend._send_lookup_request_with_retry.assert_awaited_once()
+        assert backend._send_lookup_request_with_retry.await_args.args[1] == (
+            "target_peer_url"
+        )
+
+    def test_batched_get_non_blocking_can_skip_return_pin(self, async_loop):
+        """Sync blocking get relies on refcount ownership, not an extra get pin."""
+        backend = _make_p2p_backend_stub(
+            pull_mode=False, delay_pull=False, use_npu=False
+        )
+        backend.loop = async_loop
+        backend.lookup_id_to_peer_mapping = {}
+
+        mock_obj = _make_mock_mem_obj()
+        backend.local_cpu_backend.allocate = MagicMock(return_value=mock_obj)
+        backend.transfer_channel.get_local_buffer_refs.return_value = (["uuid-1"], [0])
+        backend._send_lookup_request_with_retry = AsyncMock(
+            return_value=AscendBatchedLookupAndGetRetMsg(num_hit_chunks=1)
+        )
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        result = _run_coroutine(
+            async_loop,
+            AscendP2PBackend.batched_get_non_blocking(
+                backend,
+                "lu_no_pin",
+                [_make_key("k1")],
+                {
+                    "cum_chunk_lengths": [0, 256],
+                    "target_peer_url": "target_peer_url",
+                    "pin_returned": False,
+                },
+            ),
+        )
+
+        assert result == [mock_obj]
+        mock_obj.pin.assert_not_called()
+
+    def test_batched_get_non_blocking_missing_mapping_returns_empty(self, async_loop):
+        """Missing async lookup mapping is handled without KeyError."""
+        backend = _make_p2p_backend_stub(
+            pull_mode=False, delay_pull=False, use_npu=False
+        )
+        backend.loop = async_loop
+        backend.lookup_id_to_peer_mapping = {}
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        result = _run_coroutine(
+            async_loop,
+            AscendP2PBackend.batched_get_non_blocking(
+                backend,
+                "lu_missing",
+                [_make_key("k1")],
+                {"cum_chunk_lengths": [0, 256]},
+            ),
+        )
+
+        assert result == []
+
     def test_batched_get_non_blocking_pull_delay(self, async_loop):
         """Delay pull returns ProxyMemoryObj instances."""
         backend = MagicMock()
@@ -589,6 +701,112 @@ class TestAscendP2PBackendUnit:
         for obj in result:
             assert isinstance(obj, ProxyMemoryObj)
             assert obj.is_proxy
+
+    def test_proxy_ref_count_down_decrefs_context_once(self):
+        """Discarded delay-pull proxies decrement their shared context once."""
+        context = MagicMock()
+        proxy = _make_proxy(context)
+
+        proxy.ref_count_down()
+        proxy.ref_count_down()
+
+        context.decref.assert_called_once()
+
+    def test_proxy_mark_consumed_suppresses_later_ref_count_down(self):
+        """Connector-consumed proxies should not later decref during cleanup."""
+        context = MagicMock()
+        proxy = _make_proxy(context)
+
+        proxy.mark_consumed()
+        proxy.ref_count_down()
+
+        context.decref.assert_not_called()
+
+    def test_proxy_shared_context_sends_done_after_all_discards(self):
+        """A shared transfer context sends Done once all proxies are discarded."""
+        # First Party
+        from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
+
+        class TestTransferContext(AscendBaseTransferContext):
+            def __init__(self):
+                super().__init__(num_proxies=2)
+                self.send_done = MagicMock()
+
+            def _send_done(self):
+                self.send_done()
+
+        context = TestTransferContext()
+
+        proxy_0 = _make_proxy(context, chunk_index=0)
+        proxy_1 = _make_proxy(context, chunk_index=1)
+
+        proxy_0.ref_count_down()
+        context.send_done.assert_not_called()
+
+        proxy_1.ref_count_down()
+        context.send_done.assert_called_once()
+
+        proxy_1.ref_count_down()
+        context.send_done.assert_called_once()
+
+    def test_p2p_transfer_context_done_uses_configured_timeout(self):
+        """P2P Done waits for the backend-configured short timeout."""
+        backend = MagicMock()
+        backend.p2p_done_timeout_s = 5.0
+        backend._send_done_signal = AsyncMock()
+        loop = MagicMock()
+        future = MagicMock()
+
+        # First Party
+
+        ctx = P2PTransferContext(
+            p2p_backend=backend,
+            target_peer_url="target_peer_url",
+            lookup_id="lu_done",
+            loop=loop,
+            num_proxies=1,
+        )
+
+        def fake_run_coroutine_threadsafe(coro, target_loop):
+            coro.close()
+            assert target_loop is loop
+            return future
+
+        with patch(
+            "lmcache_ascend.v1.transfer_context.asyncio.run_coroutine_threadsafe",
+            side_effect=fake_run_coroutine_threadsafe,
+        ):
+            ctx.send_done_now()
+
+        future.result.assert_called_once_with(timeout=5.0)
+
+    def test_p2p_transfer_context_done_on_same_loop_schedules_task(self, async_loop):
+        """Done from the P2P loop must not block on run_coroutine_threadsafe."""
+        backend = MagicMock()
+        backend._send_done_signal = AsyncMock()
+
+        # First Party
+
+        ctx = P2PTransferContext(
+            p2p_backend=backend,
+            target_peer_url="target_peer_url",
+            lookup_id="lu_same_loop",
+            loop=async_loop,
+            num_proxies=1,
+        )
+
+        async def invoke_done():
+            with patch(
+                "lmcache_ascend.v1.transfer_context.asyncio.run_coroutine_threadsafe"
+            ) as run_threadsafe:
+                ctx.send_done_now()
+                run_threadsafe.assert_not_called()
+            await asyncio.sleep(0)
+
+        _run_coroutine(async_loop, invoke_done())
+        backend._send_done_signal.assert_awaited_once_with(
+            "lu_same_loop", "target_peer_url"
+        )
 
     def test_batched_get_non_blocking_error_response(self, async_loop):
         """Error response from peer returns empty list."""
@@ -736,3 +954,132 @@ class TestAscendP2PBackendUnit:
 
         assert isinstance(ret, P2PErrorMsg)
         assert ret.error_code == P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
+
+    def test_sync_query_timeout_resets_dealer(self):
+        """Timed-out sync controller lookup resets socket to avoid stale replies."""
+        backend = MagicMock()
+        backend._sync_closed = False
+        backend._sync_dealer = MagicMock()
+        backend._sync_lock = threading.Lock()
+        backend._sync_lookup_cache = {}
+        backend._sync_lookup_cache_ttl = 5.0
+        backend._sync_lookup_cache_max_entries = 16
+        backend._make_sync_lookup_cache_key.return_value = ("k1",)
+        backend._prune_sync_lookup_cache_locked = MagicMock()
+        backend._reset_sync_dealer_locked = MagicMock()
+        backend.lmcache_instance_id = "instance"
+        backend.tp_rank = 0
+
+        sock = MagicMock()
+        sock.recv_multipart.side_effect = zmq.Again()
+        backend._get_or_create_sync_dealer_locked.return_value = sock
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        lookup_id, peer_url, location, hits = AscendP2PBackend._sync_query_controller(
+            backend, [_make_key("k1")]
+        )
+
+        assert lookup_id
+        assert peer_url == ""
+        assert location == ""
+        assert hits == 0
+        backend._reset_sync_dealer_locked.assert_called_once()
+
+    def test_sync_dealer_not_created_after_close(self):
+        """Closed sync path returns no socket instead of touching terminated context."""
+        backend = MagicMock()
+        backend._sync_closed = True
+        backend._sync_dealer = None
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        assert AscendP2PBackend._get_or_create_sync_dealer_locked(backend) is None
+        backend._sync_ctx.socket.assert_not_called()
+
+    def test_blocking_helper_rejects_p2p_loop_thread(self):
+        """Blocking sync bridge must not be used from the P2P event loop."""
+        backend = MagicMock()
+        backend._is_on_p2p_loop.return_value = True
+        backend._sync_get_timeout_s = 1.0
+
+        async def noop():
+            return None
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        with pytest.raises(RuntimeError, match="P2P event loop"):
+            AscendP2PBackend._run_coroutine_threadsafe_blocking(
+                backend,
+                noop(),
+                "lu_loop",
+                "noop",
+            )
+
+    def test_blocking_helper_timeout_cancels_future_and_releases_late_result(self):
+        """Timeout registers cleanup for any late returned MemoryObj list."""
+        backend = MagicMock()
+        backend._is_on_p2p_loop.return_value = False
+        backend.loop = MagicMock()
+        backend._sync_get_timeout_s = 0.01
+
+        class TimeoutFuture:
+            def __init__(self):
+                self.cancel = MagicMock()
+                self.cancelled = MagicMock(return_value=False)
+                self.add_done_callback = MagicMock()
+
+            def result(self, timeout=None):
+                if timeout is not None:
+                    raise TimeoutError()
+                return None
+
+        late_obj = _make_mock_mem_obj()
+        future = TimeoutFuture()
+
+        async def slow():
+            return [late_obj]
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        backend._cleanup_late_sync_get_result = (
+            lambda done, lookup_id, operation, unpin: (
+                AscendP2PBackend._cleanup_late_sync_get_result(
+                    backend, done, lookup_id, operation, unpin
+                )
+            )
+        )
+
+        def fake_run_coroutine_threadsafe(coro, loop):
+            coro.close()
+            return future
+
+        with patch(
+            "lmcache_ascend.v1.storage_backend.p2p_backend."
+            "asyncio.run_coroutine_threadsafe",
+            side_effect=fake_run_coroutine_threadsafe,
+        ):
+            with pytest.raises(TimeoutError):
+                AscendP2PBackend._run_coroutine_threadsafe_blocking(
+                    backend,
+                    slow(),
+                    "lu_timeout",
+                    "batched_get_non_blocking",
+                    cleanup_late_result=True,
+                )
+
+        future.cancel.assert_called_once()
+        future.add_done_callback.assert_called_once()
+
+        late_future = MagicMock()
+        late_future.cancelled.return_value = False
+        late_future.result.return_value = [late_obj]
+        callback = future.add_done_callback.call_args.args[0]
+        callback(late_future)
+
+        late_obj.ref_count_down.assert_called_once()
+        late_obj.unpin.assert_not_called()
