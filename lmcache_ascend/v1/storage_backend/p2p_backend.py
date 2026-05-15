@@ -1052,7 +1052,7 @@ class AscendP2PBackend(P2PBackend):
         # ZMQ connect() is asynchronous; yield so the TCP connection can
         # establish before the first send (avoids EAGAIN "Resource temporarily
         # unavailable" on immediate send).
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.015)
 
     async def _send_done_signal(
         self,
