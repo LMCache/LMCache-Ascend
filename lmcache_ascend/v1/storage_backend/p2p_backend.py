@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from collections import OrderedDict
-from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Coroutine, List, Optional, Sequence, Union
 import asyncio
 import threading
 import time
@@ -277,6 +277,7 @@ class AscendP2PBackend(P2PBackend):
 
         self.chunk_size = config.chunk_size
 
+        # Keep transfer-channel ZMQ I/O on the Ascend P2P backend loop.
         self.transfer_channel = CreateTransferChannel(
             channel_type=config.transfer_channel,
             async_mode=True,
@@ -288,7 +289,7 @@ class AscendP2PBackend(P2PBackend):
             tp_rank=self.tp_rank,
             peer_init_url=self.peer_init_url,
             peer_lookup_url=self.peer_lookup_url,
-            event_loop=loop,
+            event_loop=self.loop,
         )
 
         self.running = asyncio.Event()
@@ -297,6 +298,7 @@ class AscendP2PBackend(P2PBackend):
         self.async_peer_socket: Optional[zmq.asyncio.Socket] = None
         self.async_done_socket: Optional[zmq.asyncio.Socket] = None
         self.peer_done_url: Optional[str] = None
+        self._async_context_ready = asyncio.Event()
 
         # Per-peer done sockets (client side) keyed by target_peer_url.
         # Each value is (asyncio.Lock, zmq.asyncio.Socket).
@@ -329,6 +331,51 @@ class AscendP2PBackend(P2PBackend):
             self._sweep_expired_pending_pull_resources(), self.loop
         )
 
+    def _is_on_p2p_loop(self) -> bool:
+        try:
+            return asyncio.get_running_loop() is self.loop
+        except RuntimeError:
+            return False
+
+    async def _run_on_p2p_loop(self, coro: Coroutine[Any, Any, Any]) -> Any:
+        if self._is_on_p2p_loop():
+            return await coro
+
+        future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+        return await asyncio.wrap_future(future)
+
+    def _set_async_context_ready(self) -> None:
+        if self._is_on_p2p_loop():
+            self._async_context_ready.set()
+            return
+        self.loop.call_soon_threadsafe(self._async_context_ready.set)
+
+    async def _wait_for_async_context(self) -> None:
+        if self.async_context is None and self.running.is_set():
+            await self._async_context_ready.wait()
+        if self.async_context is None:
+            raise RuntimeError("P2P async context is not initialized")
+
+    async def _ensure_peer_connection(
+        self,
+        target_peer_init_url: str,
+        force_update: bool = False,
+    ) -> None:
+        await self._run_on_p2p_loop(
+            self._ensure_peer_connection_on_loop(
+                target_peer_init_url,
+                force_update,
+            )
+        )
+
+    async def _ensure_peer_connection_on_loop(
+        self,
+        target_peer_init_url: str,
+        force_update: bool = False,
+    ) -> None:
+        await self._wait_for_async_context()
+        await super()._ensure_peer_connection(target_peer_init_url, force_update)
+
     async def _handle_peer_requests(self):
         """
         Handle `BatchedLookupAndGetMsg` issued by peers in `batched_get_non_blocking`.
@@ -338,6 +385,7 @@ class AscendP2PBackend(P2PBackend):
             "Starting P2P backend batched get handler at %s", self.peer_lookup_url
         )
         self.async_context = get_zmq_context()
+        self._set_async_context_ready()
         self.async_peer_socket = get_zmq_socket_with_timeout(
             self.async_context,
             self.peer_lookup_url,
@@ -388,7 +436,7 @@ class AscendP2PBackend(P2PBackend):
 
         Binds to an OS-assigned port so there are no port collisions.
         """
-        assert self.async_context is not None
+        await self._wait_for_async_context()
         self.async_done_socket = get_zmq_socket_with_timeout(
             self.async_context,
             f"{self.peer_host}:0",
@@ -416,8 +464,12 @@ class AscendP2PBackend(P2PBackend):
         Waits for the main handler to initialise ``async_context`` first,
         then keeps the done-signal handler alive across unexpected errors.
         """
-        while self.running.is_set() and self.async_context is None:
-            await asyncio.sleep(0.05)
+        try:
+            await self._wait_for_async_context()
+        except RuntimeError:
+            if self.running.is_set():
+                raise
+            return
 
         while self.running.is_set():
             try:
@@ -879,13 +931,9 @@ class AscendP2PBackend(P2PBackend):
                 f"Unexpected response to AscendQueryDonePortMsg: {type(ret_msg)}"
             )
         done_url = ret_msg.done_url
-        logger.info(
-            "Discovered done port for peer %s: %s",
-            target_peer_url,
-            done_url,
-        )
 
-        ctx = get_zmq_context()
+        await self._wait_for_async_context()
+        ctx = self.async_context
         done_socket = get_zmq_socket_with_timeout(
             ctx,
             done_url,
@@ -905,6 +953,15 @@ class AscendP2PBackend(P2PBackend):
         await asyncio.sleep(0.05)
 
     async def _send_done_signal(
+        self,
+        lookup_id: str,
+        target_peer_url: str,
+    ) -> None:
+        await self._run_on_p2p_loop(
+            self._send_done_signal_on_loop(lookup_id, target_peer_url)
+        )
+
+    async def _send_done_signal_on_loop(
         self,
         lookup_id: str,
         target_peer_url: str,
@@ -1049,8 +1106,8 @@ class AscendP2PBackend(P2PBackend):
             pull_mode=self.pull_mode,
         )
 
-        ret_msg = await self._send_lookup_request_with_retry(
-            lookup_id, target_peer_url, msg
+        ret_msg = await self._run_on_p2p_loop(
+            self._send_lookup_request_with_retry(lookup_id, target_peer_url, msg)
         )
         if ret_msg is None or isinstance(ret_msg, P2PErrorMsg):
             if isinstance(ret_msg, P2PErrorMsg):
@@ -1113,12 +1170,14 @@ class AscendP2PBackend(P2PBackend):
             hit_mem_obj.pin()
 
         if num_hit_chunks > 0 and self.pull_mode:
-            success = await self._handle_pull_mode_transfer(
-                lookup_id,
-                target_peer_url,
-                hit_mem_objs,
-                ret_msg.remote_buffer_uuids,
-                ret_msg.remote_mem_indexes,
+            success = await self._run_on_p2p_loop(
+                self._handle_pull_mode_transfer(
+                    lookup_id,
+                    target_peer_url,
+                    hit_mem_objs,
+                    ret_msg.remote_buffer_uuids,
+                    ret_msg.remote_mem_indexes,
+                )
             )
             if not success:
                 self._cleanup_memory_objects(mem_objs)
@@ -1194,6 +1253,8 @@ class AscendP2PBackend(P2PBackend):
 
     def close(self) -> None:
         """Close the Ascend P2P backend, including dedicated done sockets."""
+        self._set_async_context_ready()
+
         with self._sync_lock:
             self._sync_lookup_cache.clear()
             self._reset_sync_dealer_locked()
