@@ -1308,7 +1308,15 @@ class AscendP2PBackend(P2PBackend):
         keys: List[CacheEngineKey],
         pin: bool = False,
     ) -> int:
-        _, _, _, num_hit_chunks = self._sync_query_controller(keys)
+        lookup_id, target_peer_url, _location, num_hit_chunks = (
+            self._sync_query_controller(keys)
+        )
+        logger.info(
+            "P2P batched contains: lookup_id=%s, target_peer_url=%s, num_hit_chunks=%d",
+            lookup_id,
+            target_peer_url,
+            num_hit_chunks,
+        )
         return num_hit_chunks
 
     def batched_get_blocking(
