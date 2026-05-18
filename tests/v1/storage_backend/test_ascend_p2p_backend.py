@@ -37,6 +37,7 @@ from lmcache_ascend.v1.storage_backend.p2p_backend import (
     AscendBatchedLookupAndGetRetMsg,
     AscendBatchedLookupAndPutMsg,
     AscendP2PMsg,
+    AscendQueryDonePortRetMsg,
 )
 from lmcache_ascend.v1.transfer_context import P2PTransferContext
 
@@ -526,6 +527,226 @@ class TestAscendP2PBackendUnit:
 
         assert isinstance(ret, AscendBatchedLookupAndGetRetMsg)
         assert ret.num_hit_chunks == 2
+
+    def test_ensure_done_peer_connection_does_not_sleep(self, async_loop):
+        """Done socket creation should not rely on a fixed post-connect delay."""
+        backend = MagicMock()
+        backend.done_peer_sockets = {}
+        backend.done_peer_update_lock = asyncio.Lock()
+        backend.socket_recv_timeout_ms = 1000
+        backend.socket_send_timeout_ms = 1000
+        backend.async_context = MagicMock()
+        backend._wait_for_async_context = AsyncMock()
+        backend._query_done_url = AsyncMock(return_value="127.0.0.1:5555")
+
+        new_socket = MagicMock()
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend import p2p_backend as p2p_mod
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        with (
+            patch.object(
+                p2p_mod,
+                "get_zmq_socket_with_timeout",
+                return_value=new_socket,
+            ),
+            patch.object(p2p_mod.asyncio, "sleep", new_callable=AsyncMock) as sleep,
+        ):
+            _run_coroutine(
+                async_loop,
+                AscendP2PBackend._ensure_done_peer_connection(
+                    backend,
+                    "peer_url",
+                ),
+            )
+
+        sleep.assert_not_awaited()
+        assert backend.done_peer_sockets["peer_url"][1] is new_socket
+
+    def test_ensure_done_peer_connection_concurrent_creation(self, async_loop):
+        """Concurrent first sends should create only one Done socket per peer."""
+        backend = MagicMock()
+        backend.done_peer_sockets = {}
+        backend.done_peer_update_lock = asyncio.Lock()
+        backend.socket_recv_timeout_ms = 1000
+        backend.socket_send_timeout_ms = 1000
+        backend.async_context = MagicMock()
+        backend._wait_for_async_context = AsyncMock()
+        backend._query_done_url = AsyncMock(return_value="127.0.0.1:5555")
+
+        new_socket = MagicMock()
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend import p2p_backend as p2p_mod
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        async def run_concurrent_ensures():
+            await asyncio.gather(
+                AscendP2PBackend._ensure_done_peer_connection(backend, "peer_url"),
+                AscendP2PBackend._ensure_done_peer_connection(backend, "peer_url"),
+            )
+
+        with patch.object(
+            p2p_mod,
+            "get_zmq_socket_with_timeout",
+            return_value=new_socket,
+        ) as socket_factory:
+            _run_coroutine(async_loop, run_concurrent_ensures())
+
+        backend._query_done_url.assert_awaited_once_with("peer_url")
+        socket_factory.assert_called_once()
+        assert backend.done_peer_sockets["peer_url"][1] is new_socket
+
+    def test_ensure_done_peer_connection_force_recreates(self, async_loop):
+        """Force update closes and replaces the existing Done socket."""
+        old_socket = MagicMock()
+        backend = MagicMock()
+        backend.done_peer_sockets = {"peer_url": (asyncio.Lock(), old_socket)}
+        backend.done_peer_update_lock = asyncio.Lock()
+        backend.socket_recv_timeout_ms = 1000
+        backend.socket_send_timeout_ms = 1000
+        backend.async_context = MagicMock()
+        backend._wait_for_async_context = AsyncMock()
+        backend._query_done_url = AsyncMock(return_value="127.0.0.1:5555")
+
+        new_socket = MagicMock()
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend import p2p_backend as p2p_mod
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        with patch.object(
+            p2p_mod,
+            "get_zmq_socket_with_timeout",
+            return_value=new_socket,
+        ):
+            _run_coroutine(
+                async_loop,
+                AscendP2PBackend._ensure_done_peer_connection(
+                    backend,
+                    "peer_url",
+                    force=True,
+                ),
+            )
+
+        old_socket.close.assert_called_once_with(linger=0)
+        assert backend.done_peer_sockets["peer_url"][1] is new_socket
+
+    def test_send_done_signal_retries_zmq_again(self, async_loop):
+        """A send timeout recreates the Done socket and retries."""
+        first_socket = AsyncMock()
+        first_socket.send = AsyncMock(side_effect=zmq.Again("send timed out"))
+        first_socket.recv = AsyncMock()
+
+        second_socket = AsyncMock()
+        second_socket.send = AsyncMock()
+        second_socket.recv = AsyncMock()
+
+        backend = MagicMock()
+        backend.max_retry_count = 2
+        backend.done_peer_sockets = {"peer_url": (asyncio.Lock(), first_socket)}
+
+        async def ensure_done_peer_connection(target_peer_url, force=False):
+            if force:
+                backend.done_peer_sockets[target_peer_url] = (
+                    asyncio.Lock(),
+                    second_socket,
+                )
+
+        backend._ensure_done_peer_connection = AsyncMock(
+            side_effect=ensure_done_peer_connection
+        )
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        _run_coroutine(
+            async_loop,
+            AscendP2PBackend._send_done_signal_on_loop(
+                backend,
+                "lu_done",
+                "peer_url",
+            ),
+        )
+
+        first_socket.send.assert_awaited_once()
+        second_socket.send.assert_awaited_once()
+        second_socket.recv.assert_awaited_once()
+        backend._ensure_done_peer_connection.assert_any_await(
+            "peer_url",
+            force=True,
+        )
+
+    def test_send_done_signal_recreate_failure_stays_in_retry_loop(self, async_loop):
+        """A failed forced recreate should not escape the Done retry loop."""
+        first_socket = AsyncMock()
+        first_socket.send = AsyncMock(side_effect=zmq.Again("send timed out"))
+        first_socket.recv = AsyncMock()
+
+        second_socket = AsyncMock()
+        second_socket.send = AsyncMock()
+        second_socket.recv = AsyncMock()
+
+        backend = MagicMock()
+        backend.max_retry_count = 3
+        backend.done_peer_sockets = {"peer_url": (asyncio.Lock(), first_socket)}
+
+        async def ensure_done_peer_connection(target_peer_url, force=False):
+            if force:
+                backend.done_peer_sockets.pop(target_peer_url, None)
+                raise RuntimeError("done port query failed")
+            if target_peer_url in backend.done_peer_sockets:
+                return
+            backend.done_peer_sockets[target_peer_url] = (
+                asyncio.Lock(),
+                second_socket,
+            )
+
+        backend._ensure_done_peer_connection = AsyncMock(
+            side_effect=ensure_done_peer_connection
+        )
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        _run_coroutine(
+            async_loop,
+            AscendP2PBackend._send_done_signal_on_loop(
+                backend,
+                "lu_done_recreate_retry",
+                "peer_url",
+            ),
+        )
+
+        first_socket.send.assert_awaited()
+        second_socket.send.assert_awaited_once()
+        second_socket.recv.assert_awaited_once()
+        assert backend._ensure_done_peer_connection.await_count == 3
+
+    def test_handle_query_done_port_waits_for_ready_url(self, async_loop):
+        """Done-port queries wait for the done handler to publish its URL."""
+        backend = MagicMock()
+        backend._done_url_ready = asyncio.Event()
+        backend.peer_done_url = None
+        backend.p2p_done_timeout_s = 1.0
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        async def query_while_starting():
+            task = asyncio.create_task(
+                AscendP2PBackend._handle_query_done_port(backend)
+            )
+            await asyncio.sleep(0)
+            backend.peer_done_url = "127.0.0.1:5555"
+            backend._done_url_ready.set()
+            return await task
+
+        ret = _run_coroutine(async_loop, query_while_starting())
+
+        assert isinstance(ret, AscendQueryDonePortRetMsg)
+        assert ret.done_url == "127.0.0.1:5555"
 
     def test_batched_get_non_blocking_push_mode(self, async_loop):
         """Push mode allocates memory, sends request, returns hit objects."""
