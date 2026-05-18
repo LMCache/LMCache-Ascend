@@ -41,7 +41,26 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         self._wait_for_save_done = True
         self._finished_req_ids_waiting_for_save: set[str] = set()
         self._late_finished_sending: set[str] = set()
+        self._upgrade_lookup_client()
         logger.debug("store_async: %s", self.store_async)
+
+    def _upgrade_lookup_client(self) -> None:
+        client = self.lookup_client
+        if client is None:
+            return
+        inner = client
+        while hasattr(inner, "actual_lookup_client"):
+            inner = inner.actual_lookup_client
+        from lmcache.v1.lookup_client.lmcache_async_lookup_client import (
+            LMCacheAsyncLookupClient,
+        )
+        if not isinstance(inner, LMCacheAsyncLookupClient):
+            return
+        from lmcache_ascend.v1.lookup_client.lmcache_ascend_async_lookup_client import (
+            LMCacheAscendAsyncLookupClient,
+        )
+        LMCacheAscendAsyncLookupClient.from_existing(inner)
+        logger.info("lmcache-ascend: upgraded lookup client to Ascend subclass")
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -262,6 +281,34 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         _, return_params = super().request_finished(request, block_ids)
+
+        if hasattr(request, "all_token_ids") and request.all_token_ids:
+            new_hashes = None
+            if self.lookup_client is not None:
+                inner = self.lookup_client
+                while hasattr(inner, "actual_lookup_client"):
+                    inner = inner.actual_lookup_client
+                if hasattr(inner, "get_cached_hashes"):
+                    new_hashes = inner.get_cached_hashes(request.request_id)
+            if new_hashes is None:
+                if not hasattr(self, "_token_db"):
+                    from lmcache.v1.token_database import ChunkedTokenDatabase
+                    self._token_db = ChunkedTokenDatabase(config=self.config)
+                new_hashes = [
+                    f"{hash_val:x}"
+                    for _, _, hash_val in
+                    self._token_db.process_tokens(
+                        tokens=list(request.all_token_ids), make_key=False
+                    )
+                ]
+            if new_hashes:
+                return_params = return_params or {}
+                return_params["chunk_hashes"] = new_hashes
+                logger.info(
+                    "Attached %d chunk_hashes to request %s response",
+                    len(new_hashes),
+                    request.request_id,
+                )
 
         if (
             request.status == RequestStatus.FINISHED_ABORTED

@@ -6,7 +6,10 @@ from ._version import __version__ as __version__  # noqa: F401  # isort:skip
 from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # isort:skip
 
 # Standard
+import asyncio
+import functools
 import sys
+import time
 
 # First Party
 from lmcache_ascend import _build_info
@@ -530,6 +533,322 @@ def _patch_rpc_utils():
         _factory_mod.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
 
+def _patch_cache_engine_agentos():
+    from lmcache.v1.cache_engine import LMCacheEngine
+    from lmcache.v1.event_manager import EventStatus, EventType
+
+    _original_cleanup = LMCacheEngine.cleanup_memory_objs
+    _original_compress = LMCacheEngine.compress
+    _original_decompress = LMCacheEngine.decompress
+    _original_retrieve = LMCacheEngine.retrieve
+
+    def _patched_cleanup(self, lookup_id):
+        try:
+            if (
+                self.event_manager.get_event_status(EventType.LOADING, lookup_id)
+                != EventStatus.DONE
+            ):
+                return
+            future = self.event_manager.pop_event(EventType.LOADING, lookup_id)
+            memory_objs = future.result()
+            memory_objs_flat = []
+            for m in memory_objs:
+                memory_objs_flat.extend(m)
+            for key, memory_obj in memory_objs_flat:
+                try:
+                    memory_obj.ref_count_down()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _patched_compress(self, location="LocalCPU"):
+        if self.lookup_pins is None:
+            return 0
+        event_id = list(self.lookup_pins.keys())[0]
+        if event_id not in self.lookup_pins:
+            return 0
+        block_mapping = self.lookup_pins[event_id]
+        assert len(block_mapping) == 1
+        keys = block_mapping[location]
+        memory_objs = self.storage_manager.batched_get(
+            keys=keys, location=location
+        )
+        serializer = self.serializer
+        compressed_memory_objs = []
+        for memory_obj in memory_objs:
+            assert memory_obj is not None
+            compressed_memory_obj = serializer.serialize(memory_obj)
+            memory_obj.unpin()
+            compressed_memory_objs.append(compressed_memory_obj)
+        self.lookup_pins.pop(event_id, None)
+        self.storage_manager.batched_remove(keys, locations=[location])
+        self.storage_manager.batched_put(
+            keys=keys,
+            memory_objs=compressed_memory_objs,
+            location=location,
+        )
+        return len(compressed_memory_objs)
+
+    def _patched_decompress(self, location="LocalCPU"):
+        if self.lookup_pins is None:
+            return 0
+        event_id = list(self.lookup_pins.keys())[0]
+        if event_id not in self.lookup_pins:
+            return 0
+        block_mapping = self.lookup_pins[event_id]
+        assert len(block_mapping) == 1
+        keys = block_mapping[location]
+        compressed_memory_objs = self.storage_manager.batched_get(
+            keys=keys, location=location
+        )
+        deserializer = self.deserializer
+        memory_objs = []
+        for compressed_memory_obj in compressed_memory_objs:
+            assert compressed_memory_obj is not None
+            memory_obj = deserializer.deserialize(compressed_memory_obj)
+            compressed_memory_obj.unpin()
+            memory_objs.append(memory_obj)
+        self.lookup_pins.pop(event_id, None)
+        self.storage_manager.batched_remove(keys, locations=[location])
+        self.storage_manager.batched_put(
+            keys=keys,
+            memory_objs=memory_objs,
+            location=location,
+        )
+        return len(memory_objs)
+
+    def _patched_retrieve(
+        self,
+        tokens=None,
+        token_mask=None,
+        hashes=None,
+        offsets=None,
+        **kwargs,
+    ):
+        t0 = time.perf_counter()
+        result = _original_retrieve(
+            self,
+            tokens=tokens,
+            token_mask=token_mask,
+            hashes=hashes,
+            offsets=offsets,
+            **kwargs,
+        )
+        return result
+
+    LMCacheEngine.cleanup_memory_objs = _patched_cleanup
+    LMCacheEngine.compress = _patched_compress
+    LMCacheEngine.decompress = _patched_decompress
+    LMCacheEngine.retrieve = _patched_retrieve
+
+
+def _patch_storage_manager_agentos():
+    from lmcache.v1.storage_backend.storage_manager import StorageManager
+    from lmcache.v1.event_manager import EventStatus, EventType
+
+    _original_callback = StorageManager.prefetch_all_done_callback
+
+    def _patched_callback(
+        self,
+        task,
+        lookup_id,
+        cum_chunk_lengths_total,
+        tier_expected_chunks,
+        loading_task_backends=None,
+    ):
+        _original_callback(
+            self, task, lookup_id,
+            cum_chunk_lengths_total, tier_expected_chunks,
+        )
+        if not loading_task_backends:
+            return
+
+        res = task.result()
+
+        total_retrieved_chunks = 0
+        for tier_idx, tier_result in enumerate(res):
+            actual_chunks = len(tier_result)
+            total_retrieved_chunks += actual_chunks
+            if actual_chunks < tier_expected_chunks[tier_idx]:
+                break
+
+        if (
+            self.local_cpu_backend is not None
+            and self.local_cpu_backend.use_hot
+            and total_retrieved_chunks > 0
+        ):
+            chunk_count = 0
+            for tier_idx, tier_result in enumerate(res):
+                tier_keys = []
+                tier_objs = []
+                for key, mem_obj in tier_result:
+                    if chunk_count >= total_retrieved_chunks:
+                        break
+                    tier_keys.append(key)
+                    tier_objs.append(mem_obj)
+                    chunk_count += 1
+                if tier_keys:
+                    self.local_cpu_backend.batched_submit_put_task(
+                        tier_keys, tier_objs
+                    )
+                    if (
+                        tier_idx < len(loading_task_backends)
+                        and loading_task_backends[tier_idx]
+                        not in ("LocalCPUBackend", "PDBackend", "MaruBackend")
+                    ):
+                        for mem_obj in tier_objs:
+                            mem_obj.unpin()
+                if chunk_count >= total_retrieved_chunks:
+                    break
+
+        for tier_idx, tier_result in enumerate(res):
+            if tier_idx >= len(loading_task_backends):
+                break
+            backend_name = loading_task_backends[tier_idx]
+            backend = self.storage_backends.get(backend_name)
+            if backend is not None:
+                for key, _ in tier_result:
+                    backend.unpin(key)
+
+    async def _patched_async(
+        self,
+        lookup_id,
+        keys,
+        cum_chunk_lengths,
+        search_range=None,
+        pin=False,
+        log_timing=False,
+    ):
+        num_total_chunks = len(keys)
+        num_total_hit_chunks = 0
+        cum_chunk_lengths_total = list(cum_chunk_lengths)
+        loading_tasks = []
+        tier_expected_chunks = []
+        loading_task_keys = []
+        loading_task_backends = []
+        for backend_name, backend in self.get_active_storage_backends(
+            search_range=search_range
+        ):
+            num_hit_chunks = await backend.batched_async_contains(
+                lookup_id, keys, pin
+            )
+            if num_hit_chunks == 0:
+                continue
+            num_total_hit_chunks += num_hit_chunks
+            tier_expected_chunks.append(num_hit_chunks)
+            backend_keys = keys[:num_hit_chunks]
+            loading_task_keys.append(backend_keys)
+            loading_task_backends.append(backend_name)
+            assert self.async_serializer is not None
+            get_coro = self.async_serializer.run(
+                backend.batched_get_non_blocking(
+                    lookup_id,
+                    backend_keys,
+                    {
+                        "cum_chunk_lengths": cum_chunk_lengths[
+                            : num_hit_chunks + 1
+                        ]
+                    },
+                ),
+                num_hit_chunks,
+            )
+            loading_task = asyncio.create_task(get_coro)
+            loading_task.add_done_callback(
+                functools.partial(
+                    self.prefetch_single_done_callback,
+                    keys=keys,
+                    backend_name=backend_name,
+                )
+            )
+            loading_tasks.append(loading_task)
+            cum_chunk_lengths = cum_chunk_lengths[num_hit_chunks:]
+            if num_total_hit_chunks == num_total_chunks:
+                break
+            keys = keys[num_hit_chunks:]
+
+        if num_total_hit_chunks == 0:
+            if self.async_lookup_server is not None:
+                self.async_lookup_server.send_response_to_scheduler(
+                    lookup_id, 0
+                )
+            return
+
+        async def gather_with_keys():
+            loading_results = await asyncio.gather(*loading_tasks)
+            return [
+                list(zip(keys, results))
+                for keys, results in zip(
+                    loading_task_keys, loading_results
+                )
+            ]
+
+        all_done = asyncio.create_task(gather_with_keys())
+        self.event_manager.add_event(
+            EventType.LOADING,
+            lookup_id,
+            all_done,
+        )
+        all_done.add_done_callback(
+            lambda future: self.prefetch_all_done_callback(
+                future,
+                lookup_id,
+                cum_chunk_lengths_total,
+                tier_expected_chunks,
+                loading_task_backends,
+            )
+        )
+
+    StorageManager.prefetch_all_done_callback = _patched_callback
+    StorageManager.async_lookup_and_prefetch = _patched_async
+
+
+def _patch_pin_monitor_agentos():
+    from contextlib import nullcontext
+
+    from lmcache.v1.pin_monitor import PinMonitor
+
+    def _patched_force_unpin(self, memory_obj, elapsed_time):
+        obj_lock = getattr(memory_obj, "lock", None) or nullcontext()
+        with obj_lock:
+            pin_count_to_release = memory_obj.meta.pin_count
+            if pin_count_to_release <= 0:
+                return
+        for _ in range(pin_count_to_release):
+            memory_obj.unpin()
+
+    PinMonitor._force_unpin_timeout_object = _patched_force_unpin  # type: ignore[assignment]
+
+
+def _patch_api_server_agentos():
+    from lmcache.v1.internal_api_server.api_server import (
+        InternalAPIServer,
+        app,
+    )
+
+    _original_init = InternalAPIServer.__init__
+
+    def _patched_init(self, lmcache_manager):
+        _original_init(self, lmcache_manager)
+        if hasattr(lmcache_manager, "config"):
+            config = lmcache_manager.config
+            lmcache_engine = lmcache_manager.lmcache_engine
+            if lmcache_engine is None:
+                port_offset = 0
+            else:
+                port_offset = 1 + lmcache_engine.metadata.worker_id
+            app.state.internal_api_server_port_offset = port_offset
+            app.state.internal_api_server_port_start = (
+                config.internal_api_server_port_start
+            )
+        from lmcache_ascend.v1.internal_api_server.memory.memory_api import (
+            router as memory_router,
+        )
+        app.include_router(memory_router)
+
+    InternalAPIServer.__init__ = _patched_init
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
@@ -575,6 +894,11 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_vllm_v1_adapter()
 
         _patch_cache_engine()
+
+        _patch_cache_engine_agentos()
+        _patch_storage_manager_agentos()
+        _patch_pin_monitor_agentos()
+        _patch_api_server_agentos()
 
     if _build_info.__framework_name__ == "mindspore":
         # First Party
