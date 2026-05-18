@@ -216,14 +216,22 @@ class P2PTransferContext(AscendBaseTransferContext):
     def _send_done(self) -> None:
         """Send the Done signal to the remote peer via the event loop."""
         try:
-            future = asyncio.run_coroutine_threadsafe(
-                self._p2p_backend._send_done_signal(
-                    self._lookup_id,
-                    self._target_peer_url,
-                ),
-                self._loop,
+            coro = self._p2p_backend._send_done_signal(
+                self._lookup_id,
+                self._target_peer_url,
             )
-            future.result(timeout=30)
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+
+            if running_loop is self._loop:
+                self._loop.create_task(coro)
+                return
+
+            future = asyncio.run_coroutine_threadsafe(coro, self._loop)
+            timeout_s = getattr(self._p2p_backend, "p2p_done_timeout_s", 5.0)
+            future.result(timeout=timeout_s)
         except Exception as e:
             logger.error(
                 "Failed to send P2P Done signal for lookup_id %s: %s",

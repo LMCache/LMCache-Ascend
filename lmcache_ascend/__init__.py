@@ -81,6 +81,22 @@ def _patch_config():
         "This config is only used when p2p_pull_mode is set to True.",
     }
 
+    # P2P sync control-plane lookup cache (scheduler lookup daemon thread)
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_sync_lookup_cache_ttl"] = {
+        "type": float,
+        "default": 5.0,
+        "env_converter": float,
+        "description": "TTL in seconds for entries in the P2P sync lookup cache. "
+        "Used on the sync ZMQ control-plane path for batched peer lookups.",
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_sync_lookup_cache_max_entries"] = {
+        "type": int,
+        "default": 1024,
+        "env_converter": int,
+        "description": "Maximum number of entries in the P2P sync lookup cache. "
+        "Oldest entries are evicted when the limit is exceeded.",
+    }
+
     # Add new pd_pull_mode config
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_mode"] = {
         "type": bool,
@@ -453,6 +469,16 @@ def _patch_lookup_client():
     )
 
 
+def _patch_cache_controller_worker():
+    # Third Party
+    import lmcache.v1.cache_controller.worker as lmc_worker
+
+    # First Party
+    from lmcache_ascend.v1.cache_controller.worker import async_put_and_wait_msg
+
+    lmc_worker.LMCacheWorker.async_put_and_wait_msg = async_put_and_wait_msg
+
+
 def _patch_sys_detection():
     # Patching this as on some Ascend machines
     # as the kernel can set the NUMA node to -1.
@@ -562,6 +588,7 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_cacheblend()
         _patch_multi_process()
         _patch_lookup_client()
+        _patch_cache_controller_worker()
         _patch_rpc_utils()
 
     _patch_kv_layer_group()
