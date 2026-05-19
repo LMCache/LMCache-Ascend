@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend patches for LMCache controller worker RPCs."""
+"""Ascend replacement for ``LMCacheWorker.async_put_and_wait_msg``.
+
+The upstream worker owns one ``zmq.asyncio`` DEALER (``req_socket``) for
+controller RPCs. The common upstream P2P path usually works even though
+registration runs on ``LMCacheWorker.loop`` and async lookup later calls from
+``StorageManager.loop``: registration has completed, and each lookup owns its
+send/recv pair, so another loop is not normally awaiting the same socket.
+
+Ascend makes that assumption brittle. Peer sockets and transfer-channel work run
+on ``AscendP2PBackend``'s dedicated background loop, and retrieval paths bridge
+between storage-manager, P2P, and worker loops. Since ``zmq.asyncio`` readiness
+is registered with the loop doing the await, this patch pins non-heartbeat
+controller I/O to ``LMCacheWorker.loop``. Cross-loop callers hop there with
+``asyncio.run_coroutine_threadsafe``; send/recv is serialized, and timeout,
+cancellation, or ZMQ errors recreate ``req_socket`` before reuse.
+"""
 
 # Standard
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -43,14 +58,7 @@ async def _async_put_and_wait_msg_on_worker_loop(
     worker: Any,
     msg: WorkerReqMsg,
 ) -> WorkerReqRetMsg:
-    """Run controller request/reply I/O on ``worker.loop`` only.
-
-    ``zmq.asyncio.Socket`` instances are event-loop-bound in practice.  The
-    upstream worker creates/uses ``req_socket`` on ``LMCacheWorker.loop`` during
-    registration, but P2P async lookup can call ``async_put_and_wait_msg`` from
-    the storage-manager loop.  Keeping the DEALER socket on one loop avoids late
-    wakeups where a reply is not observed until another request pokes the loop.
-    """
+    """Non-heartbeat DEALER send/recv on ``worker.loop`` (see module docstring)."""
     if isinstance(msg, HeartbeatMsg):
         return await worker._send_heartbeat_msg(msg)
 
@@ -113,12 +121,7 @@ async def async_put_and_wait_msg(
     self: Any,
     msg: WorkerReqMsg,
 ) -> WorkerReqRetMsg:
-    """Patched ``LMCacheWorker.async_put_and_wait_msg``.
-
-    If called from another event loop, marshal the actual socket operation to
-    ``self.loop`` and await the thread-safe future without blocking the caller's
-    loop.  If already on ``self.loop``, execute directly.
-    """
+    """Dispatch controller RPCs onto ``LMCacheWorker.loop`` when needed."""
     worker_loop = getattr(self, "loop", None)
     try:
         running_loop = asyncio.get_running_loop()
@@ -133,6 +136,9 @@ async def async_put_and_wait_msg(
         worker_loop,
     )
     try:
+        # The inner recv timeout owns socket recovery.  The outer timeout gives
+        # that coroutine a little extra time to recreate the socket and return a
+        # typed failure response before the caller stops waiting.
         return await asyncio.wait_for(
             asyncio.wrap_future(future),
             timeout=_outer_timeout_s(self),
