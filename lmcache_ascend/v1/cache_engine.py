@@ -416,7 +416,11 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def get_kv_events(self) -> Iterable[CacheStoreEvent]:
         if self.kv_events_enabled and self.kv_events:
-            return self.kv_events.drain()
+            if self.is_store_async:
+                return self.kv_events.drain()
+            events = list(self.kv_events)
+            self.kv_events.clear()
+            return events
         return []
 
     def lookup(
