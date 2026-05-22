@@ -27,7 +27,7 @@ WORKDIR /workspace
 COPY . /workspace/LMCache-Ascend/
 
 # Install LMCache && LMCache-Ascend
-RUN NO_CUDA_EXT=1 pip install lmcache==0.4.3 && \
+RUN NO_CUDA_EXT=1 pip install lmcache==0.4.5 && \
     cd /workspace/LMCache-Ascend && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     pip install -v --no-build-isolation -e .

@@ -977,7 +977,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
             if layer_id > 0 and layer_id <= self.num_layers:
                 # NOTE: wait until both compute and load streams are done
-                torch.cuda.synchronize()
+                torch.npu.synchronize()
 
                 # ping-pong the buffers
                 compute_gpu_buffer_obj, load_gpu_buffer_obj = (
@@ -1006,7 +1006,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                 memory_objs_layer = yield
 
                 # memobj -> gpu_buffer
-                with torch.cuda.stream(self.load_stream):
+                with torch.npu.stream(self.load_stream):
                     for start, end, memory_obj in zip(
                         starts, ends, memory_objs_layer, strict=False
                     ):
@@ -1101,12 +1101,12 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
         tmp_gpu_buffer_obj = self._allocate_gpu_buffers(num_tokens, count=1)
 
-        current_stream = torch.cuda.current_stream()
+        current_stream = torch.npu.current_stream()
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
-            with torch.cuda.stream(self.store_stream):
+            with torch.npu.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
 
                 lmc_ops.single_layer_kv_transfer(
@@ -2158,7 +2158,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             # and can race ahead.
             torch.npu.current_stream().wait_stream(self.load_stream)
         else:
-            with torch.cuda.stream(self.load_stream):
+            with torch.npu.stream(self.load_stream):
                 for memory_obj, start, end in zip(
                     memory_objs, starts, ends, strict=False
                 ):
@@ -2183,7 +2183,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         """
         if event is not None:
             self.load_stream.wait_event(event)
-        with torch.cuda.stream(self.load_stream):
+        with torch.npu.stream(self.load_stream):
             for proxy, start, end in batch:
                 self.to_gpu(proxy.backing_obj, start, end, **kwargs)
 
@@ -2328,7 +2328,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
 
         # Process non-proxy items on load_stream (no pipelining needed)
         if non_proxy_items:
-            with torch.cuda.stream(self.load_stream):
+            with torch.npu.stream(self.load_stream):
                 for memory_obj, start, end in non_proxy_items:
                     self.to_gpu(memory_obj, start, end, **kwargs)
 
@@ -2665,7 +2665,7 @@ class VLLMPagedMemLayerwiseNPUConnector(
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        current_stream = torch.cuda.current_stream()
+        current_stream = torch.npu.current_stream()
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
@@ -2674,7 +2674,7 @@ class VLLMPagedMemLayerwiseNPUConnector(
             if layer_id > 0:
                 logger.debug(f"Finished loading layer {layer_id - 1}")
             # memobj -> gpu_buffer -> kvcaches
-            with torch.cuda.stream(self.load_stream):
+            with torch.npu.stream(self.load_stream):
                 if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
                     staging = (
                         tmp_gpu_buffer_obj.tensor if self.use_gpu else None
@@ -2831,12 +2831,12 @@ class VLLMPagedMemLayerwiseNPUConnector(
             )
             assert tmp_gpu_buffer_obj.tensor is not None
 
-        current_stream = torch.cuda.current_stream()
+        current_stream = torch.npu.current_stream()
 
         for layer_id in range(self.num_layers):
             memory_objs_layer = memory_objs[layer_id]
             # kvcaches -> gpu_buffer -> memobj
-            with torch.cuda.stream(self.store_stream):
+            with torch.npu.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
 
                 if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
