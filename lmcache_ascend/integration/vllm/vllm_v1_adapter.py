@@ -263,6 +263,16 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         _, return_params = super().request_finished(request, block_ids)
 
+        # chunk_hashes return start ---------------------
+        if getattr(self.config, "enable_chunk_hashes_return", False):
+            inner = self.lookup_client
+            while hasattr(inner, "actual_lookup_client"):
+                inner = inner.actual_lookup_client
+            new_hashes = inner.get_cached_hashes(request.request_id)
+            return_params = return_params or {}
+            return_params["chunk_hashes"] = new_hashes
+        # chunk_hashes return end ---------------------
+
         if (
             request.status == RequestStatus.FINISHED_ABORTED
             and self.lmcache_engine is not None
