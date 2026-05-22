@@ -6,6 +6,7 @@ from ._version import __version__ as __version__  # noqa: F401  # isort:skip
 from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # isort:skip
 
 # Standard
+from typing import Any
 import sys
 
 # First Party
@@ -13,7 +14,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.4"
+LMCACHE_UPSTREAM_TAG = "v0.4.5"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -23,6 +24,26 @@ def _is_sglang_runtime():
 
 def _is_vllm_runtime():
     return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
+
+def _patch_lmcache_global_variable():
+    def _detect_device() -> tuple[Any, str]:
+        try:
+            # Third Party
+            import torch
+        except ImportError:
+            return None, "cpu"  # fallback，CLI-only
+
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return torch.npu, "npu"
+        else:
+            raise ValueError("Non Ascend Env!")
+
+    # Third Party
+    import lmcache
+
+    lmcache._detect_device = _detect_device
+    lmcache.torch_dev, lmcache.torch_device_type = _detect_device()
 
 
 def _patch_config():
@@ -279,6 +300,7 @@ def _patch_ops():
             NL_X_NBBS_ONE_HS = 5
             NL_X_TWO_NB_NH_BS_HS = 6
             NL_X_NB_TWO_NH_BS_HS = 7
+            NB_NL_TWO_NH_BS_HS = 8
 
         ascend_c_ops.GPUKVFormat = GPUKVFormat
 
@@ -299,7 +321,6 @@ def _patch_storage_backend_init():
 
 def _patch_torch_capability():
     # Third Party
-    from torch_npu.contrib import transfer_to_npu  # noqa: F401
     import torch
 
     # Note: torch_npu do not support get_device_capability
@@ -393,21 +414,6 @@ def _patch_multi_process():
     lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
 
 
-def _patch_kv_layer_group():
-    # Third Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
-
-    # First Party
-    import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-
-    KVLayerGroupsManager.build_kv_layer_groups = (
-        ascend_kv_layer_groups.build_kv_layer_groups
-    )
-    KVLayerGroupInfo.hidden_dim_size = property(
-        ascend_kv_layer_groups.patched_hidden_dim_size
-    )
-
-
 def _patch_gpu_connector():
     """Patch CreateGPUConnector to return NPU connectors on Ascend.
 
@@ -453,23 +459,6 @@ def _patch_gpu_connector():
         _manager_mod.CreateGPUConnector = CreateNPUConnector
 
 
-def _patch_get_vllm_torch_dev():
-    """Patch get_vllm_torch_dev to return NPU device on Ascend.
-
-    The upstream function only supports CUDA and XPU. This patch adds
-    NPU support by replacing the function with our Ascend-specific version.
-    """
-    # Third Party
-    import lmcache.integration.vllm.utils as lm_utils
-
-    # First Party
-    from lmcache_ascend.integration.vllm.utils import (
-        get_vllm_torch_dev as ascend_get_vllm_torch_dev,
-    )
-
-    lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
-
-
 def _patch_vllm_v1_adapter():
     # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -512,16 +501,8 @@ def _patch_cache_engine():
 
 
 def _patch_hash_token():
-    # On OpenEuler and python3.10,
-    # the _hash_tokens func hash(None) seems to run into
-    # ASLR lead to non-deterministic hashing for builtin hash
     # Third Party
     import lmcache.v1.token_database
-
-    # First Party
-    from lmcache_ascend.v1.tokens_hash import _hash_tokens
-
-    lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
 
     # First Party
     from lmcache_ascend.v1.token_database import TokenDatabase_process_tokens
@@ -578,17 +559,12 @@ def _patch_sgl():
     from lmcache_ascend.integration.sglang.sglang_adapter import (
         LMCacheConnector__init__,
         LMCacheLayerwiseConnector_global_min_tokens,
-        LMCacheLayerwiseConnector_start_load_kv,
     )
 
     lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
 
     lmc_sglang_adapter.LMCacheLayerwiseConnector.global_min_tokens = (
         LMCacheLayerwiseConnector_global_min_tokens
-    )
-
-    lmc_sglang_adapter.LMCacheLayerwiseConnector.start_load_kv = (
-        LMCacheLayerwiseConnector_start_load_kv
     )
 
     # Third Party
@@ -681,6 +657,9 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    if _build_info.__framework_name__ == "pytorch":
+        _patch_lmcache_global_variable()
+
     _patch_config()
 
     is_sgl = _is_sglang_runtime()
@@ -696,7 +675,6 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_ops()
     if is_vllm:
-        _patch_get_vllm_torch_dev()
         _patch_gpu_connector()
 
     _patch_hash_token()
@@ -712,8 +690,6 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_lookup_client()
         _patch_cache_controller_worker()
         _patch_rpc_utils()
-
-    _patch_kv_layer_group()
 
     if is_sgl:
         _patch_sgl()
