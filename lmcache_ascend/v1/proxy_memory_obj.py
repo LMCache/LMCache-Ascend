@@ -87,6 +87,7 @@ class ProxyMemoryObj(MemoryObj):
         self._chunk_index = chunk_index
         self._resolved = False
         self._consumed = False  # True after data scattered into KV cache
+        self._released = False
 
         # Store allocation metadata for deferred buffer operations
         if backing_obj is not None:
@@ -133,6 +134,7 @@ class ProxyMemoryObj(MemoryObj):
         buffer references are no longer valid.
         """
         self._consumed = True
+        self._released = True
 
     @property
     def backing_obj(self) -> Optional[MemoryObj]:
@@ -438,10 +440,12 @@ class ProxyMemoryObj(MemoryObj):
         pass
 
     def ref_count_down(self) -> None:
-        # No-op: see ref_count_up.  The transfer context's Done signal
-        # is sent explicitly by the NPU connector via
-        # transfer_context.send_done_now() after scatter completes.
-        pass
+        # When a proxy is discarded before the connector consumes it, notify
+        # the shared context so the sender can release pending pull resources.
+        if self._released:
+            return
+        self._released = True
+        self._transfer_context.decref()
 
     def get_ref_count(self) -> int:
         # Always return 1 so the proxy looks "alive" to callers that

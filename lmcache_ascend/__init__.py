@@ -81,6 +81,22 @@ def _patch_config():
         "This config is only used when p2p_pull_mode is set to True.",
     }
 
+    # P2P sync control-plane lookup cache (scheduler lookup daemon thread)
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_sync_lookup_cache_ttl"] = {
+        "type": float,
+        "default": 5.0,
+        "env_converter": float,
+        "description": "TTL in seconds for entries in the P2P sync lookup cache. "
+        "Used on the sync ZMQ control-plane path for batched peer lookups.",
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["p2p_sync_lookup_cache_max_entries"] = {
+        "type": int,
+        "default": 1024,
+        "env_converter": int,
+        "description": "Maximum number of entries in the P2P sync lookup cache. "
+        "Oldest entries are evicted when the limit is exceeded.",
+    }
+
     # Add new pd_pull_mode config
     lmcache.v1.config._CONFIG_DEFINITIONS["pd_pull_mode"] = {
         "type": bool,
