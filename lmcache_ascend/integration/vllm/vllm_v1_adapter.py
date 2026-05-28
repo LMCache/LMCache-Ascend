@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import os
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    LMCacheConnectorMetadata,
-    LMCacheConnectorV1Impl,
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    LMCacheConnectorV1ImplMultiGroup,
 )
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+
+# First Party
+from lmcache_ascend.integration.vllm.multi_spec_flatten import (
+    build_flat_kv_caches,
+    should_flatten_kv_caches,
+)
 from vllm.config import (
     VllmConfig,
 )
@@ -17,6 +24,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 import torch
 
@@ -28,15 +36,16 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
+class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     def __init__(
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
         parent: KVConnectorBase_V1,
+        kv_cache_config: Optional[Any] = None,
     ):
         logger.debug("Initializing LMCacheAscendConnectorV1Impl")
-        super().__init__(vllm_config, role, parent)
+        super().__init__(vllm_config, role, parent, kv_cache_config=kv_cache_config)
         self.store_async = self.config.store_async
         self._wait_for_save_done = True
         self._finished_req_ids_waiting_for_save: set[str] = set()
@@ -44,10 +53,253 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         logger.debug("store_async: %s", self.store_async)
 
     @_lmcache_nvtx_annotate
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        """Preprocess multi-spec layers and push upstream layout hints.
+
+        The model runner passes one tuple entry per layer name, but multi-spec
+        layers pack multiple 4-D sub-tensors (one per spec/scheduler-group).
+        With bundling (default), the tuple is kept as-is and the NPU connector
+        derives per-group parameters (block size, hidden bytes, DMA stride)
+        dimensionality-agnostically via build_kv_layer_groups.
+        """
+        flat_kv = kv_caches
+        sched_by_layer: tuple[int, ...] | None = None
+        layer_to_groups: dict[str, list[int]] | None = None
+        cache_cfg = getattr(self._vllm_config, "cache_config", None)
+        block_size = int(getattr(cache_cfg, "block_size", 0) or 0) if cache_cfg else 0
+        ie_logical_block_size = block_size
+        if self._kv_cache_config is not None and getattr(
+            self._kv_cache_config, "kv_cache_groups", None
+        ):
+            ie_logical_block_size = max(
+                int(g.kv_cache_spec.block_size)
+                for g in self._kv_cache_config.kv_cache_groups
+            )
+
+        bundled = False
+        if should_flatten_kv_caches(self._kv_cache_config):
+            flat_kv, sched_by_layer, layer_to_groups, bundled = build_flat_kv_caches(
+                kv_caches,
+                self._kv_cache_config,
+                ie_logical_block_size=ie_logical_block_size or None,
+            )
+            logger.info(
+                "Preprocessed multi-spec KV caches: %d model layers -> "
+                "%d logical layers (bundled=%s)",
+                len(kv_caches),
+                len(flat_kv),
+                bundled,
+            )
+
+        try:
+            # Inject extracted layout hints into the NPU connector
+            engine = getattr(self, "lmcache_engine", None)
+            connector = getattr(engine, "gpu_connector", None) if engine else None
+            if ie_logical_block_size and connector is not None and hasattr(
+                connector, "layout_hints"
+            ):
+                hints = connector.layout_hints or {}
+                if block_size:
+                    hints["vllm_block_size"] = block_size
+                if self._num_kv_groups > 1:
+                    hints["block_sizes_by_group"] = self._block_sizes_by_group
+                hints["inference_engine_logical_block_size"] = ie_logical_block_size
+                hints["compress_ratios_by_group"] = self._compress_ratios_by_group
+                if sched_by_layer is not None:
+                    hints["scheduler_group_by_flat_layer"] = sched_by_layer
+                if layer_to_groups is not None:
+                    hints["layer_to_scheduler_groups"] = layer_to_groups
+                    hints["model_kv_caches"] = kv_caches
+                    hints["flat_layer_names"] = list(flat_kv.keys())
+                if should_flatten_kv_caches(self._kv_cache_config):
+                    hints["bundle_multi_spec"] = bundled
+                connector.layout_hints = hints
+        except Exception:
+            logger.warning(
+                "Failed to push layout hints into NPU connector",
+                exc_info=True,
+            )
+
+        # Build kv_layer_groups_manager before post_init() so
+        # metadata.get_shapes() allocates one MemoryObj slot per NPU group.
+        # Pointer tables stay lazy in _initialize_pointers on first store.
+        flatten_active = should_flatten_kv_caches(self._kv_cache_config)
+        try:
+            engine = getattr(self, "lmcache_engine", None)
+            connector = getattr(engine, "gpu_connector", None) if engine else None
+            if connector is not None and hasattr(connector, "ensure_kv_layer_groups"):
+                connector.ensure_kv_layer_groups(list(flat_kv.values()))
+                logger.info(
+                    "Registered KV layer groups during register_kv_caches "
+                    "(%d layers, kv_layer_groups_manager=%s)",
+                    len(flat_kv),
+                    getattr(
+                        getattr(engine, "metadata", None),
+                        "kv_layer_groups_manager",
+                        "N/A",
+                    ),
+                )
+        except Exception:
+            if flatten_active:
+                logger.error(
+                    "Failed to register KV layer groups after multi-spec "
+                    "preprocessing",
+                    exc_info=True,
+                )
+                raise
+            logger.warning(
+                "Failed to register KV layer groups; "
+                "will fall back to legacy single-group allocation",
+                exc_info=True,
+            )
+
+        super().register_kv_caches(flat_kv, *args, **kwargs)
+
+    # Upstream start_load_kv only transfers the primary group's slot_mapping.
+    # Multi-group retrieve needs ALL per-group slot mappings on NPU so the
+    # connector can DMA each spec's KV plane to the correct paged blocks.
+    @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self.current_layer = 0
         self._wait_for_save_done = False
-        super().start_load_kv(forward_context, **kwargs)
+
+        if self._num_kv_groups <= 1:
+            super().start_load_kv(forward_context, **kwargs)
+            return
+
+        if len(self.kv_caches) == 0:
+            logger.warning(
+                "Please update LMCacheConnector, "
+                "use register_kv_caches to init kv_caches"
+            )
+            self._init_kv_caches_from_forward_context(forward_context)
+
+        metadata = self._parent._get_connector_metadata()
+        assert isinstance(metadata, LMCacheConnectorMetadata)
+
+        if len(self.kv_caches) == 0:
+            return
+
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            logger.debug("In connector.start_load_kv, but the attn_metadata is None")
+            return
+
+        assert self.lmcache_engine is not None
+        kvcaches = list(self.kv_caches.values())
+        gpu_connector = self.lmcache_engine.gpu_connector
+        self.layerwise_retrievers = []
+
+        last_idx = None
+        for idx, request in enumerate(metadata.requests):
+            if request.load_spec is not None and request.load_spec.can_load:
+                last_idx = idx
+
+        for idx, request in enumerate(metadata.requests):
+            if request.load_spec is not None:
+                self._stats_monitor.update_interval_vllm_hit_tokens(
+                    request.load_spec.vllm_cached_tokens
+                )
+                self._stats_monitor.update_interval_prompt_tokens(
+                    len(request.token_ids)
+                )
+
+            if request.load_spec is None or not request.load_spec.can_load:
+                continue
+
+            tokens = request.token_ids
+            slot_mappings_cpu: list[torch.Tensor] = []
+            for group_idx in range(request.num_kv_groups):
+                group_slot_mapping = request.get_slot_mapping(group_idx)
+                assert isinstance(group_slot_mapping, torch.Tensor)
+                slot_mappings_cpu.append(group_slot_mapping.pin_memory())
+
+            pg = request.primary_kv_group_idx
+            slot_mapping_cpu = slot_mappings_cpu[pg]
+
+            slot_mappings_npu: list[torch.Tensor] = []
+            with torch.npu.stream(gpu_connector.load_stream):
+                for sm_cpu in slot_mappings_cpu:
+                    slot_mappings_npu.append(
+                        sm_cpu.to(device="npu", dtype=torch.long, non_blocking=True)
+                    )
+                slot_mapping_npu = slot_mappings_npu[pg]
+
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
+            masked_token_count = (
+                request.load_spec.vllm_cached_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            token_mask[:masked_token_count] = False
+
+            lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
+            retrieve_kwargs: dict = {
+                "kvcaches": kvcaches,
+                "slot_mapping": slot_mapping_npu,
+                "vllm_cached_tokens": request.load_spec.vllm_cached_tokens,
+                "request_configs": request.request_configs,
+                "req_id": request.req_id,
+            }
+            if request.num_kv_groups > 1:
+                retrieve_kwargs["slot_mappings_by_group"] = tuple(slot_mappings_cpu)
+                retrieve_kwargs["slot_mappings_npu_by_group"] = tuple(slot_mappings_npu)
+
+            if self.use_layerwise:
+                sync = idx == last_idx
+                if self.enable_blending:
+                    self.blender.blend(
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
+                        kvcaches=kvcaches,
+                        slot_mapping=slot_mapping_npu[:lmcache_cached_tokens],
+                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                    )
+                else:
+                    layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                        tokens[:lmcache_cached_tokens],
+                        token_mask[:lmcache_cached_tokens],
+                        **retrieve_kwargs,
+                        sync=sync,
+                    )
+                    next(layerwise_retriever)
+                    next(layerwise_retriever)
+                    self.layerwise_retrievers.append(layerwise_retriever)
+            else:
+                ret_token_mask = self.lmcache_engine.retrieve(
+                    tokens[:lmcache_cached_tokens],
+                    token_mask[:lmcache_cached_tokens],
+                    **retrieve_kwargs,
+                )
+
+                num_retrieved_tokens = ret_token_mask.sum().item()
+                num_expected_tokens = (
+                    lmcache_cached_tokens - request.load_spec.vllm_cached_tokens
+                )
+                if num_retrieved_tokens < num_expected_tokens:
+                    logger.error(
+                        "Request %s"
+                        "The number of retrieved tokens is less than the "
+                        "expected number of tokens! This should not happen!",
+                        request.req_id,
+                    )
+                    logger.error(
+                        "Num retrieved tokens: %d, num expected tokens: %d",
+                        num_retrieved_tokens,
+                        num_expected_tokens,
+                    )
+                    missing_blocks = self.record_failed_blocks(
+                        request.req_id,
+                        token_mask[:lmcache_cached_tokens],
+                        ret_token_mask,
+                        slot_mapping_npu[:lmcache_cached_tokens],
+                    )
+                    self._invalid_block_ids.update(missing_blocks)
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
@@ -100,16 +352,45 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
                 token_ids = request.token_ids
 
-                slot_mapping = request.slot_mapping
-                assert isinstance(slot_mapping, torch.Tensor)
-                assert len(slot_mapping) == len(token_ids)
+                pg = request.primary_kv_group_idx
+                slot_mappings_cpu: list[torch.Tensor] = []
+                for group_idx in range(request.num_kv_groups):
+                    group_slot_mapping = request.get_slot_mapping(group_idx)
+                    assert isinstance(group_slot_mapping, torch.Tensor)
+                    assert len(group_slot_mapping) <= len(token_ids)
+                    slot_mappings_cpu.append(group_slot_mapping.pin_memory())
+
+                slot_mapping = slot_mappings_cpu[pg]
+                if request.num_kv_groups > 1:
+                    logger.info(
+                        "Ascend wait_for_save: multi-group slot_mapping "
+                        "(%d groups); primary group %d has %d slots for "
+                        "%d tokens",
+                        request.num_kv_groups,
+                        pg,
+                        len(slot_mapping),
+                        len(token_ids),
+                    )
+                elif len(slot_mapping) != len(token_ids):
+                    logger.debug(
+                        "slot_mapping length %d != token_ids length %d "
+                        "(primary group %d, compress_ratio %d)",
+                        len(slot_mapping),
+                        len(token_ids),
+                        pg,
+                        self._compress_ratios_by_group[pg],
+                    )
 
                 # lmcache-ascend start ---------------------
-                slot_mapping = slot_mapping.pin_memory()
+                slot_mappings_npu: list[torch.Tensor] = []
                 with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
-                    slot_mapping_npu = slot_mapping.to(
-                        device="npu", dtype=torch.long, non_blocking=True
-                    )
+                    for sm_cpu in slot_mappings_cpu:
+                        slot_mappings_npu.append(
+                            sm_cpu.to(
+                                device="npu", dtype=torch.long, non_blocking=True
+                            )
+                        )
+                    slot_mapping_npu = slot_mappings_npu[pg]
                 # lmcache-ascend end ---------------------
 
                 skip_leading_tokens = save_spec.skip_leading_tokens
@@ -148,19 +429,35 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                         )
                         token_ids = token_ids[:aligned_token_len]
                         store_mask = store_mask[:aligned_token_len]
-                        slot_mapping = slot_mapping[:aligned_token_len]
+                        slot_mappings_cpu = [
+                            sm[:aligned_token_len] for sm in slot_mappings_cpu
+                        ]
+                        slot_mapping = slot_mappings_cpu[pg]
+                        slot_mappings_npu = [
+                            sm[:aligned_token_len] for sm in slot_mappings_npu
+                        ]
+                        slot_mapping_npu = slot_mappings_npu[pg]
+
+                store_kwargs: dict = {
+                    "kvcaches": kvcaches,
+                    "slot_mapping": slot_mapping,
+                    "offset": skip_leading_tokens,
+                    "transfer_spec": request.disagg_spec,
+                    "request_configs": request.request_configs,
+                    "req_id": request.req_id,
+                    "ordering_event": ordering_event,
+                    "slot_mapping_npu": slot_mapping_npu,
+                }
+                if request.num_kv_groups > 1:
+                    store_kwargs["slot_mappings_by_group"] = tuple(slot_mappings_cpu)
+                    store_kwargs["slot_mappings_npu_by_group"] = tuple(
+                        slot_mappings_npu
+                    )
 
                 self.lmcache_engine.store(
                     token_ids,
                     mask=store_mask,
-                    kvcaches=kvcaches,
-                    slot_mapping=slot_mapping,
-                    offset=skip_leading_tokens,
-                    transfer_spec=request.disagg_spec,
-                    request_configs=request.request_configs,
-                    req_id=request.req_id,
-                    ordering_event=ordering_event,
-                    slot_mapping_npu=slot_mapping_npu,
+                    **store_kwargs,
                 )
 
                 if get_pp_group().is_last_rank:
@@ -291,3 +588,30 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
         delay_free = self.store_async and self.kv_role != "kv_consumer"
         return delay_free, return_params
+
+    @_lmcache_nvtx_annotate
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """vLLM HMA hook; delegates to :meth:`request_finished` (see upstream LMCache)."""
+        if not block_ids:
+            return False, None
+        if len(block_ids) > 1:
+            if len(block_ids) == len(self._block_sizes_by_group):
+                primary = max(
+                    range(len(block_ids)),
+                    key=lambda i: len(block_ids[i]) * self._block_sizes_by_group[i],
+                )
+            else:
+                primary = 0
+            logger.debug(
+                "LMCache-Ascend: request_finished_all_groups: %d KV groups; "
+                "using primary group %d (%d blocks)",
+                len(block_ids),
+                primary,
+                len(block_ids[primary]),
+            )
+            return self.request_finished(request, block_ids[primary])
+        return self.request_finished(request, block_ids[0])
