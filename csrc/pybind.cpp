@@ -64,8 +64,27 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("unregister_ptr", [](uintptr_t ptr_addr) {
     return unregister_ptr(reinterpret_cast<void *>(ptr_addr));
   });
-  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer);
-  m.def("fused_multi_layer_kv_transfer", &fused_multi_layer_kv_transfer);
+  // Trailing dim/block args default to 0 so legacy call sites (pre-DSv4) need no
+  // changes; new code passes dsa_c8_scale_plane_bytes and paged_kv_block_size.
+  m.def("multi_layer_kv_transfer", &multi_layer_kv_transfer,
+        py::arg("key_value"), py::arg("key_value_ptrs"), py::arg("slot_mapping"),
+        py::arg("paged_memory_device"), py::arg("page_buffer_size"),
+        py::arg("direction"), py::arg("use_mla"), py::arg("kvcache_format_raw"),
+        py::arg("k_hidden_dims") = 0, py::arg("v_hidden_dims") = 0,
+        py::arg("dsa_hidden_dims") = 0,
+        py::arg("dsa_c8_scale_plane_bytes") = 0,
+        py::arg("paged_kv_block_size") = 0);
+  m.def("multi_layer_kv_transfer_multi_plane",
+        &multi_layer_kv_transfer_multi_plane);
+  m.def("fused_multi_layer_kv_transfer", &fused_multi_layer_kv_transfer,
+        py::arg("key_value"), py::arg("staging_cache"),
+        py::arg("key_value_ptrs"), py::arg("slot_mapping"),
+        py::arg("paged_memory_device"), py::arg("page_buffer_size"),
+        py::arg("direction"), py::arg("use_mla"), py::arg("kvcache_format_raw"),
+        py::arg("k_hidden_dims") = 0, py::arg("v_hidden_dims") = 0,
+        py::arg("dsa_hidden_dims") = 0,
+        py::arg("dsa_c8_scale_plane_bytes") = 0,
+        py::arg("paged_kv_block_size") = 0);
   m.def("multi_layer_kv_transfer_310p", &multi_layer_kv_transfer_310p);
   m.def("single_layer_kv_transfer", &single_layer_kv_transfer_wrapper);
   m.def("batched_fused_single_layer_kv_transfer",

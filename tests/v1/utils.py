@@ -76,14 +76,14 @@ def check_paged_kv_cache_equal(
     num_heads=8,
     head_size=128,
     vllm_two_major=True,
-    kv_format=1,  # 1:MERGED KV 2:SEPARATE KV 3:MLA_KV 4:DSA_KV
+    kv_format=1,  # 1:MERGED KV 2:SEPARATE KV 3:MLA_KV 4:DSA_KV 5:DSA_C8_KV
     kv_lora_rank=0,
     qk_rope_head_dim=0,
     dsa_head_dim=0,
 ):
     """
     Check whether two paged kv caches are the same at slot_mapping.
-    Supports MERGED_KV, SEPARATE_KV, MLA_KV, and DSA_KV formats.
+    Supports MERGED_KV, SEPARATE_KV, MLA_KV, DSA_KV, and DSA_C8_KV formats.
     """
     token_dim = 0
     num_tokens = slot_mapping.shape[0]
@@ -104,19 +104,39 @@ def check_paged_kv_cache_equal(
         elif kv_format == 4:  # DSA_KV: (k_cache, v_cache, dsa_k_cache)
             # DSA format: k_cache=[blocks, block_size, kv_lora_rank],
             #             v_cache=[blocks, block_size, qk_rope_head_dim],
-            #             dsa_k_cache=[blocks, block_size, 1, 128]
+            #             dsa_k_cache=[blocks, block_size, 1, dsa_head_dim]
             left_k = left_kv[0].reshape(-1, kv_lora_rank)
             left_v = left_kv[1].reshape(-1, qk_rope_head_dim)
-            left_dsa = left_kv[2].reshape(-1, 128)
+            left_dsa = left_kv[2].reshape(-1, dsa_head_dim)
             right_k = right_kv[0].reshape(-1, kv_lora_rank)
             right_v = right_kv[1].reshape(-1, qk_rope_head_dim)
-            right_dsa = right_kv[2].reshape(-1, 128)
+            right_dsa = right_kv[2].reshape(-1, dsa_head_dim)
 
             assert len(left_dsa.shape) == 2
             assert len(right_dsa.shape) == 2
             assert left_dsa.shape[token_dim] >= num_tokens
             assert right_dsa.shape[token_dim] >= num_tokens
             assert (left_dsa[slot_mapping, :] == right_dsa[slot_mapping, :]).all()
+        elif kv_format == 5:  # DSA_C8_KV: (k, v, dsa_k, dsa_k_scale)
+            scale_dim = int(left_kv[3].shape[-1])
+            left_k = left_kv[0].reshape(-1, kv_lora_rank)
+            left_v = left_kv[1].reshape(-1, qk_rope_head_dim)
+            left_dsa = left_kv[2].reshape(-1, dsa_head_dim)
+            left_sc = left_kv[3].reshape(-1, scale_dim)
+            right_k = right_kv[0].reshape(-1, kv_lora_rank)
+            right_v = right_kv[1].reshape(-1, qk_rope_head_dim)
+            right_dsa = right_kv[2].reshape(-1, dsa_head_dim)
+            right_sc = right_kv[3].reshape(-1, scale_dim)
+
+            for ln, rn in (
+                (left_dsa, right_dsa),
+                (left_sc, right_sc),
+            ):
+                assert len(ln.shape) == 2
+                assert len(rn.shape) == 2
+                assert ln.shape[token_dim] >= num_tokens
+                assert rn.shape[token_dim] >= num_tokens
+                assert (ln[slot_mapping, :] == rn[slot_mapping, :]).all()
         else:  # MERGED_KV or SEPARATE_KV with same K/V shapes
             left_k = left_kv[0].reshape(-1, num_heads, head_size)
             left_v = left_kv[1].reshape(-1, num_heads, head_size)
@@ -133,7 +153,7 @@ def check_paged_kv_cache_equal(
         assert right_k.shape[token_dim] >= num_tokens
         assert right_v.shape[token_dim] >= num_tokens
 
-        if kv_format in (3, 4):  # MLA/DSA format (2D tensors after reshape)
+        if kv_format in (3, 4, 5):  # MLA/DSA/DSA-C8 (2D tensors after reshape)
             assert (left_k[slot_mapping, :] == right_k[slot_mapping, :]).all()
             assert (left_v[slot_mapping, :] == right_v[slot_mapping, :]).all()
         else:  # MERGED/SEPARATE format (3D tensors)
@@ -258,4 +278,40 @@ def generate_dsa_kv_cache(
         v_cache = torch.rand(v_shape, dtype=dtype, device=device)
         dsa_k_cache = torch.rand(dsa_k_shape, dtype=dtype, device=device)
         ret.append((k_cache, v_cache, dsa_k_cache))
+    return ret
+
+
+def generate_dsa_c8_kv_cache(
+    num_blocks: int,
+    device: str,
+    num_layers: int,
+    num_kv_heads: int,
+    kv_lora_rank: int,
+    qk_rope_head_dim: int,
+    dsa_head_dim: int = 128,
+    block_size: int = 16,
+    kv_dtype: torch.dtype = torch.bfloat16,
+    dsa_dtype: torch.dtype = torch.int8,
+    scale_dtype: torch.dtype = torch.float16,
+) -> list[
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+]:
+    """
+    Generate DSA + C8 tuple (k, v, dsa_k, dsa_k_scale) with mixed dtypes.
+
+    Shapes follow vllm-ascend MLA sparse + C8 views; slot grid is
+    num_blocks x block_size for every tensor in the tuple.
+    """
+    ret: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = []
+    k_shape = [num_blocks, block_size, num_kv_heads, kv_lora_rank]
+    v_shape = [num_blocks, block_size, num_kv_heads, qk_rope_head_dim]
+    dsa_k_shape = [num_blocks, block_size, 1, dsa_head_dim]
+    scale_shape = [num_blocks, block_size, 1, 1]
+
+    for _ in range(num_layers):
+        k_cache = torch.rand(k_shape, dtype=kv_dtype, device=device)
+        v_cache = torch.rand(v_shape, dtype=kv_dtype, device=device)
+        dsa_k_cache = torch.randint(-128, 127, dsa_k_shape, dtype=dsa_dtype, device=device)
+        dsa_k_scale = torch.rand(scale_shape, dtype=scale_dtype, device=device)
+        ret.append((k_cache, v_cache, dsa_k_cache, dsa_k_scale))
     return ret
