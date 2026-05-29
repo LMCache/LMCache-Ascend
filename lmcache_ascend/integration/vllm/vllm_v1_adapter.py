@@ -217,7 +217,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             for group_idx in range(request.num_kv_groups):
                 group_slot_mapping = request.get_slot_mapping(group_idx)
                 assert isinstance(group_slot_mapping, torch.Tensor)
-                slot_mappings_cpu.append(group_slot_mapping.pin_memory())
+                slot_mappings_cpu.append(group_slot_mapping)
 
             pg = request.primary_kv_group_idx
             slot_mapping_cpu = slot_mappings_cpu[pg]
@@ -226,7 +226,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             with torch.npu.stream(gpu_connector.load_stream):
                 for sm_cpu in slot_mappings_cpu:
                     slot_mappings_npu.append(
-                        sm_cpu.to(device="npu", dtype=torch.long, non_blocking=True)
+                        sm_cpu.to(device="npu", dtype=torch.long)
                     )
                 slot_mapping_npu = slot_mappings_npu[pg]
 
@@ -298,6 +298,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                         token_mask[:lmcache_cached_tokens],
                         ret_token_mask,
                         slot_mapping_npu[:lmcache_cached_tokens],
+                        block_size=self._block_sizes_by_group[pg],
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
@@ -358,7 +359,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     group_slot_mapping = request.get_slot_mapping(group_idx)
                     assert isinstance(group_slot_mapping, torch.Tensor)
                     assert len(group_slot_mapping) <= len(token_ids)
-                    slot_mappings_cpu.append(group_slot_mapping.pin_memory())
+                    slot_mappings_cpu.append(group_slot_mapping)
 
                 slot_mapping = slot_mappings_cpu[pg]
                 if request.num_kv_groups > 1:
@@ -386,9 +387,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
                     for sm_cpu in slot_mappings_cpu:
                         slot_mappings_npu.append(
-                            sm_cpu.to(
-                                device="npu", dtype=torch.long, non_blocking=True
-                            )
+                            sm_cpu.to(device="npu", dtype=torch.long)
                         )
                     slot_mapping_npu = slot_mappings_npu[pg]
                 # lmcache-ascend end ---------------------

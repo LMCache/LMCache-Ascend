@@ -225,7 +225,7 @@ def _pointers_for_entry(
         if isinstance(entry, torch.Tensor):
             return [entry.data_ptr()]
         if isinstance(entry, (tuple, list)) and _is_shared_storage_blob(entry):
-            blob_ptr = entry[0].untyped_storage().data_ptr()
+            blob_ptr = entry[0].data_ptr()
             if multi_plane:
                 return [_get_primary_blob_view(entry).data_ptr()]
             return [blob_ptr, blob_ptr]
@@ -572,11 +572,13 @@ class _V2KVTransferMixin:
             dtype=torch.int32,
             device=self.kvcaches_device,
         )
+        plane_hidden_bytes = group_params["per_plane_hidden_dim_bytes"]
         hds = torch.tensor(
-            group_params["per_plane_hidden_dim_bytes"],
+            plane_hidden_bytes,
             dtype=torch.int32,
             device=self.kvcaches_device,
         )
+        max_hidden_dim_bytes = max(plane_hidden_bytes)
 
         lmc_ops.multi_layer_kv_transfer_multi_plane(
             mem_tensor,
@@ -586,6 +588,7 @@ class _V2KVTransferMixin:
             pbs,
             bss,
             hds,
+            max_hidden_dim_bytes,
             self.kvcaches_device,
             is_store,
             num_planes,

@@ -11,6 +11,7 @@ import torch
 
 from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    LMCacheConnectorV1ImplMultiGroup,
     ReqMeta,
     RequestTracker,
     _build_slot_mapping_for_group,
@@ -349,3 +350,67 @@ def test_request_tracker_from_new_request(
     assert tracker.req_id == "req-1"
     assert tracker.allocated_block_ids_by_group == expected_groups
     assert len(tracker.token_ids) == 32
+
+
+def _make_record_failed_blocks_adapter(*, block_size: int = 128):
+    adapter = object.__new__(LMCacheConnectorV1ImplMultiGroup)
+    adapter._block_size = block_size
+    return adapter
+
+
+def test_record_failed_blocks_uses_group_block_size() -> None:
+    """Block IDs must use the KV group's block size, not cache_config.block_size."""
+    adapter = _make_record_failed_blocks_adapter(block_size=128)
+    expected_mask = torch.tensor([True, True])
+    ret_mask = torch.tensor([True, False])
+    slot_mapping = torch.tensor([0, 1024], dtype=torch.long)
+
+    with_group_bs = adapter.record_failed_blocks(
+        "req",
+        expected_mask,
+        ret_mask,
+        slot_mapping,
+        block_size=1024,
+    )
+    with_default_bs = adapter.record_failed_blocks(
+        "req",
+        expected_mask,
+        ret_mask,
+        slot_mapping,
+    )
+
+    assert with_group_bs == {1}
+    assert with_default_bs == {8}
+    assert with_group_bs != with_default_bs
+
+
+def test_record_failed_blocks_respects_expected_mask() -> None:
+    """vLLM-cached tokens must not contribute to failed block IDs."""
+    adapter = _make_record_failed_blocks_adapter(block_size=128)
+    expected_mask = torch.tensor([False, True, True])
+    ret_mask = torch.tensor([False, True, False])
+    slot_mapping = torch.tensor([999, 1024, 2048], dtype=torch.long)
+
+    result = adapter.record_failed_blocks(
+        "req",
+        expected_mask,
+        ret_mask,
+        slot_mapping,
+        block_size=1024,
+    )
+
+    assert result == {2}
+
+
+def test_record_failed_blocks_no_missing_tokens() -> None:
+    adapter = _make_record_failed_blocks_adapter(block_size=128)
+    mask = torch.tensor([True, True])
+
+    result = adapter.record_failed_blocks(
+        "req",
+        mask,
+        mask,
+        torch.tensor([0, 128], dtype=torch.long),
+    )
+
+    assert result == set()

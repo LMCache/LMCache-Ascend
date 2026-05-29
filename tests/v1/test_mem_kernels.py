@@ -1565,6 +1565,19 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
     slot_mapping = torch.arange(0, num_tokens, device=device, dtype=torch.long)
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
 
+    # Regression guard: _multi_plane_layer_block_bytes previously asserted
+    # plane_stride % 32 == 0, which fires for the scale plane (hd=2, sb=2) when
+    # a partial last chunk has a token count not divisible by 16.  Verify every
+    # chunk size — including partial ones — is handled without error, and that
+    # the returned value matches the kernel's AlignUp32Bytes accumulation.
+    for chunk_toks in {int(c.shape[0]) for c in slot_mapping_chunked}:
+        block = _multi_plane_layer_block_bytes(list(plane_bytes), chunk_toks)
+        expected = sum((hd * chunk_toks + 31) & ~31 for hd in plane_bytes)
+        assert block == expected, (
+            f"_multi_plane_layer_block_bytes mismatch for chunk_toks={chunk_toks}: "
+            f"got {block}, expected {expected}"
+        )
+
     row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
     pinned_cpu_size = max(
         256 * 1024 * 1024,
@@ -1610,6 +1623,7 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
             pbs,
             bss,
             hds,
+            max(plane_bytes),
             dev,
             is_store,
             4,
@@ -1771,6 +1785,7 @@ def test_fused_multi_layer_kv_transfer_dsa_c8_format(
             pbs,
             bss,
             hds,
+            max(plane_bytes),
             dev,
             True,
             4,
@@ -1897,7 +1912,8 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
         planes, entry_format, shape_desc, layout_hints=layout_hints, num_tokens=chunk
     )
     plane_bytes = group_params["per_plane_hidden_dim_bytes"]
-    plane_block_sizes = [b * chunk for b in plane_bytes]
+    # AlignUp32 per plane to match the kernel's AlignUp32Bytes accumulation.
+    plane_block_sizes = [(b * chunk + 31) & ~31 for b in plane_bytes]
     lmc_chunk_row_bytes = int(group_params["k_extra"])
     layer_block_bytes = _multi_plane_layer_block_bytes(plane_bytes, chunk)
     ptrs = torch.tensor(

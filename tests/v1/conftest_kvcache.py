@@ -322,10 +322,6 @@ def separate_kv_round_trip_via_connector(
 
 LARGE_TOKEN_COPY_SIZE = 40960
 
-# DSA-C8 scale plane is 2 B/token; plane stride hd*num_tokens must be 32B-aligned.
-MULTI_PLANE_C8_TOKEN_ALIGN = 16
-
-
 def power_of_two_boundary_triplet(exp: int) -> tuple[int, int, int]:
     """Return (2^exp - 1, 2^exp, 2^exp + 1)."""
     base = 1 << exp

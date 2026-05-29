@@ -6,6 +6,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 
@@ -15,6 +16,7 @@ from .conftest_ds4 import (
     make_ascend_adapter_for_load,
     make_forward_context,
     make_load_req_meta,
+    make_partial_fail_load_req_meta,
     npu_available,
 )
 
@@ -74,3 +76,29 @@ def test_start_load_kv_skips_requests_without_load_spec() -> None:
     adapter.start_load_kv(make_forward_context())
 
     adapter.lmcache_engine.retrieve.assert_not_called()
+
+
+def test_start_load_kv_partial_fail_uses_primary_group_block_size() -> None:
+    """Partial retrieve must record block IDs using the primary group's block size.
+
+    Slot 1024 is block 1 at bs=1024 but block 8 at bs=128 (cache_config default).
+    """
+    if not npu_available():
+        pytest.skip("NPU not available")
+
+    adapter = make_ascend_adapter_for_load(num_kv_groups=2)
+    adapter._block_sizes_by_group = (128, 1024)
+    adapter._compress_ratios_by_group = (8, 1)
+    adapter._block_size = DS4_VLLM_BLOCK_SIZE
+    adapter.lmcache_engine.retrieve.return_value = torch.tensor([True, False])
+
+    req = make_partial_fail_load_req_meta()
+    metadata = LMCacheConnectorMetadata(requests=[req])
+    adapter._parent._get_connector_metadata.return_value = metadata
+
+    adapter.start_load_kv(make_forward_context())
+
+    adapter.lmcache_engine.retrieve.assert_called_once()
+    assert adapter._invalid_block_ids == {1}
+    assert 1024 // 128 == 8
+    assert {8} != {1}

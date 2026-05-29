@@ -160,7 +160,7 @@ def _build_slot_mappings_by_group(
         )
     mappings: list[torch.Tensor] = []
     for g, (group_block_ids, block_size) in enumerate(
-        zip(block_ids_by_group, block_sizes_by_group, strict=True)
+        zip(block_ids_by_group, block_sizes_by_group)
     ):
         ratio = compress_ratios[g] if compress_ratios else 1
         effective = math.ceil(num_tokens / ratio) if ratio > 1 else num_tokens
@@ -320,7 +320,6 @@ class RequestTracker:
             for old_group_ids, new_group_ids in zip(
                 self.allocated_block_ids_by_group,
                 new_block_ids_by_group,
-                strict=True,
             ):
                 merged.append(old_group_ids + new_group_ids)
             self.allocated_block_ids_by_group = tuple(merged)
@@ -746,6 +745,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                         token_mask[:lmcache_cached_tokens],
                         ret_token_mask,
                         slot_mapping[:lmcache_cached_tokens],
+                        block_size=self._block_sizes_by_group[pg],
                     )
                     self._invalid_block_ids.update(missing_blocks)
 
@@ -755,6 +755,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         expected_mask: torch.Tensor,
         ret_mask: torch.Tensor,
         slot_mapping: torch.Tensor,
+        block_size: Optional[int] = None,
     ) -> set[int]:
         """Record block IDs associated with failed load attempts.
 
@@ -773,6 +774,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 are False.
             slot_mapping: Tensor indicating slot IDs for each token. The block
                 ID is computed by dividing the slot ID by the block size.
+            block_size: vLLM block size for the slot_mapping's KV group. Defaults
+                to ``self._block_size`` when omitted.
 
         Example:
             expected_mask = [F, T, T, T] meaning the 1st is in vLLM cache
@@ -807,8 +810,9 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         if slot_mapping_cpu.shape[0] > missing_mask.shape[0]:
             slot_mapping_cpu = slot_mapping_cpu[: missing_mask.shape[0]]
 
+        bs = block_size if block_size is not None else self._block_size
         missing_blocks_tensor = torch.unique(
-            slot_mapping_cpu[missing_indices] // self._block_size
+            slot_mapping_cpu[missing_indices] // bs
         )
         missing_blocks = {int(block.item()) for block in missing_blocks_tensor}
 
@@ -1163,7 +1167,6 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     for group_block_ids, bs in zip(
                         request_tracker.allocated_block_ids_by_group,
                         self._block_sizes_by_group,
-                        strict=True,
                     )
                 )
                 tokens_to_keep = num_current_tokens

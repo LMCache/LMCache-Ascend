@@ -21,7 +21,7 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
     return kvcache_ops::AscendType::INT64;
   } else if (scalarType == at::ScalarType::Int) {
     return kvcache_ops::AscendType::INT32;
-  } else if (scalarType == at::ScalarType::Byte) {
+  } else if (scalarType == at::ScalarType::Byte || scalarType == at::ScalarType::Char) {
     return kvcache_ops::AscendType::INT8;
   } else {
     TORCH_CHECK(false, "ScalarType not supported.");
