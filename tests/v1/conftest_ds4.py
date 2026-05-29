@@ -459,6 +459,7 @@ def make_ascend_adapter_for_load(
     adapter._num_kv_groups = num_kv_groups
     adapter._compress_ratios_by_group = DS4_COMPRESS_RATIOS[:num_kv_groups]
     adapter._block_sizes_by_group = DS4_BLOCK_SIZES_BY_GROUP[:num_kv_groups]
+    adapter._block_size = DS4_VLLM_BLOCK_SIZE
     adapter._lmcache_chunk_size = DS4_CHUNK_SIZE
     adapter.use_layerwise = False
     adapter.enable_blending = False
@@ -488,6 +489,7 @@ def make_load_req_meta(
     can_load: bool = True,
     omit_load_spec: bool = False,
     num_kv_groups: int = DS4_NUM_SCHEDULER_GROUPS,
+    primary_kv_group_idx: int = 1,
 ) -> ReqMeta:
     if omit_load_spec:
         load_spec = None
@@ -509,6 +511,26 @@ def make_load_req_meta(
         token_ids=list(range(num_tokens)),
         slot_mappings_by_group=slot_mappings,
         allocated_block_ids_by_group=tuple([list(range(16))] * num_kv_groups),
+        primary_kv_group_idx=primary_kv_group_idx,
+        load_spec=load_spec,
+    )
+
+
+def make_partial_fail_load_req_meta() -> ReqMeta:
+    """Minimal 2-group request for partial-load failure regression tests."""
+    load_spec = LoadSpec(
+        vllm_cached_tokens=0,
+        lmcache_cached_tokens=2,
+        can_load=True,
+    )
+    return ReqMeta(
+        req_id="partial-fail-test",
+        token_ids=[0, 1],
+        slot_mappings_by_group=(
+            torch.tensor([0, 1], dtype=torch.long),
+            torch.tensor([0, 1024], dtype=torch.long),
+        ),
+        allocated_block_ids_by_group=([0], [0, 1]),
         primary_kv_group_idx=1,
         load_spec=load_spec,
     )

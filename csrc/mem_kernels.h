@@ -136,6 +136,6 @@ void multi_layer_kv_transfer_multi_plane(
     const torch::Tensor &slot_mapping_concat,
     const torch::Tensor &slot_mapping_offsets,
     const torch::Tensor &page_buffer_sizes, const torch::Tensor &block_sizes,
-    const torch::Tensor &hidden_dim_bytes,
+    const torch::Tensor &hidden_dim_bytes, const int64_t max_hidden_dim_bytes,
     const torch::Device &paged_memory_device, const bool direction,
     const int num_planes);

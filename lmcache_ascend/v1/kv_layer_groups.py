@@ -43,20 +43,26 @@ def _multi_plane_plane_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
     return out
 
 
-# Total chunk footprint per layer: sum of (hd * num_tokens) per plane.
-# LMCache chunk sizes are multiples of 256, so each plane stride is
-# already 32B-aligned; we assert rather than silently padding.
+# Total chunk footprint per layer: sum of AlignUp32(hd * num_tokens) per plane.
+# The NPU kernel's init() applies AlignUp32Bytes to each plane's payload so that
+# planeByteOffsets are 32B-aligned regardless of hd or num_tokens.  We mirror
+# that here so Python-side byte accounting is always consistent with the kernel,
+# including partial-chunk transfers (is_last_prefill=True, discard_partial_chunks=False).
 def _multi_plane_layer_block_bytes(
     plane_bytes: Sequence[int], num_tokens: int
 ) -> int:
-    """Bytes per layer: sum of (hd * num_tokens) per plane block."""
+    """Bytes per layer: sum of AlignUp32(hd * num_tokens) per plane block.
+
+    Mirrors the NPU kernel's ``AlignUp32Bytes(perPlaneHdBytes[p] * numTokensLmcChunk)``
+    accumulation so that Python byte accounting matches the device layout even when
+    ``hd * num_tokens`` is not already a multiple of 32 (e.g. scale plane with hd=2
+    and a partial last chunk whose token count is not divisible by 16).
+    """
     total = 0
     for hd in plane_bytes:
         plane_stride = hd * num_tokens
-        assert plane_stride % 32 == 0, (
-            f"Plane stride {plane_stride} (hd={hd} * num_tokens={num_tokens}) "
-            f"is not 32B-aligned; chunk_size must be a multiple of 32"
-        )
+        # Pad to the next 32-byte boundary, matching AlignUp32Bytes in the kernel.
+        plane_stride = (plane_stride + 31) & ~31
         total += plane_stride
     return total
 

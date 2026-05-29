@@ -5,6 +5,7 @@
 #include <ATen/ATen.h>
 #include <Python.h>
 #include <pybind11/pybind11.h>
+#include <torch_npu/csrc/core/npu/NPUCachingAllocator.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
@@ -137,7 +138,8 @@ void fused_multi_layer_kv_transfer(
               "staging_cache size insufficient: need ", required_size,
               " bytes, got ", staging_cache_size);
 
-  // DSA-C8 metadata tensors must outlive the async multi-plane kernel launch.
+  // DSA-C8 metadata tensors are ephemeral; recordStream keeps their storage
+  // alive until the multi-plane kernel completes on config.stream.
   torch::Tensor hidden_dim_bytes;
   torch::Tensor block_sizes;
   torch::Tensor page_buffer_sizes;
@@ -163,11 +165,13 @@ void fused_multi_layer_kv_transfer(
         {0, ntok, 2 * ntok, 3 * ntok, 4 * ntok}, i32_opts);
   }
 
+  const c10_npu::NPUStream npu_stream = c10_npu::getCurrentNPUStream();
   at_npu::native::OpCommand cmd;
   cmd.Name("fused_multi_layer_kv_transfer_kernel_v2");
   cmd.SetCustomHandler([config, staging_cache_ptr, key_value_ptr, required_size,
                         hidden_dim_bytes, block_sizes, page_buffer_sizes,
-                        slot_concat, slot_offsets, staging_cache]() -> int {
+                        slot_concat, slot_offsets, staging_cache,
+                        npu_stream]() -> int {
     auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
     auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
 
@@ -197,9 +201,16 @@ void fused_multi_layer_kv_transfer(
           static_cast<int64_t>(staging_cache.size(-1)) * staging_cache.element_size(),
           config.num_tokens_lmc_chunk, config.singlePerLoopBuffer,
           config.maxTokensPerLoop, config.direction);
-      ret = aclrtSynchronizeStream(config.stream);
-      TORCH_CHECK(ret == ACL_ERROR_NONE,
-                  "multi-plane kernel sync failed, ret=", ret);
+      c10_npu::NPUCachingAllocator::recordStream(
+          hidden_dim_bytes.storage().data_ptr(), npu_stream);
+      c10_npu::NPUCachingAllocator::recordStream(
+          block_sizes.storage().data_ptr(), npu_stream);
+      c10_npu::NPUCachingAllocator::recordStream(
+          page_buffer_sizes.storage().data_ptr(), npu_stream);
+      c10_npu::NPUCachingAllocator::recordStream(
+          slot_concat.storage().data_ptr(), npu_stream);
+      c10_npu::NPUCachingAllocator::recordStream(
+          slot_offsets.storage().data_ptr(), npu_stream);
     } else {
       kvcache_ops::multi_layer_kv_transfer_kernel_v2(
           dtype_num, slot_num, config.kvcache_format, config.aiv_num,
@@ -523,10 +534,11 @@ void multi_layer_kv_transfer_multi_plane(
     const torch::Tensor &slot_mapping_concat,
     const torch::Tensor &slot_mapping_offsets,
     const torch::Tensor &page_buffer_sizes, const torch::Tensor &block_sizes,
-    const torch::Tensor &hidden_dim_bytes,
+    const torch::Tensor &hidden_dim_bytes, const int64_t max_hidden_dim_bytes,
     const torch::Device &paged_memory_device, const bool direction,
     const int num_planes) {
   TORCH_CHECK(num_planes > 0, "num_planes must be positive");
+  TORCH_CHECK(num_planes <= 32, "num_planes cannot exceed 32 (kMaxPlanes)");
   TORCH_CHECK(slot_mapping_offsets.dim() == 1, "slot_mapping_offsets must be 1D");
   TORCH_CHECK(slot_mapping_offsets.size(0) == num_planes + 1,
               "slot_mapping_offsets must have num_planes+1 elements");
@@ -548,12 +560,7 @@ void multi_layer_kv_transfer_multi_plane(
   const int32_t num_layers =
       static_cast<int32_t>(key_value_ptrs.size(0) / num_planes);
 
-  int64_t max_hd_bytes = 0;
-  for (int p = 0; p < num_planes; ++p) {
-    const int64_t hd = hidden_dim_bytes[p].item<int64_t>();
-    TORCH_CHECK(hd > 0, "per-plane hidden_dim_bytes must be positive");
-    max_hd_bytes = std::max(max_hd_bytes, hd);
-  }
+  TORCH_CHECK(max_hidden_dim_bytes > 0, "max_hidden_dim_bytes must be positive");
 
   const int32_t num_tokens_lmc_chunk =
       key_value.dim() >= 3 ? static_cast<int32_t>(key_value.size(2)) : 1;
@@ -582,7 +589,7 @@ void multi_layer_kv_transfer_multi_plane(
   const uint32_t aiv_num =
       static_cast<uint32_t>(std::min(num_layers, 4));
   constexpr int32_t numBuffsOnDev = 2;
-  const int64_t baseBuffSize = numBuffsOnDev * max_hd_bytes;
+  const int64_t baseBuffSize = numBuffsOnDev * max_hidden_dim_bytes;
   TORCH_CHECK(ubSize >= static_cast<uint64_t>(baseBuffSize),
               "UB too small for multi-plane KV transfer");
   int32_t maxTokensPerLoop =
