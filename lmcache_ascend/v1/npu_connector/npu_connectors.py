@@ -692,7 +692,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """
         assert memory_obj.tensor is not None
 
-        self.initialize_kvcaches_ptr(**kwargs)
+        with torch.npu.stream(self.store_stream):
+            self.initialize_kvcaches_ptr(**kwargs)
+
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -702,29 +704,32 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        with torch.npu.stream(self.store_stream):
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         assert self.gpu_buffer.device == self.kvcaches_device
 
-        tmp_gpu_buffer = torch.empty(
-            memory_obj.tensor.size(), dtype=self.dtype, device=self.device
-        )
+        with torch.npu.stream(self.store_stream):
+            tmp_gpu_buffer = torch.empty(
+                memory_obj.tensor.size(), dtype=self.dtype, device=self.device
+            )
 
-        lmc_ops.multi_layer_kv_transfer_310p(
-            tmp_gpu_buffer,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.kvcaches_device,
-            self.page_buffer_size,
-            True,
-            self.use_mla,
-            self.num_kv_head,
-            self.head_size,
-            self.block_size,
-            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
-        )
+            lmc_ops.multi_layer_kv_transfer_310p(
+                tmp_gpu_buffer,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.kvcaches_device,
+                self.page_buffer_size,
+                True,
+                self.use_mla,
+                self.num_kv_head,
+                self.head_size,
+                self.block_size,
+                self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
+            )
 
-        memory_obj.tensor.copy_(tmp_gpu_buffer)
+            memory_obj.tensor.copy_(tmp_gpu_buffer)
+
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
