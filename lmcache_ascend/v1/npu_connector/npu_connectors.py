@@ -1105,7 +1105,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.store_stream.synchronize()
         from_gpu_time = start_event.elapsed_time(end_event)
 
-        return from_gpu_time / 1000.0 # convert to seconds
+        return from_gpu_time / 1000.0  # convert to seconds
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         if self.kv_format == KVCacheFormat.MLA_KV:
