@@ -81,6 +81,14 @@ jobs:
                 description: 'Queued (Waiting for runner pick-up)...',
                 context: '910C Unit Tests Status'
               });
+              await github.rest.repos.createCommitStatus({
+                owner,
+                repo,
+                sha,
+                state: 'pending',
+                description: 'Queued (Waiting for runner pick-up)...',
+                context: '910C Perf & Accuracy Status'
+              });
             } catch (error) {
               // 403 means "Forbidden" (likely a Fork PR). We ignore it.
               if (error.status === 403) {

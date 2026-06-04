@@ -1,0 +1,30 @@
+# LMCache-Ascend configuration for memory prefetch / evict API usage.
+#
+# Required parameters to enable the /memory/prefetch and /memory/evict
+# REST endpoints on the internal API server.
+
+# ── General cache settings ──────────────────────────────────────
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 100
+
+# ── Async loading (required by /memory/prefetch) ─────────────────
+enable_async_loading: True
+
+# ── Disk storage (optional, provides SSD tier for prefetch target) ──
+local_disk: "file:///home/"
+max_local_disk_size: 1000
+
+# ── Lookup timeout ───────────────────────────────────────────────
+lookup_timeout_ms: 300000
+
+# ── Internal API server (required) ───────────────────────────────
+internal_api_server_enabled: True
+internal_api_server_host: "0.0.0.0"
+internal_api_server_port_start: 6999
+
+# ── Chunk hash tracking & return (required) ──────────────────────
+enable_chunk_hashes_return: True
+
+# ── Lookup hashes cache size (recommended, prevents memory leak) ──
+lookup_hashes_cache_size: 2048
