@@ -1,0 +1,299 @@
+name: 'Perf & Accuracy Tests'
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Code Quality"]
+    types: [completed]
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TTFT_THRESHOLD: 0.46
+  ACC_TASK_THRESHOLDS: >
+    abstract_algebra=0.73
+    college_computer_science=0.79
+    high_school_physics=0.8278
+    machine_learning=0.75
+    moral_scenarios=0.6659
+    professional_law=0.5984
+
+jobs:
+  perf-910c:
+    name: Perf & Accuracy Tests on 910C
+    runs-on: [self-hosted, Linux, ARM64, 910c]
+    timeout-minutes: 45
+
+    environment: 
+      name: ci-hardware
+
+    if: >
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    container:
+      image: quay.nju.edu.cn/ascend/vllm-ascend:v0.18.0rc1-a3
+      env:
+        SOC_VERSION: Ascend910_9382
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+        LMCACHE_TRACK_USAGE: false
+        NO_CUDA_EXT: 1
+        NODE_EXTRA_CA_CERTS: /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+        LMCACHE_LOG_LEVEL: INFO
+        PYTHONHASHSEED: 0
+        LMCACHE_CHUNK_SIZE: 256
+        LMCACHE_LOCAL_CPU: True
+        LMCACHE_MAX_LOCAL_CPU_SIZE: 40.0
+        LMCACHE_LOCAL_DISK: "file:///tmp/lmcache_disk"
+        LMCACHE_MAX_LOCAL_DISK_SIZE: 5.0
+        MODEL_PATH: /mnt/sdb/models/Qwen3-32B
+        HF_DATASETS_CACHE: /mnt/sdb/datasets
+
+      options: >-
+        --label owner=ci-test-runner
+        --add-host=host.docker.internal:192.168.1.1
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci2
+        --device /dev/davinci3
+        --device /dev/davinci4
+        --device /dev/davinci5
+        --device /dev/davinci6
+        --device /dev/davinci7
+        --device /dev/davinci8
+        --device /dev/davinci9
+        --device /dev/davinci10
+        --device /dev/davinci11
+        --device /dev/davinci12
+        --device /dev/davinci13
+        --device /dev/davinci14
+        --device /dev/davinci15
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        -v /usr/local/dcmi:/usr/local/dcmi:ro
+        -v /etc/hccn.conf:/etc/hccn.conf:ro
+        -v /etc/pki/ca-trust:/etc/pki/ca-trust:ro
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        -v /root/.ssh:/root/.ssh:ro
+        -v /mnt/sdb/models/Qwen3-32B:/mnt/sdb/models/Qwen3-32B:ro
+        -v /mnt/sdb/datasets:/mnt/sdb/datasets
+        --user root
+        --cap-add=SYS_PTRACE
+
+      
+    steps:
+      - name: 🔧 Fix Proxy Configuration
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global url."git@github.com:".insteadOf "https://github.com/"
+          if getent hosts proxyhk.huawei.com >/dev/null 2>&1; then
+            echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+            echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
+            echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+            echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+          fi
+
+      - name: Checkout (Workflow Run)
+        if: github.event_name == 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          submodules: true
+
+      - name: Checkout (Dispatch or Call)
+        if: github.event_name != 'workflow_run'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+      
+      - name: 🟡 Set Status to Running
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) || 
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) || 
+                        context.sha;
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: 'pending',
+              description: 'Running perf & accuracy tests...',
+              context: '910C Perf & Accuracy Status',
+              target_url: target_url
+            });
+
+      - name: 🔧 Fix Git Safe Directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: 📦 Pre-clone LMCache Test Dependencies
+        run: |
+          LMCACHE_TAG=$(grep -oP 'LMCACHE_UPSTREAM_TAG\s*=\s*"\K[^"]+' lmcache_ascend/__init__.py)
+          git clone --branch "$LMCACHE_TAG" --depth 1 git@github.com:LMCache/LMCache.git /workspace/LMCache
+
+      - name: 📦 Install LMCache & Build Project
+        run: |
+          echo ">>> Installing LMCache Core..."
+          pip install lmcache==0.4.4
+
+          echo ">>> Building LMCache-Ascend..."
+          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          python3 -m pip install -v --no-build-isolation -e . 
+      
+      - name: ⏱ Run Performance Tests
+        id: perf-step
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          export ASCEND_RT_VISIBLE_DEVICES=14,15
+          mkdir -p /tmp/lmcache_disk
+
+          vllm serve "$MODEL_PATH" \
+            --served-model-name Qwen3-32B \
+            --gpu-memory-utilization 0.95 \
+            --trust-remote-code \
+            --tensor-parallel-size 2 \
+            --max-num-seqs 32 \
+            --max-num-batched-tokens 32768 \
+            --host 0.0.0.0 \
+            --port 8019 \
+            --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' \
+            > server.log 2>&1 &
+          VLLM_PID=$!
+          echo "VLLM_PID=$VLLM_PID" >> $GITHUB_ENV
+
+          for i in $(seq 1 60); do
+            if curl -s http://localhost:8019/health > /dev/null 2>&1; then
+              break
+            fi
+            sleep 10
+          done
+
+          if ! curl -s http://localhost:8019/health > /dev/null 2>&1; then
+            echo "Server failed to start after 10 minutes"
+            exit 1
+          fi
+
+          python3 /workspace/LMCache/benchmarks/multi_round_qa/multi-round-qa.py \
+            --num-users 10 \
+            --num-rounds 5 \
+            --qps 0.5 \
+            --shared-system-prompt 1000 \
+            --user-history-prompt 2000 \
+            --answer-len 100 \
+            --model Qwen3-32B \
+            --base-url http://localhost:8019/v1 \
+            --time 900 2>&1 | tee /tmp/perf_output.txt
+
+          TTFT=$(grep "Average TTFT" /tmp/perf_output.txt | tail -1 | grep -oP '[\d.]+(?=s)')
+          if [ -n "$TTFT" ] && awk "BEGIN { exit ($TTFT <= $TTFT_THRESHOLD) }"; then
+            echo "::error::TTFT ${TTFT}s exceeds ${TTFT_THRESHOLD}s threshold"
+            exit 1
+          fi
+          echo "::notice::TTFT ${TTFT}s within ${TTFT_THRESHOLD}s threshold."
+
+      - name: 📤 Upload Perf Output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-output-910c
+          path: /tmp/perf_output.txt
+
+
+      - name: 🎯 Run Accuracy Tests
+        id: acc-step
+        shell: bash
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          export ASCEND_RT_VISIBLE_DEVICES=14,15
+
+          pip install lm-eval[api]
+
+          TASKS="mmlu_abstract_algebra_generative,mmlu_college_computer_science_generative,mmlu_high_school_physics_generative,mmlu_professional_law_generative,mmlu_moral_scenarios_generative,mmlu_machine_learning_generative"
+
+          HF_ENDPOINT=https://hf-mirror.com lm_eval \
+            --model local-completions \
+            --model_args model=Qwen3-32B,base_url=http://localhost:8019/v1/completions,tokenizer=/mnt/sdb/models/Qwen3-32B,tokenizer_backend=huggingface,tokenized_requests=False \
+            --tasks "$TASKS" \
+            --num_fewshot 5 \
+            --batch_size auto \
+            --output_path accuracy_results \
+            --log_samples 2>&1 | tee /tmp/accuracy_output.txt
+
+          declare -A ACC_THRESHOLD
+          for pair in $ACC_TASK_THRESHOLDS; do
+            IFS='=' read -r task_key task_val <<< "$pair"
+            ACC_THRESHOLD["$task_key"]="$task_val"
+          done
+
+          FAILED_TASKS=""
+          while IFS='|' read -r _ tasks _ _ _ _ _ value _ _; do
+            task_name=$(echo "$tasks" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            expected="${ACC_THRESHOLD[$task_name]}"
+            if [ -n "$expected" ]; then
+              val=$(echo "$value" | sed 's/[[:space:]]//g')
+              if awk -v v="$val" -v e="$expected" 'BEGIN { exit (v >= e) }'; then
+                FAILED_TASKS="${FAILED_TASKS}  ${task_name}: ${val} (expected >= ${expected})\n"
+              fi
+            fi
+          done < <(grep -E "^\|.*\|\s*0\.[0-9]+\s*\|" /tmp/accuracy_output.txt)
+
+          if [ -n "$FAILED_TASKS" ]; then
+            echo -e "::error::Accuracy below threshold:\n${FAILED_TASKS}"
+            exit 1
+          fi
+          echo "::notice::All accuracy checks passed."
+
+
+
+      - name: 🛑 Stop vLLM Server
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "$VLLM_PID" ]; then
+            kill $VLLM_PID 2>/dev/null || true
+            wait $VLLM_PID 2>/dev/null || true
+          fi
+
+      - name: 📤 Upload Accuracy Output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: accuracy-output-910c
+          path: /tmp/accuracy_output.txt
+
+      - name: 🟢🔴 Update Hardware Status
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const sha = (context.payload.workflow_run && context.payload.workflow_run.head_sha) ||
+                        (context.payload.pull_request && context.payload.pull_request.head.sha) ||
+                        context.sha;
+            const state = '${{ job.status }}' === 'success' ? 'success' : 'failure';
+            const target_url = `https://github.com/${owner}/${repo}/actions/runs/${context.runId}`;
+            await github.rest.repos.createCommitStatus({
+              owner,
+              repo,
+              sha,
+              state: state,
+              target_url: target_url,
+              description: state === 'success' ? 'Perf & Accuracy Passed' : 'Perf & Accuracy Failed',
+              context: '910C Perf & Accuracy Status'
+            });
