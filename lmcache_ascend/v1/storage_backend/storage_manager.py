@@ -109,7 +109,7 @@ def batched_get(
     # TODO (ApostaC): remove the nested optional here
     for backend_name, storage_backend in self.get_active_storage_backends(location):
         memory_objs = storage_backend.batched_get_blocking(keys)
-        if memory_objs:
+        if memory_objs and any(m is not None for m in memory_objs):
             # Align with single-key `get()` logic:
             # auto-write remote data to local CPU cache, but skip deferred-fetch
             # proxies (e.g. P2P delay-pull ProxyMemoryObj) -- see module note.
