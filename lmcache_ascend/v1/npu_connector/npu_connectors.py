@@ -692,7 +692,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """
         assert memory_obj.tensor is not None
 
-        self.initialize_kvcaches_ptr(**kwargs)
+        with torch.npu.stream(self.store_stream):
+            self.initialize_kvcaches_ptr(**kwargs)
+
         assert self.kvcaches is not None, (
             "kvcaches should be provided in kwargs or initialized beforehand."
         )
@@ -702,29 +704,32 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         slot_mapping: torch.Tensor = kwargs["slot_mapping"]
 
-        kv_cache_pointers = self._initialize_pointers(self.kvcaches)
+        with torch.npu.stream(self.store_stream):
+            kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
         assert self.gpu_buffer.device == self.kvcaches_device
 
-        tmp_gpu_buffer = torch.empty(
-            memory_obj.tensor.size(), dtype=self.dtype, device=self.device
-        )
+        with torch.npu.stream(self.store_stream):
+            tmp_gpu_buffer = torch.empty(
+                memory_obj.tensor.size(), dtype=self.dtype, device=self.device
+            )
 
-        lmc_ops.multi_layer_kv_transfer_310p(
-            tmp_gpu_buffer,
-            kv_cache_pointers,
-            slot_mapping[start:end],
-            self.kvcaches_device,
-            self.page_buffer_size,
-            True,
-            self.use_mla,
-            self.num_kv_head,
-            self.head_size,
-            self.block_size,
-            self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
-        )
+            lmc_ops.multi_layer_kv_transfer_310p(
+                tmp_gpu_buffer,
+                kv_cache_pointers,
+                slot_mapping[start:end],
+                self.kvcaches_device,
+                self.page_buffer_size,
+                True,
+                self.use_mla,
+                self.num_kv_head,
+                self.head_size,
+                self.block_size,
+                self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
+            )
 
-        memory_obj.tensor.copy_(tmp_gpu_buffer)
+            memory_obj.tensor.copy_(tmp_gpu_buffer)
+
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
@@ -1086,12 +1091,21 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         else:
             self.store_stream.wait_stream(current_stream)
 
+        start_event = torch.npu.Event(enable_timing=True)
+        end_event = torch.npu.Event(enable_timing=True)
+        start_event.record(self.store_stream)
+
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():
                 self.from_gpu_310p(memory_obj, start, end, **kwargs)
             else:
                 self.from_gpu(memory_obj, start, end, **kwargs)
+
+        end_event.record(self.store_stream)
         self.store_stream.synchronize()
+        from_gpu_time = start_event.elapsed_time(end_event)
+
+        return from_gpu_time / 1000.0  # convert to seconds
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         if self.kv_format == KVCacheFormat.MLA_KV:
