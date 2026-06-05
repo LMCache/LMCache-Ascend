@@ -25,6 +25,7 @@ from lmcache_ascend.v1.kv_format import (
     _is_shared_storage_blob,
 )
 from lmcache_ascend.v1.kv_layer_groups import (
+    _multi_plane_lmc_row_bytes,
     _get_kv_cache_group_key_and_info,
     build_kv_layer_groups,
 )
@@ -397,3 +398,34 @@ def test_upstream_init_with_gpu_kv_format():
     assert g.dtype == torch.float16
     assert g.compress_ratio == 1
     assert g.physical_chunk_size == 256
+
+
+def test_sliding_window_reduces_physical_chunk_size_and_multi_plane_row_width():
+    num_blocks, block_size = 8, 128
+    layer = (
+        torch.empty(num_blocks, block_size, 1, 512, dtype=torch.bfloat16),
+        torch.empty(num_blocks, block_size, 1, 64, dtype=torch.bfloat16),
+        torch.empty(num_blocks, 1024, 1, 32, dtype=torch.int8),
+        torch.empty(num_blocks, 32, 1, 64, dtype=torch.float32),
+    )
+    layout_hints = {
+        "compress_ratios_by_group": (8,),
+        "sliding_window_size_by_group": (128,),
+        "scheduler_group_by_flat_layer": (0,),
+    }
+
+    mgr = _make_ascend_format_manager(
+        [layer],
+        KVCacheFormat.MULTI_PLANE_KV,
+        num_blocks,
+        layout_hints=layout_hints,
+    )
+
+    g = mgr.kv_layer_groups[0]
+    assert g.compress_ratio == 8
+    assert g.physical_chunk_size == 16
+    assert g.multi_plane_hidden_bytes is not None
+    assert g.shape_desc.hs == _multi_plane_lmc_row_bytes(
+        g.multi_plane_hidden_bytes,
+        g.physical_chunk_size,
+    )

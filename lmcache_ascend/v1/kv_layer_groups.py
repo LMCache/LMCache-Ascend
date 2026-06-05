@@ -271,6 +271,10 @@ def build_kv_layer_groups(
         if layout_hints
         else None
     )
+    hints = layout_hints or {}
+    compress_ratios_by_group = hints.get("compress_ratios_by_group")
+    sliding_window_size_by_group = hints.get("sliding_window_size_by_group")
+    sched_map = hints.get("scheduler_group_by_flat_layer")
 
     if len(kv_caches) == 0:
         logger.debug("No KV caches available, skipping KV layer groups building")
@@ -324,20 +328,32 @@ def build_kv_layer_groups(
                     stride_hint = s0
         shape_desc.block_stride_elems = int(stride_hint) if stride_hint else 0
 
-        compress_ratio, physical_chunk_size = (
-            KVLayerGroupsManager._derive_compression_metadata(
-                group_idx=group_idx,
-                bs=bs,
-                ie_logical_block_size=self.inference_engine_logical_block_size_,
-                lmcache_logical_chunk_size=lmcache_logical_chunk_size,
-            )
-        )
+        # Multi-group runs provide scheduler-group mapping + compress ratios.
+        # Keep single-group and legacy call sites backward-compatible by
+        # defaulting to ratio=1 when hints are absent.
+        sched_g = int(sched_map[indices[0]]) if sched_map is not None else group_idx
+        compress_ratio = 1
+        if compress_ratios_by_group is not None:
+            assert sched_g < len(
+                compress_ratios_by_group
+            ), f"scheduler group {sched_g} out of range for compress_ratios_by_group"
+            compress_ratio = max(1, int(compress_ratios_by_group[sched_g]))
+        sw = None
+        if sliding_window_size_by_group is not None:
+            assert sched_g < len(
+                sliding_window_size_by_group
+            ), f"scheduler group {sched_g} out of range for sliding_window_size_by_group"
+            sw = sliding_window_size_by_group[sched_g]
+        live_tokens = lmcache_logical_chunk_size
+        if sw is not None:
+            live_tokens = min(lmcache_logical_chunk_size, int(sw))
+        physical_chunk_size = (live_tokens + compress_ratio - 1) // compress_ratio
         multi_plane_hidden_bytes: tuple[int, ...] | None = None
         if isinstance(rep, (tuple, list)) and _is_multi_plane_tuple(rep):
             rep_dtype = torch.uint8
             plane_bytes = _multi_plane_plane_bytes(rep)
             shape_desc.hs = _multi_plane_lmc_row_bytes(
-                plane_bytes, lmcache_logical_chunk_size
+                plane_bytes, physical_chunk_size
             )
             multi_plane_hidden_bytes = tuple(plane_bytes)
         elif isinstance(rep, (tuple, list)) and _is_shared_storage_blob(rep):

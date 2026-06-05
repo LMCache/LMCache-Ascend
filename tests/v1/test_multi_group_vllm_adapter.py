@@ -16,8 +16,14 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     RequestTracker,
     _build_slot_mapping_for_group,
     _build_slot_mappings_by_group,
+    _count_leading_null_blocks,
     _normalize_block_ids,
     _normalize_block_sizes,
+)
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
+    _compact_slot_mapping_chunk,
+    multi_plane_lmc_row_offset,
+    multi_plane_slot_slice_bounds,
 )
 
 from .conftest_ds4 import DS4_CHUNK_SIZE
@@ -97,14 +103,16 @@ def test_normalize_block_sizes_mismatch() -> None:
     ("block_ids", "block_size", "num_tokens", "expected_len", "expected_values"),
     [
         pytest.param([0], 4, 0, 0, None, id="zero_tokens"),
-        pytest.param([0, 1], 4, 5, 5, [0, 1, 2, 3, 4], id="basic"),
-        pytest.param([0], 4, 100, 4, None, id="cap_overflow"),
+        pytest.param([1, 2], 4, 5, 5, [4, 5, 6, 7, 8], id="basic"),
+        pytest.param([1] * 25, 4, 100, 100, None, id="many_tokens"),
     ],
 )
 def test_build_slot_mapping_for_group(
     block_ids, block_size, num_tokens, expected_len, expected_values
 ) -> None:
-    sm = _build_slot_mapping_for_group(block_ids, block_size, num_tokens)
+    sm = _build_slot_mapping_for_group(
+        block_ids, block_size, num_tokens, is_store=False
+    )
     assert sm.dtype == torch.long
     assert len(sm) == expected_len
     if expected_values is not None:
@@ -115,7 +123,7 @@ def test_build_slot_mapping_for_group(
     ("block_ids_by_group", "block_sizes_by_group", "num_tokens", "compress_ratios", "expected_lens"),
     [
         pytest.param(
-            ([0, 1, 2, 3, 4, 5, 6, 7], [0, 1, 2, 3, 4, 5, 6, 7]),
+            ([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8]),
             (128, 1024),
             512,
             (8, 1),
@@ -123,7 +131,7 @@ def test_build_slot_mapping_for_group(
             id="ds4_two_groups",
         ),
         pytest.param(
-            ([0, 1], [0, 1]),
+            ([1, 2], [1, 2]),
             (16, 16),
             32,
             None,
@@ -139,14 +147,165 @@ def test_build_slot_mappings_by_group(
         block_ids_by_group,
         block_sizes_by_group,
         num_tokens,
+        is_store=False,
         compress_ratios=compress_ratios,
     )
     assert tuple(len(m) for m in mappings) == expected_lens
 
 
+def test_build_slot_mappings_global_index_for_chunk_slice() -> None:
+    """Global sm: token 384 is row 48; connector slices sm[32:64] for chunk [256,512)."""
+    mappings = _build_slot_mappings_by_group(
+        ([5],),
+        (128,),
+        512,
+        is_store=False,
+        compress_ratios=(8,),
+    )
+    assert len(mappings[0]) == 64
+    assert mappings[0][48].item() == 5 * 128 + 48
+    s0, s1 = multi_plane_slot_slice_bounds(256, 512, 0, (8,), len(mappings[0]))
+    assert (s0, s1) == (32, 64)
+
+
+def test_build_slot_mapping_for_group_store_masks_sliding_window() -> None:
+    sm = _build_slot_mapping_for_group(
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        4,
+        32,
+        is_store=True,
+        compress_ratio=1,
+        sliding_win_size=8,
+        lmcache_chunk_size=16,
+    )
+
+    assert len(sm) == 32
+    assert sm[:8].tolist() == [-1] * 8
+    assert sm[8:16].tolist() == list(range(12, 20))
+    assert sm[16:24].tolist() == [-1] * 8
+    assert sm[24:].tolist() == list(range(28, 36))
+
+
+def test_build_slot_mappings_by_group_per_chunk_store_window() -> None:
+    mappings = _build_slot_mappings_by_group(
+        ([1, 2, 3, 4, 5, 6, 7, 8],),
+        (4,),
+        32,
+        is_store=True,
+        compress_ratios=(1,),
+        sliding_window_size_by_group=(8,),
+        lmcache_chunk_size=16,
+    )
+
+    assert len(mappings[0]) == 32
+    # chunk [0,16): live [8,16); chunk [16,32): live [24,32)
+    assert mappings[0][:8].tolist() == [-1] * 8
+    assert mappings[0][8:16].tolist() == list(range(12, 20))
+    assert mappings[0][16:24].tolist() == [-1] * 8
+    assert mappings[0][24:].tolist() == list(range(28, 36))
+
+
+def test_build_slot_mapping_store_per_chunk_two_lmcache_chunks() -> None:
+    """512 tokens, ratio 4, W=128, chunk 256: live rows in both LMCache chunks."""
+    block_ids = list(range(1, 5))
+    sm = _build_slot_mapping_for_group(
+        block_ids,
+        128,
+        512,
+        is_store=True,
+        compress_ratio=4,
+        sliding_win_size=128,
+        lmcache_chunk_size=256,
+    )
+    live = (sm >= 0).nonzero(as_tuple=True)[0]
+    live_tokens = live * 4
+    assert live.numel() == 64
+    assert live_tokens.min().item() == 128
+    assert live_tokens.max().item() == 508
+    assert set((live_tokens // 256).tolist()) == {0, 1}
+
+
+def test_build_slot_mapping_load_uses_block_id_zeros() -> None:
+    """On load, vLLM null block_ids mark non-resident rows (no store SW mask)."""
+    sm = _build_slot_mapping_for_group(
+        [0, 0, 1, 1, 1, 1, 1, 1],
+        4,
+        32,
+        is_store=False,
+        compress_ratio=1,
+    )
+    assert sm[:8].tolist() == [-1] * 8
+    assert (sm[8:] >= 0).all()
+
+
+def test_build_slot_mapping_two_block_ids_first_covers_full_prefill() -> None:
+    """Second block id is reserved past 512 tokens; prefill rows all use block_ids[0]."""
+    sm = _build_slot_mapping_for_group(
+        [1, 2],
+        128,
+        512,
+        is_store=False,
+        compress_ratio=4,
+    )
+    assert len(sm) == 128
+    assert (sm >= 0).all()
+    assert (sm // 128).unique().tolist() == [1]
+
+
+def test_build_slot_mapping_single_block_no_index_error() -> None:
+    sm = _build_slot_mapping_for_group(
+        [10],
+        128,
+        512,
+        is_store=False,
+        compress_ratio=4,
+    )
+    assert len(sm) == 128
+    assert (sm >= 0).all()
+
+
+@pytest.mark.parametrize(
+    ("block_ids", "expected"),
+    [
+        pytest.param([0], 0, id="single_zero"),
+        pytest.param([3], 0, id="no_prefix"),
+        pytest.param([1, 2, 3], 0, id="no_zeros"),
+        pytest.param([0, 0, 0, 5], 3, id="strip_three"),
+        pytest.param([0, 0, 0], 0, id="all_zeros"),
+    ],
+)
+def test_count_leading_null_blocks(block_ids, expected) -> None:
+    assert _count_leading_null_blocks(block_ids) == expected
+
+
+def test_multi_plane_slot_slice_bounds_global_sm() -> None:
+    ratios = (8,)
+    sm_len = 64
+
+    assert multi_plane_slot_slice_bounds(0, 256, 0, ratios, sm_len) == (0, 32)
+    assert multi_plane_slot_slice_bounds(256, 512, 0, ratios, sm_len) == (32, 64)
+
+
+def test_compact_slot_mapping_chunk_per_lmcache_chunk() -> None:
+    sm = torch.full((128,), -1, dtype=torch.long)
+    sm[32:64] = torch.arange(32, 64, dtype=torch.long)
+    sm[96:128] = torch.arange(96, 128, dtype=torch.long)
+    chunk0 = _compact_slot_mapping_chunk(sm, 0, 256, 0, (4,))
+    chunk1 = _compact_slot_mapping_chunk(sm, 256, 512, 0, (4,))
+    assert chunk0.tolist() == list(range(32, 64))
+    assert chunk1.tolist() == list(range(96, 128))
+
+
+def test_multi_plane_lmc_row_offset_is_zero_for_compact_chunks() -> None:
+    assert multi_plane_lmc_row_offset(0, 0, (8,)) == 0
+    assert multi_plane_lmc_row_offset(256, 0, (8,)) == 0
+
+
 def test_build_slot_mappings_by_group_mismatch() -> None:
     with pytest.raises(ValueError, match="Block ids and block sizes group count mismatch"):
-        _build_slot_mappings_by_group(([0],), (128, 1024), 64)
+        _build_slot_mappings_by_group(
+            ([0],), (128, 1024), 64, is_store=False
+        )
 
 
 @pytest.mark.parametrize(
@@ -246,7 +405,7 @@ def test_request_tracker_update_preempted_requires_all_token_ids() -> None:
                 "token_ids": list(range(512)),
                 "prompt_len": 512,
                 "num_saved_tokens": 0,
-                "allocated_block_ids_by_group": ([0, 1, 2, 3], [0, 1, 2, 3]),
+                "allocated_block_ids_by_group": ([1, 2, 3, 4], [1, 2, 3, 4]),
             },
             {"block_sizes_by_group": (128, 1024), "lmcache_chunk_size": DS4_CHUNK_SIZE},
             lambda m: (
@@ -280,7 +439,7 @@ def test_request_tracker_update_preempted_requires_all_token_ids() -> None:
             {
                 "token_ids": list(range(64)),
                 "prompt_len": 64,
-                "allocated_block_ids_by_group": ([0], [0, 1, 2, 3, 4, 5, 6, 7]),
+                "allocated_block_ids_by_group": ([1], [1, 2, 3, 4, 5, 6, 7, 8]),
             },
             {"block_sizes_by_group": (128, 1024), "lmcache_chunk_size": DS4_CHUNK_SIZE},
             lambda m: m is not None and m.primary_kv_group_idx == 1,
@@ -290,7 +449,7 @@ def test_request_tracker_update_preempted_requires_all_token_ids() -> None:
             {
                 "token_ids": list(range(512)),
                 "prompt_len": 512,
-                "allocated_block_ids_by_group": ([0, 1, 2, 3, 4, 5, 6, 7], [0, 1]),
+                "allocated_block_ids_by_group": ([1, 2, 3, 4, 5, 6, 7, 8], [1, 2]),
             },
             {
                 "block_sizes_by_group": (128, 1024),

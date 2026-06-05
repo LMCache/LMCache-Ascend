@@ -16,11 +16,15 @@ from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     build_flat_kv_caches,
     should_flatten_kv_caches,
 )
+from lmcache_ascend.integration.vllm.skip_state_groups import (
+    apply_skip_policy_from_env_to_flattened,
+)
 from vllm.config import (
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
@@ -88,6 +92,13 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 self._kv_cache_config,
                 ie_logical_block_size=ie_logical_block_size or None,
             )
+            flat_kv, sched_by_layer, layer_to_groups = apply_skip_policy_from_env_to_flattened(
+                self._kv_cache_config,
+                flat_kv,
+                sched_by_layer,
+                layer_to_groups,
+                bundled=bundled,
+            )
             logger.info(
                 "Preprocessed multi-spec KV caches: %d model layers -> "
                 "%d logical layers (bundled=%s)",
@@ -110,6 +121,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     hints["block_sizes_by_group"] = self._block_sizes_by_group
                 hints["inference_engine_logical_block_size"] = ie_logical_block_size
                 hints["compress_ratios_by_group"] = self._compress_ratios_by_group
+                hints["sliding_window_size_by_group"] = getattr(
+                    self, "_sliding_window_size_by_group", None
+                )
                 if sched_by_layer is not None:
                     hints["scheduler_group_by_flat_layer"] = sched_by_layer
                 if layer_to_groups is not None:
