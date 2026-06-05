@@ -1234,9 +1234,6 @@ class TestAscendP2PBackendUnit:
                 self.cancel = MagicMock()
                 self.cancelled = MagicMock(return_value=False)
                 self.add_done_callback = MagicMock()
-                # The blocking helper logs future.done()/running() on timeout.
-                self.done = MagicMock(return_value=False)
-                self.running = MagicMock(return_value=True)
 
             def result(self, timeout=None):
                 if timeout is not None:
@@ -1253,9 +1250,9 @@ class TestAscendP2PBackendUnit:
         from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         backend._cleanup_late_sync_get_result = (
-            lambda done, lookup_id, operation, unpin, timeout_at=None: (
+            lambda done, lookup_id, operation, unpin: (
                 AscendP2PBackend._cleanup_late_sync_get_result(
-                    backend, done, lookup_id, operation, unpin, timeout_at=timeout_at
+                    backend, done, lookup_id, operation, unpin
                 )
             )
         )

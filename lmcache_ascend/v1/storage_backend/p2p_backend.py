@@ -5,7 +5,6 @@ from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Coroutine, List, Optional, Sequence, Union
 import asyncio
-import os
 import threading
 import time
 import uuid
@@ -71,7 +70,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_SLOW_SYNC_P2P_LOOKUP_WARN_SEC = 1.0
 _DEFAULT_SYNC_CONTROLLER_LOOKUP_TIMEOUT_MS = 500
 
 # Sentinel for "no coalescing requested" in _ensure_peer_connection. Callers on
@@ -79,15 +77,6 @@ _DEFAULT_SYNC_CONTROLLER_LOOKUP_TIMEOUT_MS = 500
 # reconnects of one dead DEALER collapse into a single rebuild (see
 # _ensure_peer_connection_on_loop).
 _NO_STALE_PEER = object()
-
-# --- Hot-path profiling (debugging the staging/one-sided loop stall) ---
-# Set LMCACHE_P2P_PROFILE=1 to also emit per-op INFO timings. Threshold
-# WARNINGs always fire so the log stays quiet until something is actually slow.
-_P2P_PROFILE = os.environ.get("LMCACHE_P2P_PROFILE", "0") == "1"
-# Warn when the P2P event loop could not run for this long (s); <=0 disables.
-_P2P_LOOP_LAG_WARN_S = float(os.environ.get("LMCACHE_P2P_LOOP_LAG_WARN_S", "0.5"))
-# Warn when a single hot-path op (stage/copy/sync/round-trip) exceeds this (s).
-_P2P_SLOW_OP_WARN_S = float(os.environ.get("LMCACHE_P2P_SLOW_OP_WARN_S", "0.5"))
 
 
 class AscendBatchedLookupAndGetMsg(BatchedLookupAndGetMsg):
@@ -247,17 +236,10 @@ class AscendP2PBackend(P2PBackend):
         # sender pins the source KV at lookup and only releases it on the
         # receiver's Done signal -- but under load that Done is exactly what
         # fails first ("Failed to send P2P Done signal"), so this TTL is the
-        # real backstop. The old 360s default meant every failed/abandoned pull
-        # kept its source KV pinned for 6 minutes, which starves the local CPU
-        # cache pool and cascades into more failures. 60s reclaims ~6x faster.
-        #
-        # Safety floor: the TTL MUST exceed the longest a *healthy* pull can sit
-        # between pin (lookup) and the sender's WriteAsync completing, otherwise
-        # we could unpin source KV mid-read and corrupt it. A healthy pull is
-        # sub-second; the worst alive case is bounded by the receiver ack
-        # timeout (~30s) plus the HCCL transport timeout (~10s), so 60s keeps a
-        # safe margin while still reclaiming abandoned pulls promptly. Do not
-        # set this below the channel's os_ack_timeout_sec.
+        # real backstop.
+        # A healthy pull is sub-second; worst alive case is bounded by the
+        # receiver ack timeout (~30s) plus the HCCL transport timeout (~10s),
+        # so 60s keeps a safe margin while still reclaiming abandoned pulls promptly.
         self._pull_pending_ttl: float = config.get_extra_config_value(
             "p2p_pull_pending_ttl", 60.0
         )
@@ -384,7 +366,6 @@ class AscendP2PBackend(P2PBackend):
         self._async_context_ready = asyncio.Event()
         self._done_url_ready = asyncio.Event()
 
-        # --- Producer ROUTER concurrency (Phase 2) ---
         # The lookup handler is a ROUTER that dispatches each request as its own
         # task, so a slow stage()/copy cannot head-of-line block other peers.
         # ``_inflight_gets`` bounds concurrent heavy gets (each runs stage());
@@ -392,7 +373,6 @@ class AscendP2PBackend(P2PBackend):
         # backpressure) so the consumer recomputes locally instead of queueing.
         # All three live on the single P2P event-loop thread, so the counter
         # needs no lock; the send lock only guards concurrent ROUTER sends
-        # (zmq.asyncio forbids overlapping sends on one socket).
         self._max_concurrent_gets: int = int(
             config.get_extra_config_value("p2p_max_concurrent_gets", 4)
         )
@@ -418,9 +398,7 @@ class AscendP2PBackend(P2PBackend):
         )
         # Per-lookup fail-fast bound. A missing/slow peer ACK must degrade to
         # local recompute quickly instead of parking vLLM behind the 30s socket
-        # RCVTIMEO. Phase 2 enforces this per attempt via asyncio.wait_for; the
-        # sync get bound below is derived from it (lookup_timeout * retries)
-        # rather than the raw socket timeouts (which gave the old ~125s floor).
+        # RCVTIMEO.
         self._lookup_timeout_s: float = config.get_extra_config_value(
             "p2p_lookup_timeout_s", 3.0
         )
@@ -447,8 +425,6 @@ class AscendP2PBackend(P2PBackend):
         asyncio.run_coroutine_threadsafe(
             self._sweep_expired_pending_pull_resources(), self.loop
         )
-        if _P2P_LOOP_LAG_WARN_S > 0:
-            asyncio.run_coroutine_threadsafe(self._monitor_event_loop_lag(), self.loop)
 
     def _is_on_p2p_loop(self) -> bool:
         try:
@@ -469,34 +445,17 @@ class AscendP2PBackend(P2PBackend):
         lookup_id: str,
         operation: str,
         unpin: bool,
-        timeout_at: Optional[float] = None,
     ) -> None:
-        # ``timeout_at`` is captured by ``_run_coroutine_threadsafe_blocking``
-        # at the instant the bridge gave up; the delta we log is the single
-        # most discriminating signal between a too-tight sync timeout
-        # (delta of a few seconds), a poisoned-stream drain (tens of
-        # seconds), and a genuinely wedged sender (~10 min ack timeout).
-        delta_s = (time.monotonic() - timeout_at) if timeout_at is not None else None
-        delta_str = "n/a" if delta_s is None else f"{delta_s:.1f}s"
         if future.cancelled():
-            logger.warning(
-                "Late sync P2P %s lookup_id=%s ended CANCELLED after %s. "
-                "Pre-allocated MemoryObjs may leak on this path - this is "
-                "the cascade the fix plan addresses.",
-                operation,
-                lookup_id,
-                delta_str,
-            )
             return
 
         try:
             result = future.result()
         except Exception as e:
-            logger.warning(
-                "Late sync P2P %s lookup_id=%s completed with error after %s: %s",
+            logger.debug(
+                "Late sync P2P %s for lookup_id %s completed with error: %s",
                 operation,
                 lookup_id,
-                delta_str,
                 e,
             )
             return
@@ -505,13 +464,10 @@ class AscendP2PBackend(P2PBackend):
             mem_objs = [obj for obj in result if obj is not None]
             if mem_objs:
                 logger.warning(
-                    "Late sync P2P %s lookup_id=%s succeeded %s after the "
-                    "bridge gave up - releasing %d MemObjs. Underlying "
-                    "transfer was healthy but slower than the sync timeout.",
+                    "Releasing %d late sync P2P %s result objects for lookup_id %s",
+                    len(mem_objs),
                     operation,
                     lookup_id,
-                    delta_str,
-                    len(mem_objs),
                 )
                 release_memory_objects(mem_objs, unpin=unpin)
 
@@ -533,18 +489,6 @@ class AscendP2PBackend(P2PBackend):
         try:
             return future.result(timeout=self._sync_get_timeout_s)
         except TimeoutError:
-            timeout_at = time.monotonic()
-            logger.error(
-                "Sync P2P %s lookup_id=%s TIMEOUT after %.1fs "
-                "(future.done=%s future.running=%s). The background "
-                "coroutine keeps running; its result (if any) will be "
-                "released via _cleanup_late_sync_get_result.",
-                operation,
-                lookup_id,
-                self._sync_get_timeout_s,
-                future.done(),
-                future.running(),
-            )
             if cleanup_late_result:
                 future.add_done_callback(
                     lambda done: self._cleanup_late_sync_get_result(
@@ -552,7 +496,6 @@ class AscendP2PBackend(P2PBackend):
                         lookup_id,
                         operation,
                         unpin_late_result,
-                        timeout_at=timeout_at,
                     )
                 )
             future.cancel()
@@ -1080,35 +1023,6 @@ class AscendP2PBackend(P2PBackend):
 
         return AscendBatchedLookupAndGetDoneRetMsg()
 
-    async def _monitor_event_loop_lag(self):
-        """Detect P2P event-loop starvation (the headline stall signal).
-
-        Sleeps a fixed interval and measures how much longer than that the
-        wakeup actually took. Large lag means the loop thread could not run
-        during that window -- e.g. another thread held the GIL across an NPU
-        ``synchronize()``, or a blocking call ran directly on the loop. That is
-        exactly what makes the lookup / Done REP sockets miss their recv
-        timeout and surface as "Resource temporarily unavailable". A healthy
-        loop shows sub-10ms lag; multi-hundred-ms spikes localize the freeze.
-        """
-        interval = 0.1
-        loop = asyncio.get_running_loop()
-        worst = 0.0
-        while self.running.is_set():
-            t0 = loop.time()
-            await asyncio.sleep(interval)
-            lag = loop.time() - t0 - interval
-            if lag > _P2P_LOOP_LAG_WARN_S:
-                worst = max(worst, lag)
-                logger.warning(
-                    "P2P event loop STALLED ~%.0f ms (worst %.0f ms): the loop "
-                    "thread was blocked, so ZMQ REP sockets went unserviced. "
-                    "Likely a GIL-holding NPU synchronize on the worker thread "
-                    "or a blocking call on the loop.",
-                    lag * 1000.0,
-                    worst * 1000.0,
-                )
-
     async def _sweep_expired_pending_pull_resources(self):
         """Periodically release pinned MemObjs whose TTL has expired.
 
@@ -1212,45 +1126,6 @@ class AscendP2PBackend(P2PBackend):
                 logger.warning("Failed to close sync dealer socket: %s", e)
             self._sync_dealer = None
 
-    def _log_slow_sync_p2p_lookup(
-        self,
-        lookup_id: str,
-        num_keys: int,
-        total_start: float,
-        lock_wait_elapsed: float,
-        send_elapsed: float = 0.0,
-        recv_elapsed: float = 0.0,
-        decode_elapsed: float = 0.0,
-        outcome: str = "unknown",
-        target_peer_url: str = "",
-        num_hit_chunks: int = 0,
-    ) -> None:
-        total_elapsed = time.monotonic() - total_start
-        if (
-            total_elapsed < _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-            and lock_wait_elapsed < _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-            and send_elapsed < _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-            and recv_elapsed < _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-        ):
-            return
-        logger.warning(
-            "Slow sync P2P controller lookup: lookup_id=%s outcome=%s "
-            "elapsed=%.3fs lock_wait=%.3fs send=%.3fs recv=%.3fs "
-            "decode=%.3fs keys=%d worker_id=%s target_peer_url=%s "
-            "num_hit_chunks=%d",
-            lookup_id,
-            outcome,
-            total_elapsed,
-            lock_wait_elapsed,
-            send_elapsed,
-            recv_elapsed,
-            decode_elapsed,
-            num_keys,
-            self.tp_rank,
-            target_peer_url,
-            num_hit_chunks,
-        )
-
     def _prune_sync_lookup_cache_locked(self, now: float) -> None:
         expired_keys = [
             k
@@ -1317,34 +1192,13 @@ class AscendP2PBackend(P2PBackend):
 
         cache_key = self._make_sync_lookup_cache_key(keys)
 
-        total_start = time.monotonic()
-        lock_wait_start = time.monotonic()
         with self._sync_lock:
-            lock_wait_elapsed = time.monotonic() - lock_wait_start
             now = time.monotonic()
             cached = self._sync_lookup_cache.get(cache_key)
             if cached is not None:
                 peer_init_url, location, num_hit_chunks, exp_at = cached
                 if exp_at > now:
                     self._sync_lookup_cache.move_to_end(cache_key)
-                    total_elapsed = time.monotonic() - total_start
-                    if (
-                        total_elapsed >= _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-                        or lock_wait_elapsed >= _SLOW_SYNC_P2P_LOOKUP_WARN_SEC
-                    ):
-                        logger.warning(
-                            "Slow sync P2P controller lookup cache hit: "
-                            "lookup_id=%s elapsed=%.3fs lock_wait=%.3fs "
-                            "keys=%d worker_id=%s target_peer_url=%s "
-                            "num_hit_chunks=%d",
-                            lookup_id,
-                            total_elapsed,
-                            lock_wait_elapsed,
-                            len(keys),
-                            self.tp_rank,
-                            peer_init_url,
-                            num_hit_chunks,
-                        )
                     return lookup_id, peer_init_url, location, num_hit_chunks
                 self._sync_lookup_cache.pop(cache_key, None)
 
@@ -1360,41 +1214,16 @@ class AscendP2PBackend(P2PBackend):
             )
 
             try:
-                send_start = time.monotonic()
                 sock.send_multipart([b"", msgspec.msgpack.encode(msg)])
-                send_elapsed = time.monotonic() - send_start
-                recv_start = time.monotonic()
                 frames = sock.recv_multipart()
-                recv_elapsed = time.monotonic() - recv_start
                 if not frames:
-                    self._log_slow_sync_p2p_lookup(
-                        lookup_id,
-                        len(keys),
-                        total_start,
-                        lock_wait_elapsed,
-                        send_elapsed,
-                        recv_elapsed,
-                        outcome="empty_frames",
-                    )
                     return lookup_id, "", "", 0
 
-                decode_start = time.monotonic()
                 ret_msg = msgspec.msgpack.decode(frames[-1], type=Msg)
-                decode_elapsed = time.monotonic() - decode_start
                 if isinstance(ret_msg, ErrorMsg):
                     logger.error(
                         "Controller returned error for sync P2P lookup: %s",
                         ret_msg.error,
-                    )
-                    self._log_slow_sync_p2p_lookup(
-                        lookup_id,
-                        len(keys),
-                        total_start,
-                        lock_wait_elapsed,
-                        send_elapsed,
-                        recv_elapsed,
-                        decode_elapsed,
-                        outcome="controller_error",
                     )
                     return lookup_id, "", "", 0
 
@@ -1403,29 +1232,9 @@ class AscendP2PBackend(P2PBackend):
                         "Unexpected controller reply type in sync P2P lookup: %s",
                         type(ret_msg),
                     )
-                    self._log_slow_sync_p2p_lookup(
-                        lookup_id,
-                        len(keys),
-                        total_start,
-                        lock_wait_elapsed,
-                        send_elapsed,
-                        recv_elapsed,
-                        decode_elapsed,
-                        outcome=f"unexpected_reply:{type(ret_msg).__name__}",
-                    )
                     return lookup_id, "", "", 0
 
                 if not ret_msg.layout_info:
-                    self._log_slow_sync_p2p_lookup(
-                        lookup_id,
-                        len(keys),
-                        total_start,
-                        lock_wait_elapsed,
-                        send_elapsed,
-                        recv_elapsed,
-                        decode_elapsed,
-                        outcome="no_layout",
-                    )
                     return lookup_id, "", "", 0
 
                 _, location, num_hit_chunks, peer_init_url = ret_msg.layout_info[0]
@@ -1437,30 +1246,17 @@ class AscendP2PBackend(P2PBackend):
                 )
                 self._sync_lookup_cache.move_to_end(cache_key)
                 self._prune_sync_lookup_cache_locked(now)
-                self._log_slow_sync_p2p_lookup(
-                    lookup_id,
-                    len(keys),
-                    total_start,
-                    lock_wait_elapsed,
-                    send_elapsed,
-                    recv_elapsed,
-                    decode_elapsed,
-                    outcome="ok",
-                    target_peer_url=peer_init_url,
-                    num_hit_chunks=num_hit_chunks,
-                )
                 return lookup_id, peer_init_url, location, num_hit_chunks
-            except zmq.Again:
-                logger.warning(
-                    "Sync P2P lookup to controller timed out, resetting sync dealer"
-                )
-                self._reset_sync_dealer_locked()
-                return lookup_id, "", "", 0
             except zmq.ZMQError as e:
-                logger.warning(
-                    "Sync P2P lookup hit ZMQ error, resetting sync dealer: %s",
-                    e,
-                )
+                if isinstance(e, zmq.Again):
+                    logger.warning(
+                        "Sync P2P lookup to controller timed out, resetting sync dealer"
+                    )
+                else:
+                    logger.warning(
+                        "Sync P2P lookup hit ZMQ error, resetting sync dealer: %s",
+                        e,
+                    )
                 self._reset_sync_dealer_locked()
                 return lookup_id, "", "", 0
             except Exception as e:
@@ -1493,25 +1289,9 @@ class AscendP2PBackend(P2PBackend):
             # once; only the first should rebuild).
             stale_peer = self.target_peer_info_mapping.get(target_peer_url)
             try:
-                _t0 = time.perf_counter()
                 ret_msg_bytes = await self._peer_request_reply(
                     target_peer_url, msg_bytes, self._lookup_timeout_s
                 )
-                _rt = time.perf_counter() - _t0
-                if _rt > _P2P_SLOW_OP_WARN_S:
-                    logger.warning(
-                        "P2P lookup round-trip SLOW: %.0f ms for lookup_id %s. "
-                        "The peer producer was slow to reply -- check its "
-                        "stage()/loop-lag.",
-                        _rt * 1000.0,
-                        lookup_id,
-                    )
-                elif _P2P_PROFILE:
-                    logger.info(
-                        "P2P lookup round-trip %.1f ms lookup_id=%s",
-                        _rt * 1000.0,
-                        lookup_id,
-                    )
                 ret_msg = msgspec.msgpack.decode(ret_msg_bytes, type=AscendP2PMsg)
                 if (
                     isinstance(ret_msg, P2PErrorMsg)
@@ -1709,24 +1489,24 @@ class AscendP2PBackend(P2PBackend):
                     await done_socket.send(encoded)
                     await done_socket.recv()
                     return
-                except zmq.Again as e:
-                    logger.warning(
-                        "Timed out sending Done for %s "
-                        "(attempt %d/%d), recreating socket: %s",
-                        lookup_id,
-                        attempt + 1,
-                        self.max_retry_count,
-                        e,
-                    )
-                    await recreate_done_socket(e, attempt)
                 except zmq.ZMQError as e:
-                    logger.warning(
-                        "ZMQ error sending Done for %s (attempt %d/%d): %s",
-                        lookup_id,
-                        attempt + 1,
-                        self.max_retry_count,
-                        e,
-                    )
+                    if isinstance(e, zmq.Again):
+                        logger.warning(
+                            "Timed out sending Done for %s "
+                            "(attempt %d/%d), recreating socket: %s",
+                            lookup_id,
+                            attempt + 1,
+                            self.max_retry_count,
+                            e,
+                        )
+                    else:
+                        logger.warning(
+                            "ZMQ error sending Done for %s (attempt %d/%d): %s",
+                            lookup_id,
+                            attempt + 1,
+                            self.max_retry_count,
+                            e,
+                        )
                     await recreate_done_socket(e, attempt)
                 except Exception as e:
                     logger.error(
