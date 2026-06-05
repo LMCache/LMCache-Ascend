@@ -128,8 +128,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
                 if persist_remote_skip is not None:
                     skip_leading_tokens = persist_remote_skip
-                else:
+                elif save_spec is not None:
                     skip_leading_tokens = save_spec.skip_leading_tokens
+                else:
+                    skip_leading_tokens = 0
 
                 if skip_leading_tokens == len(token_ids):
                     continue
