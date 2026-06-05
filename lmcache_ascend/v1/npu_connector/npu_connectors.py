@@ -125,6 +125,9 @@ def _first_layer_tensor(
 def _split_kv_layer_groups_by_scheduler_slot(
     manager: Any,
     sched_map: Sequence[int],
+    *,
+    layout_hints: dict | None = None,
+    lmcache_logical_chunk_size: int = 256,
 ) -> None:
     """Subdivide upstream groups when flattened layers share a shape but not a slot group."""
     from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
@@ -152,12 +155,26 @@ def _split_kv_layer_groups_by_scheduler_slot(
                 "Split KV layer group by scheduler_slot_group=%d -> layers=%s",
                 sched_g, indices,
             )
+    ratios = (layout_hints or {}).get("compress_ratios_by_group")
+    if ratios is not None:
+        chunk = max(1, int(lmcache_logical_chunk_size))
+        patched: list[KVLayerGroupInfo] = []
+        for group in split_groups:
+            sched_g = int(sched_map[group.layer_indices[0]])
+            ratio = max(1, int(ratios[sched_g]))
+            patched.append(
+                dataclasses.replace(
+                    group,
+                    compress_ratio=ratio,
+                    physical_chunk_size=chunk // ratio,
+                )
+            )
+        split_groups = patched
     manager.kv_layer_groups = split_groups
 
 
-# Each scheduler group may address fewer slots than tokens when its block size
-# is smaller than the logical block size; this translates the global token window
-# into the correct slot_mapping slice for one group's kernel call.
+# Map a logical LMCache chunk ``[token_start, token_end)`` to indices in a
+# globally indexed slot_mapping (one entry per compressed row when ratio > 1).
 def multi_plane_slot_slice_bounds(
     token_start: int,
     token_end: int,
@@ -165,7 +182,9 @@ def multi_plane_slot_slice_bounds(
     compress_ratios: Sequence[int],
     sm_len: int,
 ) -> tuple[int, int]:
-    """Map token range ``[token_start, token_end)`` to slot slice bounds for one group."""
+    """Map token range ``[token_start, token_end)`` to ``sm`` slice bounds."""
+    if token_end <= token_start:
+        return 0, 0
     ratio = int(compress_ratios[sched_g]) if sched_g < len(compress_ratios) else 1
     if ratio <= 1:
         s0, s1 = int(token_start), min(int(token_end), sm_len)
@@ -173,6 +192,36 @@ def multi_plane_slot_slice_bounds(
         s0 = int(token_start) // ratio
         s1 = min((int(token_end) + ratio - 1) // ratio, sm_len)
     return s0, max(s0, s1)
+
+
+def multi_plane_lmc_row_offset(
+    g_start: int,
+    sched_g: int,
+    compress_ratios: Sequence[int],
+) -> int:
+    """LMCache row offset for compact sliding-window chunks (always dense from 0)."""
+    return 0
+
+
+def _compact_slot_mapping_chunk(
+    sm: torch.Tensor,
+    g_start: int,
+    g_end: int,
+    sched_g: int,
+    compress_ratios: Sequence[int],
+) -> torch.Tensor:
+    """Slice one logical chunk from global ``sm`` and drop dead rows (``-1``)."""
+    slot_start, slot_end = multi_plane_slot_slice_bounds(
+        g_start,
+        g_end,
+        sched_g,
+        compress_ratios,
+        int(sm.shape[0]),
+    )
+    slot_slice = sm[slot_start:slot_end]
+    if slot_slice.numel() == 0:
+        return slot_slice
+    return slot_slice[slot_slice != -1]
 
 
 # Mixed-format caches can contain non-tensor entries (e.g. Mamba state lists);
@@ -527,6 +576,7 @@ class _V2KVTransferMixin:
         g_end: int,
         is_store: bool,
         npu_group_idx: int,
+        req_id: str | None = None,
     ) -> None:
         """One logical kernel op per bundled multi-spec layer (per-plane transfers)."""
         if (
@@ -547,10 +597,18 @@ class _V2KVTransferMixin:
                     f"(num={len(slot_mappings_by_group)}) for NPU group {npu_group_idx}"
                 )
             sm = slot_mappings_by_group[sched_g]
-            s0, s1 = multi_plane_slot_slice_bounds(
-                g_start, g_end, sched_g, compress_ratios, int(sm.shape[0])
+            sm_parts.append(
+                _compact_slot_mapping_chunk(
+                    sm,
+                    g_start,
+                    g_end,
+                    sched_g,
+                    compress_ratios,
+                )
             )
-            sm_parts.append(sm[s0:s1])
+
+        if not any(int(part.shape[0]) > 0 for part in sm_parts):
+            return
 
         slot_concat = torch.cat(sm_parts, dim=0)
         offsets = torch.zeros(
@@ -579,6 +637,11 @@ class _V2KVTransferMixin:
             device=self.kvcaches_device,
         )
         max_hidden_dim_bytes = max(plane_hidden_bytes)
+        lmc_row_offsets = torch.tensor(
+            [0] * num_planes,
+            dtype=torch.int32,
+            device=self.kvcaches_device,
+        )
 
         lmc_ops.multi_layer_kv_transfer_multi_plane(
             mem_tensor,
@@ -592,6 +655,7 @@ class _V2KVTransferMixin:
             self.kvcaches_device,
             is_store,
             num_planes,
+            lmc_row_offsets,
         )
 
 
@@ -1200,6 +1264,8 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             _split_kv_layer_groups_by_scheduler_slot(
                 self.metadata.kv_layer_groups_manager,
                 sched_map,
+                layout_hints=hints,
+                lmcache_logical_chunk_size=self.metadata.chunk_size,
             )
         self._sync_logical_page_slots_from_manager()
 
@@ -1264,9 +1330,9 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             if flat_names and indices:
                 layer_hints["_current_layer_name"] = flat_names[indices[0]]
             chunk_tokens = (
-                int(self.metadata.chunk_size)
-                if self.metadata is not None
-                else None
+                int(group.physical_chunk_size)
+                if getattr(group, "physical_chunk_size", None) is not None
+                else (int(self.metadata.chunk_size) if self.metadata is not None else None)
             )
             params = _derive_group_params(
                 rep,
@@ -1288,7 +1354,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             "Initialized %d per-group KV cache pointer tables for multi-group store",
             len(group_pointers),
         )
-
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
 
@@ -1722,8 +1787,13 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             ):
                 stream = self.store_stream if is_store else self.load_stream
                 self._multi_group_kv_transfer(
-                    memory_obj, start, end, slot_mappings, is_store=is_store,
+                    memory_obj,
+                    start,
+                    end,
+                    slot_mappings,
+                    is_store=is_store,
                     stream=stream,
+                    req_id=kwargs.get("req_id"),
                 )
                 return True
             if self._is_mixed_format:
@@ -1747,6 +1817,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         *,
         is_store: bool,
         stream: Any,
+        req_id: str | None = None,
     ) -> None:
         """Run multi_layer_kv_transfer per NPU layer group (store or retrieve)."""
         assert self.group_kv_cache_pointers is not None
@@ -1797,6 +1868,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                         g_end=end,
                         is_store=is_store,
                         npu_group_idx=i,
+                        req_id=req_id,
                     )
                     continue
 
@@ -1804,14 +1876,20 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     i, group_params, slot_mappings_by_group
                 )
                 slot_g = int(group_params.get("scheduler_slot_group", 0))
-                slot_start, slot_end = multi_plane_slot_slice_bounds(
-                    start, end, slot_g, compress_ratios, int(sm.shape[0]),
+                slot_slice = _compact_slot_mapping_chunk(
+                    sm,
+                    start,
+                    end,
+                    slot_g,
+                    compress_ratios,
                 )
+                if slot_slice.numel() == 0:
+                    continue
 
                 lmc_ops.multi_layer_kv_transfer(
                     mem_tensor,
                     group_ptrs,
-                    sm[slot_start:slot_end],
+                    slot_slice,
                     self.kvcaches_device,
                     group_params["page_buffer_size"],
                     is_store,

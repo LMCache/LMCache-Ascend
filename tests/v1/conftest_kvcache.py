@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import pytest
 import torch
@@ -138,6 +138,63 @@ def assert_multi_plane_round_trip_parity(
             raise AssertionError(
                 f"{label}: plane {pi} round-trip mismatch "
                 f"(sched_g={sched_groups[pi]}, num_slots={slots.numel()})"
+            )
+
+
+def _compressed_slot_index(
+    token: int,
+    sched_g: int,
+    compress_ratios: Sequence[int],
+    *,
+    window_start: int = 0,
+) -> int:
+    """Map a logical token to an index in a windowed or full slot_mapping tensor."""
+    if token < window_start:
+        return -1
+    ratio = int(compress_ratios[sched_g]) if sched_g < len(compress_ratios) else 1
+    if ratio <= 1:
+        return token - window_start
+    return (token - window_start) // ratio
+
+
+def assert_token_aligned_plane_parity(
+    plane_store: torch.Tensor,
+    plane_load: torch.Tensor,
+    sched_g: int,
+    store_sm: torch.Tensor,
+    load_sm: torch.Tensor,
+    token_start: int,
+    token_end: int,
+    compress_ratios: Sequence[int],
+    window_starts: Sequence[int],
+    *,
+    label: str,
+) -> None:
+    """Compare KV at store vs load paged slots for the same logical tokens."""
+    win = int(window_starts[sched_g]) if sched_g < len(window_starts) else 0
+    flat_s = flatten_paged_slots(plane_store)
+    flat_d = flatten_paged_slots(plane_load)
+    lo = max(token_start, win)
+    hi = token_end
+    if lo >= hi:
+        return
+    ratio = int(compress_ratios[sched_g]) if sched_g < len(compress_ratios) else 1
+    step = 1 if ratio <= 1 else ratio
+    for t in range(lo, hi, step):
+        store_idx = _compressed_slot_index(t, sched_g, compress_ratios, window_start=0)
+        load_idx = _compressed_slot_index(
+            t, sched_g, compress_ratios, window_start=win
+        )
+        if store_idx < 0 or store_idx >= int(store_sm.shape[0]):
+            continue
+        if load_idx < 0 or load_idx >= int(load_sm.shape[0]):
+            continue
+        store_slot = int(store_sm[store_idx].item())
+        load_slot = int(load_sm[load_idx].item())
+        if not torch.equal(flat_s[store_slot], flat_d[load_slot]):
+            raise AssertionError(
+                f"{label}: token {t} sched_g={sched_g} mismatch "
+                f"(store_slot={store_slot}, load_slot={load_slot})"
             )
 
 
@@ -321,6 +378,7 @@ def separate_kv_round_trip_via_connector(
 
 
 LARGE_TOKEN_COPY_SIZE = 40960
+MULTI_PLANE_C8_TOKEN_ALIGN = 32
 
 def power_of_two_boundary_triplet(exp: int) -> tuple[int, int, int]:
     """Return (2^exp - 1, 2^exp, 2^exp + 1)."""

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 from types import SimpleNamespace
 from typing import List
@@ -97,6 +96,30 @@ def set_bundle_multi_spec_env(
     )
 
 
+def set_skip_state_groups_env(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    enabled: bool,
+    allowlist: str | None = ...,
+) -> None:
+    """Configure skip-state env vars for tests.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        enabled: When False, disables skip-state filtering entirely.
+        allowlist: Explicit allowlist string, ``None`` to unset the env var
+            (use built-in defaults), or omit to leave the env var unchanged.
+    """
+    monkeypatch.setenv("LMCACHE_ASCEND_SKIP_STATE_GROUPS", "1" if enabled else "0")
+    if allowlist is ...:
+        return
+    env_key = "LMCACHE_ASCEND_SKIP_STATE_SPEC_ALLOWLIST"
+    if allowlist is None:
+        monkeypatch.delenv(env_key, raising=False)
+        return
+    monkeypatch.setenv(env_key, allowlist)
+
+
 def _make_4d_page(
     num_blocks: int,
     block_size: int,
@@ -157,16 +180,18 @@ def slot_mappings_for_ds4_groups(
     use_ceil: bool,
     num_blocks: int = 16,
 ) -> tuple[torch.Tensor, ...]:
-    block_ids = list(range(num_blocks))
+    block_ids = list(range(1, num_blocks + 1))
     mappings: list[torch.Tensor] = []
     for ratio, block_size in zip(
         compress_ratios_from_block_sizes(), DS4_BLOCK_SIZES_BY_GROUP
     ):
-        if use_ceil and ratio > 1:
-            effective = math.ceil(num_tokens / ratio)
-        else:
-            effective = max(1, num_tokens // max(1, ratio))
-        sm = _build_slot_mapping_for_group(block_ids, int(block_size), effective)
+        sm = _build_slot_mapping_for_group(
+            block_ids,
+            int(block_size),
+            num_tokens,
+            is_store=False,
+            compress_ratio=ratio,
+        )
         mappings.append(sm.to(dev))
     return tuple(mappings)
 
@@ -437,11 +462,16 @@ def make_ds4_slot_mappings_cpu(
     num_tokens: int = DS4_CHUNK_SIZE,
 ) -> tuple[torch.Tensor, ...]:
     mappings: list[torch.Tensor] = []
-    block_ids = list(range(16))
+    block_ids = list(range(1, 17))
     for ratio, block_size in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP):
-        effective = math.ceil(num_tokens / ratio)
         mappings.append(
-            _build_slot_mapping_for_group(block_ids, block_size, effective)
+            _build_slot_mapping_for_group(
+                block_ids,
+                block_size,
+                num_tokens,
+                is_store=False,
+                compress_ratio=ratio,
+            )
         )
     assert tuple(len(m) for m in mappings) == DS4_SLOT_LENS_512
     return tuple(mappings)

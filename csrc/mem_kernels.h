@@ -36,9 +36,10 @@ void multi_layer_kv_transfer_kernel_v2(
 void multi_layer_kv_transfer_multi_plane_kernel_v2(
     uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
     uint8_t *slotmappingsConcat, int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes,
-    int32_t *perPlanePageBuffSizes, int32_t *perPlaneSlotOffsets, int32_t numPlanes,
-    int32_t numLayers, int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk,
-    int64_t perLoopBuffer, int32_t maxTokensPerLoop, bool page2L);
+    int32_t *perPlanePageBuffSizes, int32_t *perPlaneSlotOffsets,
+    int32_t *perPlaneLmcRowOffset, int32_t numPlanes, int32_t numLayers,
+    int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
+    int32_t maxTokensPerLoop, bool page2L);
 
 void single_layer_kv_transfer_kernel_v2(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
@@ -138,4 +139,4 @@ void multi_layer_kv_transfer_multi_plane(
     const torch::Tensor &page_buffer_sizes, const torch::Tensor &block_sizes,
     const torch::Tensor &hidden_dim_bytes, const int64_t max_hidden_dim_bytes,
     const torch::Device &paged_memory_device, const bool direction,
-    const int num_planes);
+    const int num_planes, const torch::Tensor &lmc_row_offsets);

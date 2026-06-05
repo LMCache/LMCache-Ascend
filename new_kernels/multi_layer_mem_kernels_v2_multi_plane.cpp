@@ -105,7 +105,8 @@ public:
         GM_ADDR pagedKVCaches, GM_ADDR cacheTensor, GM_ADDR slotmappingsConcat,
         __gm__ int32_t *perPlaneHdBytes, __gm__ int32_t *perPlaneBlockSizes,
         __gm__ int32_t *perPlanePageBuffSizes, __gm__ int32_t *perPlaneSlotOffsets,
-        const int32_t numPlanes, const int32_t numLayers, const int64_t lmcChunkLastDimBytes,
+        __gm__ int32_t *perPlaneLmcRowOffset, const int32_t numPlanes,
+        const int32_t numLayers, const int64_t lmcChunkLastDimBytes,
         const int32_t numTokensLmcChunk, const int64_t perLoopBuffSize,
         const int32_t maxTokensPerLoop, const bool page2L, AscendC::TPipe *pipe) {
         this->pipe_ = pipe;
@@ -121,6 +122,7 @@ public:
         this->perPlaneBlockSizesGm_ = perPlaneBlockSizes;
         this->perPlanePageBuffSizesGm_ = perPlanePageBuffSizes;
         this->perPlaneSlotOffsetsGm_ = perPlaneSlotOffsets;
+        this->perPlaneLmcRowOffsetGm_ = perPlaneLmcRowOffset;
         this->slotmappingsConcat_ = slotmappingsConcat;
 
         int64_t prefix = 0;
@@ -145,6 +147,10 @@ public:
         this->numTokensChunk_ =
             this->perPlaneSlotOffsetsGm_[planeIdx + 1] - this->perPlaneSlotOffsetsGm_[planeIdx];
         this->planeBaseOffsetInLayer_ = this->planeByteOffsets_[planeIdx];
+        this->planeLmcRowOffset_ =
+            this->perPlaneLmcRowOffsetGm_ != nullptr
+                ? static_cast<int32_t>(this->perPlaneLmcRowOffsetGm_[planeIdx])
+                : 0;
         this->planeRowStrideBytes_ = this->hiddenDims_;
         this->slotmappingsPlane_ = reinterpret_cast<__gm__ uint8_t *>(this->slotmappingsConcat_) +
             static_cast<int64_t>(this->perPlaneSlotOffsetsGm_[planeIdx]) * sizeof(slot_t);
@@ -302,7 +308,8 @@ public:
             const int64_t lmcByteOff =
                 static_cast<int64_t>(layerIdx) * this->layerBlockBytes_ +
                 this->planeBaseOffsetInLayer_ +
-                static_cast<int64_t>(tokenOff + t) * this->planeRowStrideBytes_;
+                static_cast<int64_t>(this->planeLmcRowOffset_ + tokenOff + t) *
+                    this->planeRowStrideBytes_;
             for (int64_t b = 0; b < hdBytes; ++b) {
                 if (page2L) {
                     lmcGm.SetValue(lmcByteOff + b, pagedGm.GetValue(pagedByteStart + b));
@@ -323,7 +330,8 @@ public:
         const int64_t lmcByteOff =
             static_cast<int64_t>(layerIdx) * this->layerBlockBytes_ +
             this->planeBaseOffsetInLayer_ +
-            static_cast<int64_t>(tokenOff) * this->planeRowStrideBytes_;
+            static_cast<int64_t>(this->planeLmcRowOffset_ + tokenOff) *
+                this->planeRowStrideBytes_;
         CopyUbToLmcChunk(lmcGm, lmcByteOff, scratchU8, partNumTokens, hdBytes, true, 0);
         this->pagedTokenQue_.FreeTensor(buf);
     }
@@ -405,7 +413,8 @@ public:
         const int64_t lmcByteOff =
             static_cast<int64_t>(layerIdx) * this->layerBlockBytes_ +
             this->planeBaseOffsetInLayer_ +
-            static_cast<int64_t>(tokenOff) * this->planeRowStrideBytes_;
+            static_cast<int64_t>(this->planeLmcRowOffset_ + tokenOff) *
+                this->planeRowStrideBytes_;
         CopyLmcChunkToUb(scratchU8, lmcGm, lmcByteOff, nTokens, hdBytes, true);
         this->pagedTokenQue_.EnQue(scratch);
         if (outUbPending) {
@@ -614,7 +623,8 @@ public:
                 const int64_t lmcByteOff =
                     static_cast<int64_t>(layerIdx) * this->layerBlockBytes_ +
                     this->planeBaseOffsetInLayer_ +
-                    static_cast<int64_t>(tokenOff) * this->planeRowStrideBytes_;
+                    static_cast<int64_t>(this->planeLmcRowOffset_ + tokenOff) *
+                        this->planeRowStrideBytes_;
                 local_scalar_t scratch = this->pagedTokenQue_.template AllocTensor<scalar_t>();
                 AscendC::LocalTensor<uint8_t> scratchU8 = scratch.template ReinterpretCast<uint8_t>();
                 CopyLmcChunkToUb(scratchU8, lmcU8, lmcByteOff, partNumTokens, hdBytes, true);
@@ -702,6 +712,7 @@ private:
     __gm__ int32_t *perPlaneBlockSizesGm_{nullptr};
     __gm__ int32_t *perPlanePageBuffSizesGm_{nullptr};
     __gm__ int32_t *perPlaneSlotOffsetsGm_{nullptr};
+    __gm__ int32_t *perPlaneLmcRowOffsetGm_{nullptr};
     GM_ADDR slotmappingsConcat_{nullptr};
     __gm__ uint8_t *slotmappingsPlane_{nullptr};
 
@@ -720,6 +731,7 @@ private:
     int64_t lmcChunkLastDimBytes_{0};
     int64_t layerBlockBytes_{0};
     int64_t planeBaseOffsetInLayer_{0};
+    int32_t planeLmcRowOffset_{0};
     int64_t planeRowStrideBytes_{0};
     int32_t blockSize_{0};
 };
@@ -727,9 +739,9 @@ private:
 extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_multi_plane_int8_t_int64_t(
     GM_ADDR pagedKVCaches, GM_ADDR dstCacheTensor, GM_ADDR slotmappingsConcat,
     GM_ADDR perPlaneHdBytes, GM_ADDR perPlaneBlockSizes, GM_ADDR perPlanePageBuffSizes,
-    GM_ADDR perPlaneSlotOffsets, const int32_t numPlanes, const int32_t numLayers,
-    const int64_t lmcChunkLastDimBytes, const int32_t numTokensLmcChunk, const int64_t perLoopBuffer,
-    const int32_t maxTokensPerLoop, const bool page2L) {
+    GM_ADDR perPlaneSlotOffsets, GM_ADDR perPlaneLmcRowOffset, const int32_t numPlanes,
+    const int32_t numLayers, const int64_t lmcChunkLastDimBytes, const int32_t numTokensLmcChunk,
+    const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L) {
     AscendC::TPipe pipe;
     MultiLayerPagedKVCopyV2MultiPlane op{};
     const int32_t bIdx = AscendC::GetBlockIdx();
@@ -741,7 +753,8 @@ extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_multi_plane_i
         reinterpret_cast<__gm__ int32_t *>(perPlaneHdBytes),
         reinterpret_cast<__gm__ int32_t *>(perPlaneBlockSizes),
         reinterpret_cast<__gm__ int32_t *>(perPlanePageBuffSizes),
-        reinterpret_cast<__gm__ int32_t *>(perPlaneSlotOffsets), numPlanes, numLayers,
+        reinterpret_cast<__gm__ int32_t *>(perPlaneSlotOffsets),
+        reinterpret_cast<__gm__ int32_t *>(perPlaneLmcRowOffset), numPlanes, numLayers,
         lmcChunkLastDimBytes, numTokensLmcChunk, perLoopBuffer, maxTokensPerLoop, page2L, &pipe);
     for (int32_t layerIdx = startLayersIdx; layerIdx < endLayersIdx; layerIdx++) {
         for (int32_t planeIdx = 0; planeIdx < numPlanes; planeIdx++) {
@@ -755,13 +768,14 @@ namespace kvcache_ops {
 extern void multi_layer_kv_transfer_multi_plane_kernel_v2(
     uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
     uint8_t *slotmappingsConcat, int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes,
-    int32_t *perPlanePageBuffSizes, int32_t *perPlaneSlotOffsets, int32_t numPlanes,
-    int32_t numLayers, int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
+    int32_t *perPlanePageBuffSizes, int32_t *perPlaneSlotOffsets,
+    int32_t *perPlaneLmcRowOffset, int32_t numPlanes, int32_t numLayers,
+    int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
     int32_t maxTokensPerLoop, bool page2L) {
     multi_layer_paged_kv_copy_v2_multi_plane_int8_t_int64_t<<<blockDim, nullptr, stream>>>(
         pagedKVCaches, dstCacheTensor, slotmappingsConcat, perPlaneHdBytes, perPlaneBlockSizes,
-        perPlanePageBuffSizes, perPlaneSlotOffsets, numPlanes, numLayers, lmcChunkLastDimBytes,
-        numTokensLmcChunk, perLoopBuffer, maxTokensPerLoop, page2L);
+        perPlanePageBuffSizes, perPlaneSlotOffsets, perPlaneLmcRowOffset, numPlanes, numLayers,
+        lmcChunkLastDimBytes, numTokensLmcChunk, perLoopBuffer, maxTokensPerLoop, page2L);
 }
 
 } // namespace kvcache_ops

@@ -6,8 +6,7 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 """
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional, Union
-import math
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 # Third Party
 from vllm.config import VllmConfig
@@ -120,38 +119,85 @@ def _normalize_block_sizes(
     return block_sizes_by_group
 
 
+def _sliding_window_store_mask(
+    tokens_uncompressed: torch.Tensor,
+    num_tokens: int,
+    sliding_win_size: int,
+    lmcache_chunk_size: int,
+) -> torch.Tensor:
+    """Returns a boolean mask of tokens to NOT be stored in sliding-window groups."""
+    chunk_start = (tokens_uncompressed // lmcache_chunk_size) * lmcache_chunk_size
+    chunk_end = chunk_start + lmcache_chunk_size
+    chunk_window_start = chunk_end - sliding_win_size
+    return tokens_uncompressed >= chunk_window_start
+
+
 def _build_slot_mapping_for_group(
     block_ids: list[int],
     block_size: int,
     num_tokens: int,
+    is_store: bool,
+    lmcache_chunk_size: int = 256,
+    compress_ratio: int = 1,
+    sliding_win_size: int | None = None,
 ) -> torch.Tensor:
-    if num_tokens == 0:
+    """Map compressed rows for tokens in [window_start_token, num_tokens).
+
+    Returns num_tokens/compress_ratio slot: a slot for each row (i.e., token or 
+    compressed token) in the sequence. The slots for the rows that must not be copied are -1.
+    """
+    if block_size <= 0:
+        raise ValueError(f"block_size must be positive, got {block_size}")
+    if compress_ratio < 1:
+        raise ValueError(f"compress_ratio must be >= 1, got {compress_ratio}")
+    if not block_ids:
         return torch.empty(0, dtype=torch.long)
 
-    num_blocks = len(block_ids)
-    capacity = num_blocks * block_size
-    if num_tokens > capacity:
-        logger.warning(
-            "Capping slot_mapping: %d effective slot(s) exceed allocated capacity "
-            "%d (%d blocks * block_size %d).",
-            num_tokens, capacity, num_blocks, block_size,
-        )
-        num_tokens = capacity
-
+    tokens_uncompressed = torch.arange(num_tokens, dtype=torch.long)
+    if tokens_uncompressed.numel() == 0:
+        return torch.empty(0, dtype=torch.long)
+    tokens_compressed = (tokens_uncompressed // compress_ratio)[::compress_ratio]
     block_ids_tensor = torch.tensor(block_ids, dtype=torch.long)
-    block_offsets = torch.arange(0, block_size, dtype=torch.long)
-    slot_mapping = (
-        block_offsets.reshape((1, block_size))
-        + block_ids_tensor.reshape((num_blocks, 1)) * block_size
-    )
-    return slot_mapping.flatten()[:num_tokens]
+    block_idx = tokens_compressed // block_size
+    block_ids = block_ids_tensor[block_idx]
+    valid_mask = block_ids != 0
+    if (is_store and sliding_win_size is not None and sliding_win_size > 0):
+        valid_mask &= _sliding_window_store_mask(
+            tokens_uncompressed,
+            num_tokens=num_tokens,
+            sliding_win_size=sliding_win_size,
+            lmcache_chunk_size=lmcache_chunk_size,
+        )[::compress_ratio]
+    if not bool(valid_mask.any()):
+        return torch.empty(0, dtype=torch.long)
+    slots = block_ids * block_size + (tokens_compressed % block_size)
+    if bool(valid_mask.all()):
+        return slots
+    # Mixed valid/null rows: keep index alignment; callers slice away -1 before kernels.
+    return slots.masked_fill(~valid_mask, -1)
+
+def _count_leading_null_blocks(block_ids: list[int]) -> int:
+    """Count vLLM null-block prefix (block_id 0) before the first real block."""
+    if not block_ids:
+        return 0
+    leading = 0
+    for block_id in block_ids:
+        if block_id != 0:
+            break
+        leading += 1
+    if leading == len(block_ids):
+        leading = 0
+    return leading
 
 
 def _build_slot_mappings_by_group(
     block_ids_by_group: "tuple[list[int], ...]",
     block_sizes_by_group: "tuple[int, ...]",
     num_tokens: int,
+    is_store: bool,
+    lmcache_chunk_size: int = 256,
     compress_ratios: "tuple[int, ...] | None" = None,
+    sliding_window_size_by_group: "tuple[int | None, ...] | None" = None,
 ) -> "tuple[torch.Tensor, ...]":
     if len(block_ids_by_group) != len(block_sizes_by_group):
         raise ValueError(
@@ -163,9 +209,18 @@ def _build_slot_mappings_by_group(
         zip(block_ids_by_group, block_sizes_by_group)
     ):
         ratio = compress_ratios[g] if compress_ratios else 1
-        effective = math.ceil(num_tokens / ratio) if ratio > 1 else num_tokens
+        swsbg = sliding_window_size_by_group
+        sw_size = (swsbg[g] if swsbg and g < len(swsbg) else None)
         mappings.append(
-            _build_slot_mapping_for_group(group_block_ids, block_size, effective)
+            _build_slot_mapping_for_group(
+                list(group_block_ids),
+                block_size,
+                num_tokens,
+                is_store,
+                lmcache_chunk_size,
+                ratio,
+                sw_size,
+            )
         )
     return tuple(mappings)
 
@@ -387,6 +442,7 @@ class ReqMeta:
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
         compress_ratios: "tuple[int, ...] | None" = None,
+        sliding_window_size_by_group: "tuple[int | None, ...] | None" = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -398,9 +454,11 @@ class ReqMeta:
             load_spec (Optional[LoadSpec]): the load spec for KV cache loading.
             discard_partial_chunks (bool): whether to discard partial chunks.
             save_decode_cache (bool): whether to save the cache in decode phase.
-            compress_ratios: per-group compression ratios (max_bs // bs[g]).
-                When provided, compressed groups get fewer effective tokens
-                in their slot mappings (ceil(num_tokens / ratio)).
+            compress_ratios: per-group semantic compression ratios from
+                ``kv_cache_spec.compress_ratio`` (default 1).  Compressed groups
+                store one slot per ``ratio`` tokens in their slot mappings.
+            sliding_window_size_by_group: optional per-group SW size in tokens
+                (from vLLM ``kv_cache_spec.sliding_window``).
 
         Returns:
             the request metadata if we need to perform load/save
@@ -478,7 +536,10 @@ class ReqMeta:
             tracker.allocated_block_ids_by_group,
             block_sizes,
             len(token_ids),
+            is_store=save_spec.can_save,
+            lmcache_chunk_size=lmcache_chunk_size,
             compress_ratios=compress_ratios,
+            sliding_window_size_by_group=sliding_window_size_by_group,
         )
 
         # For load operation: log if the request is scheduled to load
@@ -584,13 +645,15 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 self._block_size,
             )
 
-        # Compression ratios indexed by vLLM scheduler KV-cache group (one entry per
-        # kv_cache_groups[i].block_size). Used only here to size slot_mappings_by_group:
-        # compressed groups store ceil(num_tokens / ratio) slots, not one slot per token.
-        # The worker also has KVLayerGroupInfo.compress_ratio (MemoryObj / DMA kernels),
-        # but that is per NPU layer group after flatten — fewer groups, different order.
-        # Do not read compress_ratio from KVLayerGroupsManager for scheduler slot maps.
-        if self._num_kv_groups > 1:
+        # Compression ratios from vLLM kv_cache_spec (one entry per scheduler
+        # group). Used here to size slot_mappings_by_group: compressed groups store one
+        # slot per ``compress_ratio`` tokens, not one slot per token.
+        if (
+            self._num_kv_groups > 1
+            and self._kv_cache_config is not None
+            and getattr(self._kv_cache_config, "kv_cache_groups", None)
+        ):
+            groups = self._kv_cache_config.kv_cache_groups
             max_bs = max(self._block_sizes_by_group)
             for g_idx, bs in enumerate(self._block_sizes_by_group):
                 if max_bs % bs != 0:
@@ -598,11 +661,17 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                         f"Max block size {max_bs} is not a multiple of "
                         f"group {g_idx} block size {bs}"
                     )
-            self._compress_ratios_by_group: "tuple[int, ...]" = tuple(
-                max_bs // bs for bs in self._block_sizes_by_group
+            self._compress_ratios_by_group = tuple(
+                int(getattr(g.kv_cache_spec, "compress_ratio", 1)) for g in groups
+            )
+            self._sliding_window_size_by_group = tuple(
+                int(sw) if (sw := getattr(g.kv_cache_spec, "sliding_window", None))
+                is not None else None
+                for g in groups
             )
         else:
             self._compress_ratios_by_group = (1,)
+            self._sliding_window_size_by_group = None
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
@@ -1031,6 +1100,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
+                sliding_window_size_by_group=self._sliding_window_size_by_group,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -1078,6 +1148,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     discard_partial_chunks=self._discard_partial_chunks,
                     save_decode_cache=self.config.save_decode_cache,
                     compress_ratios=self._compress_ratios_by_group,
+                    sliding_window_size_by_group=self._sliding_window_size_by_group,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -1206,6 +1277,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 discard_partial_chunks=self._discard_partial_chunks,
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
+                sliding_window_size_by_group=self._sliding_window_size_by_group,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
