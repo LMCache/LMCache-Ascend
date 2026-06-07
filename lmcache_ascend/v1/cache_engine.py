@@ -20,7 +20,7 @@ from lmcache.utils import (
 from lmcache.v1.cache_engine import LMCacheEngine
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.token_database import TokenDatabase
 import torch
@@ -107,6 +107,10 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         self._device_id: Optional[int] = None
 
+        self._broadcast_shard_size = self.config.get_extra_config_value(
+            "broadcast_shard_size", 4
+        )
+
         if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
 
@@ -132,6 +136,296 @@ class AscendLMCacheEngine(LMCacheEngine):
                 queue_mode,
                 self._store_queue_maxsize,
             )
+
+        # Override upstream broadcast_stream with a dedicated NPU stream
+        # so broadcast and to_gpu can execute on separate streams.
+        if self.save_only_first_rank and hasattr(self.gpu_connector, "load_stream"):
+            self.broadcast_stream = torch.npu.Stream()
+            logger.info(
+                "Ascend broadcast stream initialized: shard_size=%d",
+                self._broadcast_shard_size,
+            )
+
+    def _sharded_broadcast_and_load(
+        self,
+        reordered_chunks: list,
+        ret_mask: torch.Tensor,
+        **kwargs,
+    ) -> None:
+        """Broadcast KV cache chunks in shards to reduce peak NPU memory.
+
+        Rank 0 sends chunks in groups of ``_broadcast_shard_size``; non-rank-0
+        ranks receive each shard, immediately load it to GPU via
+        ``batched_to_gpu``, and release the temporary NPU tensors before
+        processing the next shard.
+
+        :param reordered_chunks: Rank 0 provides pre-populated chunks; non-rank-0
+            ranks append received chunks to this list.
+        :param ret_mask: Boolean mask updated in-place to mark received positions.
+        :param **kwargs: Forwarded to ``batched_to_gpu`` (must contain
+            ``slot_mapping``, ``kvcaches``, etc.).
+        """
+        shard_size = self._broadcast_shard_size
+        first_rank = self.metadata.first_rank
+        local_rank = self.metadata.worker_id % torch.npu.device_count()
+
+        if self.metadata.is_first_rank():
+            # --- Sender (rank 0) ---
+            total_chunks = len(reordered_chunks)
+            self.broadcast_object_fn(total_chunks, first_rank)
+
+            if total_chunks == 0:
+                return
+
+            idx = 0
+            while idx < total_chunks:
+                end_idx = min(idx + shard_size, total_chunks)
+                shard_count = end_idx - idx
+
+                self.broadcast_object_fn(shard_count, first_rank)
+
+                for i in range(idx, end_idx):
+                    key, memory_obj, start, end = reordered_chunks[i]
+                    metadata_dict = memory_obj.metadata.to_dict()
+                    combined_metadata = (start, end, metadata_dict)
+                    self.broadcast_object_fn(combined_metadata, first_rank)
+
+                    raw_tensor = memory_obj.raw_tensor
+                    if raw_tensor is None:
+                        raise ValueError(
+                            "memory_obj.raw_tensor is None during broadcast"
+                        )
+                    tensor_to_broadcast = raw_tensor.to(
+                        f"npu:{self.metadata.worker_id}"
+                    )
+                    self.broadcast_fn(tensor_to_broadcast, first_rank)
+
+                idx = end_idx
+        else:
+            # --- Receiver (non-rank 0) ---
+            total_chunks = self.broadcast_object_fn(None, first_rank)
+            if total_chunks is None or total_chunks == 0:
+                return
+
+            received_total = 0
+            while received_total < total_chunks:
+                shard_count = self.broadcast_object_fn(None, first_rank)
+                if shard_count is None:
+                    logger.warning(
+                        "rank=%d received None shard_count, aborting broadcast",
+                        self.metadata.worker_id,
+                    )
+                    return
+
+                shard_memory_objs: list[TensorMemoryObj] = []
+                shard_starts: list[int] = []
+                shard_ends: list[int] = []
+
+                for _ in range(shard_count):
+                    combined_metadata = self.broadcast_object_fn(
+                        None, first_rank
+                    )
+                    if combined_metadata is None:
+                        logger.warning(
+                            "rank=%d received None metadata, aborting broadcast",
+                            self.metadata.worker_id,
+                        )
+                        return
+                    start, end, metadata_dict = combined_metadata
+                    metadata = MemoryObjMetadata.from_dict(metadata_dict)
+
+                    raw_tensor: torch.Tensor
+                    try:
+                        raw_tensor = torch.empty(
+                            torch.Size([metadata.get_size()]),
+                            dtype=torch.uint8,
+                            device=f"npu:{local_rank}",
+                        )
+                    except RuntimeError as e:
+                        if "out of memory" not in str(e).lower():
+                            raise
+                        logger.warning(
+                            "rank=%d OOM during broadcast receive, "
+                            "falling back to CPU for chunk [%d:%d]",
+                            self.metadata.worker_id,
+                            start,
+                            end,
+                        )
+                        torch.npu.empty_cache()
+                        # Must still participate in broadcast to keep HCCL sync
+                        raw_tensor = torch.empty(
+                            torch.Size([metadata.get_size()]),
+                            dtype=torch.uint8,
+                            device="cpu",
+                        ).pin_memory()
+                        self.broadcast_fn(raw_tensor, first_rank)
+                        received_total += 1
+                        continue
+
+                    self.broadcast_fn(raw_tensor, first_rank)
+
+                    memory_obj = TensorMemoryObj(
+                        raw_data=raw_tensor,
+                        metadata=metadata,
+                        parent_allocator=None,
+                    )
+                    shard_memory_objs.append(memory_obj)
+                    shard_starts.append(start)
+                    shard_ends.append(end)
+                    ret_mask[start:end] = True
+                    received_total += 1
+
+                # Load this shard to GPU and release NPU tensors
+                if shard_memory_objs:
+                    self.gpu_connector.batched_to_gpu(
+                        shard_memory_objs,
+                        shard_starts,
+                        shard_ends,
+                        **kwargs,
+                    )
+                    for mem_obj in shard_memory_objs:
+                        mem_obj.ref_count_down()
+
+    @torch.inference_mode()
+    def retrieve(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        """Retrieve the KV caches from the cache engine. And put the retrieved
+        KV cache to the serving engine via the GPU connector.
+
+        Overrides upstream to use sharded broadcast when
+        ``broadcast_shard_size != 0``, reducing peak NPU memory usage by
+        interleaving broadcast receive and ``batched_to_gpu`` per shard.
+
+        :param tokens: The tokens of the corresponding KV caches.
+        :param mask: The mask for the tokens. Should have the same length as
+            tokens. The mask should ALWAYS be like FFFFFTTTTTTT, where True
+            means the tokens needs to be matched, and the Falses will ALWAYS
+            be at the PREFIX of the tensor.
+        :param **kwargs: Forwarded to ``batched_to_gpu``. Should include KV
+            cache specific information (e.g., paged KV buffer and the page
+            tables).
+        :return: Boolean mask indicating which tokens are retrieved. Same
+            length as *tokens*. On CPU.
+        :raises ValueError: If the number of Falses in the mask is not a
+            multiple of the chunk size.
+        """
+        if not self.is_healthy():
+            logger.warning("LMCache is unhealthy, skipping retrieve operation")
+            return torch.zeros(len(tokens), dtype=torch.bool)
+
+        if self.gpu_connector is None:
+            raise ValueError("gpu_connector is required for retrieve operation")
+
+        req_id = self._get_req_id(kwargs)
+
+        tot_kv_size = 0
+
+        if mask is not None:
+            num_required_tokens = torch.sum(mask).item()
+        else:
+            num_required_tokens = len(tokens)
+
+        self._log_kvcache_for_check(
+            operation="retrieve",
+            kwargs=kwargs,
+            token_count=num_required_tokens,
+            require_req_id=True,
+        )
+
+        retrieve_stats = self.stats_monitor.on_retrieve_request(
+            num_required_tokens
+        )
+
+        ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
+
+        reordered_chunks: list = []
+        if not self._is_passive():
+            with retrieve_stats.profile_process_tokens():
+                if self.async_loading:
+                    reordered_chunks, tot_kv_size = (
+                        self._async_process_tokens_internal(
+                            tokens, mask, ret_mask, **kwargs
+                        )
+                    )
+                else:
+                    reordered_chunks, tot_kv_size = (
+                        self._process_tokens_internal(
+                            tokens, mask, ret_mask, **kwargs
+                        )
+                    )
+
+        # --- Sharded broadcast (Ascend override) ---
+        if self.save_only_first_rank:
+            with retrieve_stats.profile_broadcast():
+                if self._broadcast_shard_size != 0:
+                    with torch.npu.stream(self.broadcast_stream):
+                        self._sharded_broadcast_and_load(
+                            reordered_chunks, ret_mask, **kwargs
+                        )
+                else:
+                    # Fallback: upstream broadcast (no sharding)
+                    with torch.npu.stream(self.broadcast_stream):
+                        self._broadcast_or_receive_memory_objs(
+                            reordered_chunks, ret_mask
+                        )
+                    if not hasattr(self.gpu_connector, "load_stream"):
+                        self.broadcast_stream.synchronize()
+
+        # --- to_gpu: only rank 0 needs batched_to_gpu here ---
+        # Non-rank-0 already loaded per-shard inside _sharded_broadcast_and_load.
+        if len(reordered_chunks) > 0:
+            with retrieve_stats.profile_to_gpu():
+                if not self._is_passive():
+                    _, memory_objs, starts, ends = zip(
+                        *reordered_chunks, strict=False
+                    )
+                    self.gpu_connector.batched_to_gpu(
+                        list(memory_objs),
+                        list(starts),
+                        list(ends),
+                        **kwargs,
+                    )
+
+        # --- Cleanup ---
+        for key, memory_obj, _, _ in reordered_chunks:
+            if self.remove_after_retrieve and not self._is_passive():
+                if self.storage_manager is None:
+                    raise ValueError("storage_manager is required for remove")
+                self.storage_manager.remove(key, self.retrieve_locations)
+                if self._is_sync_pd_backend():
+                    memory_obj.ref_count_down()
+            elif not self.async_loading and self._is_passive():
+                # Already handled per-shard in _sharded_broadcast_and_load
+                pass
+            elif not self.async_loading:
+                memory_obj.ref_count_down()
+
+        retrieved_tokens = torch.sum(ret_mask)
+        self.stats_monitor.on_retrieve_finished(
+            retrieve_stats,
+            retrieved_tokens,
+        )
+        onload_time = retrieve_stats.time_to_retrieve()
+        if not self._is_passive():
+            logger.info(
+                "[req_id=%s] Retrieved %d out of %d required tokens "
+                "(from %d total tokens). size: %.4f gb, "
+                "cost %.4f ms, throughput: %.4f GB/s;",
+                req_id,
+                retrieved_tokens,
+                num_required_tokens,
+                len(tokens),
+                tot_kv_size / 1024**3,
+                onload_time * 1000,
+                tot_kv_size / onload_time / 1024**3
+                if onload_time > 0
+                else 0,
+            )
+        return ret_mask
 
     def _store_worker_loop(self) -> None:
         if not self.is_store_async:
