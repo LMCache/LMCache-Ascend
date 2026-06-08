@@ -15,8 +15,26 @@ from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
     _pointers_for_entry,
+)
+from lmcache_ascend.v1.slot_mapping_utils import (
+    build_filtered_slot_mappings,
     multi_plane_slot_slice_bounds,
 )
+
+
+def _filtered_slot_invoke_kwargs(
+    slot_mappings: tuple[torch.Tensor, ...],
+    compress_ratios: tuple[int, ...],
+) -> dict:
+    filtered, prefixes = build_filtered_slot_mappings(
+        tuple(sm.cpu() for sm in slot_mappings),
+        compress_ratios=compress_ratios,
+    )
+    dev = slot_mappings[0].device
+    return {
+        "filtered_slot_mappings_npu": tuple(f.to(dev) for f in filtered),
+        "slot_valid_prefix_by_group": prefixes,
+    }
 
 
 def npu_available() -> bool:
@@ -235,6 +253,7 @@ def multi_plane_round_trip_via_connector(
     with pinned_lmc_chunk(
         (1, 1, chunk, lmc_chunk_row_bytes), torch.uint8, pool_bytes=pool_bytes
     ) as (_mem_obj, lmc_chunk):
+        slot_invoke = _filtered_slot_invoke_kwargs(slot_mappings, compress_ratios)
         connector._invoke_multi_plane_kv_transfer(
             mem_tensor=lmc_chunk,
             group_ptrs=ptrs_store,
@@ -245,6 +264,7 @@ def multi_plane_round_trip_via_connector(
             g_end=chunk,
             is_store=True,
             npu_group_idx=gi,
+            **slot_invoke,
         )
         torch.npu.synchronize()
 
@@ -258,6 +278,7 @@ def multi_plane_round_trip_via_connector(
             g_end=chunk,
             is_store=False,
             npu_group_idx=gi,
+            **slot_invoke,
         )
         torch.npu.synchronize()
 
@@ -340,6 +361,7 @@ def separate_kv_round_trip_via_connector(
             ptrs_store[li] = src.data_ptr()
             ptrs_load[li] = dst.data_ptr()
 
+        slot_invoke = _filtered_slot_invoke_kwargs(slot_mappings, compress_ratios)
         connector._invoke_multi_plane_kv_transfer(
             mem_tensor=lmc_tensor,
             group_ptrs=ptrs_store,
@@ -350,6 +372,7 @@ def separate_kv_round_trip_via_connector(
             g_end=chunk,
             is_store=True,
             npu_group_idx=gi,
+            **slot_invoke,
         )
         torch.npu.synchronize()
 
@@ -363,6 +386,7 @@ def separate_kv_round_trip_via_connector(
             g_end=chunk,
             is_store=False,
             npu_group_idx=gi,
+            **slot_invoke,
         )
         torch.npu.synchronize()
     finally:

@@ -93,5 +93,5 @@ def register_alias():
 
 def prepare_environment():
     """Main entry point to prepare the test environment."""
-    setup_lmcache_dependency()
+    #setup_lmcache_dependency()
     register_alias()
