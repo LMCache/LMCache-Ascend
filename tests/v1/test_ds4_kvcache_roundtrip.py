@@ -8,7 +8,7 @@ import torch
 
 from lmcache_ascend.integration.vllm.multi_spec_flatten import build_flat_kv_caches
 from lmcache_ascend.v1.kv_format import KVCacheFormat
-from lmcache_ascend.v1.npu_connector.npu_connectors import multi_plane_slot_slice_bounds
+from lmcache_ascend.v1.slot_mapping_utils import multi_plane_slot_slice_bounds
 
 from .conftest_ds4 import (
     DS4_IE_LOGICAL_BLOCK_SIZE,

@@ -28,12 +28,13 @@ __aicore__ inline uint32_t ScratchTokenStrideBytes(uint32_t hdBytes) {
 #ifndef MP_TRACE_LEVEL
 #define MP_TRACE_LEVEL 0
 #endif
-#define MP_TRACE(level, fmt, ...) \
-    do { \
-        if ((level) <= (MP_TRACE_LEVEL)) { \
-            AscendC::PRINTF("[MP_TRACE_%d] " fmt "\n", (level), ##__VA_ARGS__); \
-        } \
-    } while (0)
+#define MP_TRACE(level, fmt, ...)
+// #define MP_TRACE(level, fmt, ...) \
+//    do { \
+//        if constexpr ((level) <= (MP_TRACE_LEVEL)) { \
+//            AscendC::PRINTF("[MP_TRACE_%d] " fmt "\n", (level), ##__VA_ARGS__); \
+//        } \
+//    } while (0)
 
 // KVCacheFormat::MULTI_PLANE_KV (6): fused multi-plane copy in one kernel launch.
 // Host entry: csrc/mem_kernels.cpp::multi_layer_kv_transfer_multi_plane.
@@ -76,10 +77,8 @@ __aicore__ inline uint32_t ScratchTokenStrideBytes(uint32_t hdBytes) {
 //  Host / launcher: csrc/mem_kernels.cpp::multi_layer_kv_transfer_multi_plane enqueues once;
 //    each AI core loops layerIdx and planeIdx via processPlane().
 //
-//  slotmappingsConcat  (GM_ADDR, int64 slots; all planes concatenated)
-//  |-- plane0 slots --|-- plane1 --| ... |-- plane P-1 --|
-//  ^                  ^                                              ^
-//  perPlaneSlotOffsets[0] [1]              [P]  (numTokensChunk_ = [p+1]-[p])
+//  perPlaneSlotPtrs[p] + perPlaneSlotStarts[p]: dense int64 slots for plane p
+//  perPlaneSlotCounts[p] = numTokensChunk_ for that plane
 //
 //  Init also sets: page2L_ (true = paged->chunk store), perLoopBuffSize_ / maxTokensPerLoop_
 //  (UB chunking), pipe_ + pagedTokenQue_ (local scratch, size perLoopBuffSize_).
@@ -102,9 +101,10 @@ public:
     // Cache host GM pointers, compute per-plane byte offsets in the packed Lmc layer block, and
     // allocate pagedTokenQue_ with depth 2 and slot size perLoopBuffSize_ (one part per slot).
     __aicore__ inline void init(
-        GM_ADDR pagedKVCaches, GM_ADDR cacheTensor, GM_ADDR slotmappingsConcat,
-        __gm__ int32_t *perPlaneHdBytes, __gm__ int32_t *perPlaneBlockSizes,
-        __gm__ int32_t *perPlanePageBuffSizes, __gm__ int32_t *perPlaneSlotOffsets,
+        GM_ADDR pagedKVCaches, GM_ADDR cacheTensor,
+        __gm__ int64_t *perPlaneSlotPtrs, __gm__ int32_t *perPlaneSlotStarts,
+        __gm__ int32_t *perPlaneSlotCounts, __gm__ int32_t *perPlaneHdBytes,
+        __gm__ int32_t *perPlaneBlockSizes, __gm__ int32_t *perPlanePageBuffSizes,
         __gm__ int32_t *perPlaneLmcRowOffset, const int32_t numPlanes,
         const int32_t numLayers, const int64_t lmcChunkLastDimBytes,
         const int32_t numTokensLmcChunk, const int64_t perLoopBuffSize,
@@ -121,9 +121,10 @@ public:
         this->perPlaneHdBytesGm_ = perPlaneHdBytes;
         this->perPlaneBlockSizesGm_ = perPlaneBlockSizes;
         this->perPlanePageBuffSizesGm_ = perPlanePageBuffSizes;
-        this->perPlaneSlotOffsetsGm_ = perPlaneSlotOffsets;
+        this->perPlaneSlotPtrsGm_ = perPlaneSlotPtrs;
+        this->perPlaneSlotStartsGm_ = perPlaneSlotStarts;
+        this->perPlaneSlotCountsGm_ = perPlaneSlotCounts;
         this->perPlaneLmcRowOffsetGm_ = perPlaneLmcRowOffset;
-        this->slotmappingsConcat_ = slotmappingsConcat;
 
         int64_t prefix = 0;
         for (int32_t p = 0; p < numPlanes && p < kMaxPlanes; ++p) {
@@ -144,16 +145,16 @@ public:
         this->hiddenDims_ = static_cast<int64_t>(this->perPlaneHdBytesGm_[planeIdx]);
         this->blockSize_ = this->perPlaneBlockSizesGm_[planeIdx];
         this->pageBuffSize_ = static_cast<int64_t>(this->perPlanePageBuffSizesGm_[planeIdx]);
-        this->numTokensChunk_ =
-            this->perPlaneSlotOffsetsGm_[planeIdx + 1] - this->perPlaneSlotOffsetsGm_[planeIdx];
+        this->numTokensChunk_ = this->perPlaneSlotCountsGm_[planeIdx];
         this->planeBaseOffsetInLayer_ = this->planeByteOffsets_[planeIdx];
         this->planeLmcRowOffset_ =
             this->perPlaneLmcRowOffsetGm_ != nullptr
                 ? static_cast<int32_t>(this->perPlaneLmcRowOffsetGm_[planeIdx])
                 : 0;
         this->planeRowStrideBytes_ = this->hiddenDims_;
-        this->slotmappingsPlane_ = reinterpret_cast<__gm__ uint8_t *>(this->slotmappingsConcat_) +
-            static_cast<int64_t>(this->perPlaneSlotOffsetsGm_[planeIdx]) * sizeof(slot_t);
+        this->slotmappingsPlane_ = reinterpret_cast<__gm__ uint8_t *>(
+            this->perPlaneSlotPtrsGm_[planeIdx]) +
+            static_cast<int64_t>(this->perPlaneSlotStartsGm_[planeIdx]) * sizeof(slot_t);
     }
 
     // Copy one contiguous byte span from Paged GM into UB at dstByteOff via DataCopyPad.
@@ -711,9 +712,10 @@ private:
     __gm__ int32_t *perPlaneHdBytesGm_{nullptr};
     __gm__ int32_t *perPlaneBlockSizesGm_{nullptr};
     __gm__ int32_t *perPlanePageBuffSizesGm_{nullptr};
-    __gm__ int32_t *perPlaneSlotOffsetsGm_{nullptr};
+    __gm__ int64_t *perPlaneSlotPtrsGm_{nullptr};
+    __gm__ int32_t *perPlaneSlotStartsGm_{nullptr};
+    __gm__ int32_t *perPlaneSlotCountsGm_{nullptr};
     __gm__ int32_t *perPlaneLmcRowOffsetGm_{nullptr};
-    GM_ADDR slotmappingsConcat_{nullptr};
     __gm__ uint8_t *slotmappingsPlane_{nullptr};
 
     int64_t planeByteOffsets_[kMaxPlanes];
@@ -737,11 +739,12 @@ private:
 };
 
 extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_multi_plane_int8_t_int64_t(
-    GM_ADDR pagedKVCaches, GM_ADDR dstCacheTensor, GM_ADDR slotmappingsConcat,
-    GM_ADDR perPlaneHdBytes, GM_ADDR perPlaneBlockSizes, GM_ADDR perPlanePageBuffSizes,
-    GM_ADDR perPlaneSlotOffsets, GM_ADDR perPlaneLmcRowOffset, const int32_t numPlanes,
-    const int32_t numLayers, const int64_t lmcChunkLastDimBytes, const int32_t numTokensLmcChunk,
-    const int64_t perLoopBuffer, const int32_t maxTokensPerLoop, const bool page2L) {
+    GM_ADDR pagedKVCaches, GM_ADDR dstCacheTensor, GM_ADDR perPlaneSlotPtrs,
+    GM_ADDR perPlaneSlotStarts, GM_ADDR perPlaneSlotCounts, GM_ADDR perPlaneHdBytes,
+    GM_ADDR perPlaneBlockSizes, GM_ADDR perPlanePageBuffSizes, GM_ADDR perPlaneLmcRowOffset,
+    const int32_t numPlanes, const int32_t numLayers, const int64_t lmcChunkLastDimBytes,
+    const int32_t numTokensLmcChunk, const int64_t perLoopBuffer, const int32_t maxTokensPerLoop,
+    const bool page2L) {
     AscendC::TPipe pipe;
     MultiLayerPagedKVCopyV2MultiPlane op{};
     const int32_t bIdx = AscendC::GetBlockIdx();
@@ -749,11 +752,13 @@ extern "C" __global__ __aicore__ void multi_layer_paged_kv_copy_v2_multi_plane_i
     const int32_t layersPerCore = (numLayers + launchedCores - 1) / launchedCores;
     const int32_t startLayersIdx = bIdx * layersPerCore;
     const int32_t endLayersIdx = min(numLayers, startLayersIdx + layersPerCore);
-    op.init(pagedKVCaches, dstCacheTensor, slotmappingsConcat,
+    op.init(pagedKVCaches, dstCacheTensor,
+        reinterpret_cast<__gm__ int64_t *>(perPlaneSlotPtrs),
+        reinterpret_cast<__gm__ int32_t *>(perPlaneSlotStarts),
+        reinterpret_cast<__gm__ int32_t *>(perPlaneSlotCounts),
         reinterpret_cast<__gm__ int32_t *>(perPlaneHdBytes),
         reinterpret_cast<__gm__ int32_t *>(perPlaneBlockSizes),
         reinterpret_cast<__gm__ int32_t *>(perPlanePageBuffSizes),
-        reinterpret_cast<__gm__ int32_t *>(perPlaneSlotOffsets),
         reinterpret_cast<__gm__ int32_t *>(perPlaneLmcRowOffset), numPlanes, numLayers,
         lmcChunkLastDimBytes, numTokensLmcChunk, perLoopBuffer, maxTokensPerLoop, page2L, &pipe);
     for (int32_t layerIdx = startLayersIdx; layerIdx < endLayersIdx; layerIdx++) {
@@ -767,15 +772,16 @@ namespace kvcache_ops {
 
 extern void multi_layer_kv_transfer_multi_plane_kernel_v2(
     uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
-    uint8_t *slotmappingsConcat, int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes,
-    int32_t *perPlanePageBuffSizes, int32_t *perPlaneSlotOffsets,
+    int64_t *perPlaneSlotPtrs, int32_t *perPlaneSlotStarts, int32_t *perPlaneSlotCounts,
+    int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes, int32_t *perPlanePageBuffSizes,
     int32_t *perPlaneLmcRowOffset, int32_t numPlanes, int32_t numLayers,
     int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
     int32_t maxTokensPerLoop, bool page2L) {
     multi_layer_paged_kv_copy_v2_multi_plane_int8_t_int64_t<<<blockDim, nullptr, stream>>>(
-        pagedKVCaches, dstCacheTensor, slotmappingsConcat, perPlaneHdBytes, perPlaneBlockSizes,
-        perPlanePageBuffSizes, perPlaneSlotOffsets, perPlaneLmcRowOffset, numPlanes, numLayers,
-        lmcChunkLastDimBytes, numTokensLmcChunk, perLoopBuffer, maxTokensPerLoop, page2L);
+        pagedKVCaches, dstCacheTensor, perPlaneSlotPtrs, perPlaneSlotStarts,
+        perPlaneSlotCounts, perPlaneHdBytes, perPlaneBlockSizes, perPlanePageBuffSizes,
+        perPlaneLmcRowOffset, numPlanes, numLayers, lmcChunkLastDimBytes, numTokensLmcChunk,
+        perLoopBuffer, maxTokensPerLoop, page2L);
 }
 
 } // namespace kvcache_ops

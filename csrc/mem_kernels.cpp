@@ -143,11 +143,15 @@ void fused_multi_layer_kv_transfer(
   torch::Tensor hidden_dim_bytes;
   torch::Tensor block_sizes;
   torch::Tensor page_buffer_sizes;
-  torch::Tensor slot_concat;
-  torch::Tensor slot_offsets;
+  torch::Tensor slot_ptrs;
+  torch::Tensor slot_starts;
+  torch::Tensor slot_counts;
   if (config.is_dsa_c8) {
     const auto i32_opts = torch::TensorOptions()
                               .dtype(torch::kInt32)
+                              .device(slot_mapping.device());
+    const auto i64_opts = torch::TensorOptions()
+                              .dtype(torch::kInt64)
                               .device(slot_mapping.device());
     hidden_dim_bytes = torch::tensor(
         {static_cast<int32_t>(config.k_hidden_dims),
@@ -160,9 +164,11 @@ void fused_multi_layer_kv_transfer(
     page_buffer_sizes = torch::full(
         {4}, static_cast<int32_t>(config.page_buffer_size), i32_opts);
     const int32_t ntok = static_cast<int32_t>(config.num_tokens);
-    slot_concat = slot_mapping.repeat({4});
-    slot_offsets = torch::tensor(
-        {0, ntok, 2 * ntok, 3 * ntok, 4 * ntok}, i32_opts);
+    const int64_t slot_data_ptr =
+        reinterpret_cast<int64_t>(slot_mapping.data_ptr());
+    slot_ptrs = torch::full({4}, slot_data_ptr, i64_opts);
+    slot_starts = torch::zeros({4}, i32_opts);
+    slot_counts = torch::full({4}, ntok, i32_opts);
   }
 
   const c10_npu::NPUStream npu_stream = c10_npu::getCurrentNPUStream();
@@ -170,7 +176,7 @@ void fused_multi_layer_kv_transfer(
   cmd.Name("fused_multi_layer_kv_transfer_kernel_v2");
   cmd.SetCustomHandler([config, staging_cache_ptr, key_value_ptr, required_size,
                         hidden_dim_bytes, block_sizes, page_buffer_sizes,
-                        slot_concat, slot_offsets, staging_cache,
+                        slot_ptrs, slot_starts, slot_counts, staging_cache,
                         npu_stream]() -> int {
     auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
     auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
@@ -190,14 +196,12 @@ void fused_multi_layer_kv_transfer(
 
     // Step 2: Kernel (Gather or Scatter)
     if (config.is_dsa_c8) {
-      uint8_t *slot_concat_ptr =
-          get_kernel_ptr<uint8_t, const torch::Tensor>(slot_concat);
-
       kvcache_ops::multi_layer_kv_transfer_multi_plane_kernel_v2(
           config.aiv_num, config.stream, config.page_buffer_ptrs, staging_cache_ptr,
-          slot_concat_ptr, hidden_dim_bytes.data_ptr<int32_t>(),
+          slot_ptrs.data_ptr<int64_t>(), slot_starts.data_ptr<int32_t>(),
+          slot_counts.data_ptr<int32_t>(), hidden_dim_bytes.data_ptr<int32_t>(),
           block_sizes.data_ptr<int32_t>(), page_buffer_sizes.data_ptr<int32_t>(),
-          slot_offsets.data_ptr<int32_t>(), nullptr, 4, config.num_layers,
+          nullptr, 4, config.num_layers,
           static_cast<int64_t>(staging_cache.size(-1)) * staging_cache.element_size(),
           config.num_tokens_lmc_chunk, config.singlePerLoopBuffer,
           config.maxTokensPerLoop, config.direction);
@@ -208,9 +212,11 @@ void fused_multi_layer_kv_transfer(
       c10_npu::NPUCachingAllocator::recordStream(
           page_buffer_sizes.storage().data_ptr(), npu_stream);
       c10_npu::NPUCachingAllocator::recordStream(
-          slot_concat.storage().data_ptr(), npu_stream);
+          slot_ptrs.storage().data_ptr(), npu_stream);
       c10_npu::NPUCachingAllocator::recordStream(
-          slot_offsets.storage().data_ptr(), npu_stream);
+          slot_starts.storage().data_ptr(), npu_stream);
+      c10_npu::NPUCachingAllocator::recordStream(
+          slot_counts.storage().data_ptr(), npu_stream);
     } else {
       kvcache_ops::multi_layer_kv_transfer_kernel_v2(
           dtype_num, slot_num, config.kvcache_format, config.aiv_num,
@@ -524,24 +530,28 @@ void reshape_and_cache_back_flash(
   return;
 };
 
-// Multi-plane KV transfer: caller must pass only valid slot indices in
-// slot_mapping_concat. Production builds the concat from [g_start, g_end) slices
-// per plane (see multi_plane_slot_slice_bounds), so prefix-cache -1 padding is
-// never included. This entry point does not scan the mapping (that would sync
-// NPU/CPU and walk every slot); invalid indices are undefined behavior.
+// Multi-plane KV transfer: per-plane slot pointers must reference dense mappings
+// (no -1). Starts/counts index the chunk slice within each plane's mapping.
 void multi_layer_kv_transfer_multi_plane(
     torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
-    const torch::Tensor &slot_mapping_concat,
-    const torch::Tensor &slot_mapping_offsets,
+    const torch::Tensor &slot_mapping_ptrs,
+    const torch::Tensor &slot_mapping_starts,
+    const torch::Tensor &slot_mapping_counts,
     const torch::Tensor &page_buffer_sizes, const torch::Tensor &block_sizes,
     const torch::Tensor &hidden_dim_bytes, const int64_t max_hidden_dim_bytes,
     const torch::Device &paged_memory_device, const bool direction,
     const int num_planes, const torch::Tensor &lmc_row_offsets) {
   TORCH_CHECK(num_planes > 0, "num_planes must be positive");
   TORCH_CHECK(num_planes <= 32, "num_planes cannot exceed 32 (kMaxPlanes)");
-  TORCH_CHECK(slot_mapping_offsets.dim() == 1, "slot_mapping_offsets must be 1D");
-  TORCH_CHECK(slot_mapping_offsets.size(0) == num_planes + 1,
-              "slot_mapping_offsets must have num_planes+1 elements");
+  TORCH_CHECK(slot_mapping_ptrs.dim() == 1 &&
+                  slot_mapping_ptrs.size(0) == num_planes,
+              "slot_mapping_ptrs length mismatch");
+  TORCH_CHECK(slot_mapping_starts.dim() == 1 &&
+                  slot_mapping_starts.size(0) == num_planes,
+              "slot_mapping_starts length mismatch");
+  TORCH_CHECK(slot_mapping_counts.dim() == 1 &&
+                  slot_mapping_counts.size(0) == num_planes,
+              "slot_mapping_counts length mismatch");
   TORCH_CHECK(page_buffer_sizes.dim() == 1 && page_buffer_sizes.size(0) == num_planes,
               "page_buffer_sizes length mismatch");
   TORCH_CHECK(block_sizes.dim() == 1 && block_sizes.size(0) == num_planes,
@@ -549,8 +559,12 @@ void multi_layer_kv_transfer_multi_plane(
   TORCH_CHECK(hidden_dim_bytes.dim() == 1 &&
                   hidden_dim_bytes.size(0) == num_planes,
               "hidden_dim_bytes length mismatch");
-  TORCH_CHECK(slot_mapping_concat.dim() == 1,
-              "slot_mapping_concat must be 1D");
+  TORCH_CHECK(slot_mapping_ptrs.scalar_type() == torch::kInt64,
+              "slot_mapping_ptrs must be int64");
+  TORCH_CHECK(slot_mapping_starts.scalar_type() == torch::kInt32,
+              "slot_mapping_starts must be int32");
+  TORCH_CHECK(slot_mapping_counts.scalar_type() == torch::kInt32,
+              "slot_mapping_counts must be int32");
   TORCH_CHECK(lmc_row_offsets.dim() == 1 && lmc_row_offsets.size(0) == num_planes,
               "lmc_row_offsets length mismatch");
   TORCH_CHECK(lmc_row_offsets.scalar_type() == torch::kInt32,
@@ -572,15 +586,17 @@ void multi_layer_kv_transfer_multi_plane(
   uint8_t *key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
   uint8_t *paged_ptrs =
       get_kernel_ptr<uint8_t, const torch::Tensor>(key_value_ptrs);
-  uint8_t *slot_concat_ptr =
-      get_kernel_ptr<uint8_t, const torch::Tensor>(slot_mapping_concat);
+  int64_t *slot_ptrs =
+      get_kernel_ptr<int64_t, const torch::Tensor>(slot_mapping_ptrs);
+  int32_t *slot_starts_ptr =
+      get_kernel_ptr<int32_t, const torch::Tensor>(slot_mapping_starts);
+  int32_t *slot_counts_ptr =
+      get_kernel_ptr<int32_t, const torch::Tensor>(slot_mapping_counts);
   int32_t *hd_ptr =
       get_kernel_ptr<int32_t, const torch::Tensor>(hidden_dim_bytes);
   int32_t *bs_ptr = get_kernel_ptr<int32_t, const torch::Tensor>(block_sizes);
   int32_t *pbs_ptr =
       get_kernel_ptr<int32_t, const torch::Tensor>(page_buffer_sizes);
-  int32_t *offsets_ptr =
-      get_kernel_ptr<int32_t, const torch::Tensor>(slot_mapping_offsets);
   int32_t *lmc_row_off_ptr =
       get_kernel_ptr<int32_t, const torch::Tensor>(lmc_row_offsets);
 
@@ -609,10 +625,10 @@ void multi_layer_kv_transfer_multi_plane(
   cmd.Name("multi_layer_kv_transfer_multi_plane_kernel_v2");
   cmd.SetCustomHandler([=]() -> int {
     kvcache_ops::multi_layer_kv_transfer_multi_plane_kernel_v2(
-        aiv_num, stream, paged_ptrs, key_value_ptr, slot_concat_ptr, hd_ptr,
-        bs_ptr, pbs_ptr, offsets_ptr, lmc_row_off_ptr, num_planes, num_layers,
-        lmc_chunk_last_dim_bytes, num_tokens_lmc_chunk, singlePerLoopBuffer,
-        maxTokensPerLoop, direction);
+        aiv_num, stream, paged_ptrs, key_value_ptr, slot_ptrs, slot_starts_ptr,
+        slot_counts_ptr, hd_ptr, bs_ptr, pbs_ptr, lmc_row_off_ptr, num_planes,
+        num_layers, lmc_chunk_last_dim_bytes, num_tokens_lmc_chunk,
+        singlePerLoopBuffer, maxTokensPerLoop, direction);
     return 0;
   });
   cmd.Run();

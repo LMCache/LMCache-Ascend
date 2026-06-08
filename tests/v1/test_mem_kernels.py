@@ -1607,11 +1607,11 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
         chunk_tensor = mem_tensor
         if chunk_tensor.dtype != torch.uint8:
             chunk_tensor = chunk_tensor.view(torch.uint8)
-        sm_concat = torch.cat([slots] * 4, dim=0)
-        offsets = torch.arange(
-            0, 4 * n_tok + 1, n_tok, dtype=torch.int32, device=slots.device
-        )
         dev = kv_cache_src[0][0].device
+        slot_ptr = slots.data_ptr()
+        slot_ptrs = torch.full((4,), slot_ptr, dtype=torch.int64, device=dev)
+        slot_starts = torch.zeros(4, dtype=torch.int32, device=dev)
+        slot_counts = torch.full((4,), n_tok, dtype=torch.int32, device=dev)
         pbs = torch.tensor([page_buffer_size] * 4, dtype=torch.int32, device=dev)
         bss = torch.tensor([block_size] * 4, dtype=torch.int32, device=dev)
         hds = torch.tensor(list(plane_bytes), dtype=torch.int32, device=dev)
@@ -1619,8 +1619,9 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
         lmc_ops.multi_layer_kv_transfer_multi_plane(
             chunk_tensor,
             ptrs,
-            sm_concat,
-            offsets,
+            slot_ptrs,
+            slot_starts,
+            slot_counts,
             pbs,
             bss,
             hds,
@@ -1771,11 +1772,11 @@ def test_fused_multi_layer_kv_transfer_dsa_c8_format(
         chunk_tensor = mem_tensor
         if chunk_tensor.dtype != torch.uint8:
             chunk_tensor = chunk_tensor.view(torch.uint8)
-        sm_concat = torch.cat([slots] * 4, dim=0)
-        offsets = torch.arange(
-            0, 4 * n_tok + 1, n_tok, dtype=torch.int32, device=slots.device
-        )
         dev = kv_cache[0][0].device
+        slot_ptr = slots.data_ptr()
+        slot_ptrs = torch.full((4,), slot_ptr, dtype=torch.int64, device=dev)
+        slot_starts = torch.zeros(4, dtype=torch.int32, device=dev)
+        slot_counts = torch.full((4,), n_tok, dtype=torch.int32, device=dev)
         pbs = torch.tensor([page_buffer_size] * 4, dtype=torch.int32, device=dev)
         bss = torch.tensor([block_size] * 4, dtype=torch.int32, device=dev)
         hds = torch.tensor(list(plane_bytes), dtype=torch.int32, device=dev)
@@ -1783,8 +1784,9 @@ def test_fused_multi_layer_kv_transfer_dsa_c8_format(
         lmc_ops.multi_layer_kv_transfer_multi_plane(
             chunk_tensor,
             kv_cache_pointers,
-            sm_concat,
-            offsets,
+            slot_ptrs,
+            slot_starts,
+            slot_counts,
             pbs,
             bss,
             hds,
@@ -1854,8 +1856,11 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
 from lmcache_ascend.v1.kv_layer_groups import _multi_plane_layer_block_bytes
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
-    _compact_slot_mapping_chunk,
     _derive_group_params,
+)
+from lmcache_ascend.v1.slot_mapping_utils import (
+    build_filtered_slot_mappings,
+    compact_slot_mapping_chunk,
     multi_plane_slot_slice_bounds,
 )
 
@@ -1870,7 +1875,7 @@ def _generic_compress_ratios_12() -> tuple[int, ...]:
 
 def test_compact_slot_mapping_chunk_filters_dead_rows_preserving_order() -> None:
     sm = torch.tensor([-1, -1, 10, 11, -1, 12], dtype=torch.long)
-    compact = _compact_slot_mapping_chunk(sm, 0, 6, 0, (1,))
+    compact = compact_slot_mapping_chunk(sm, 0, 6, 0, (1,))
     assert compact.tolist() == [10, 11, 12]
 
 
@@ -1941,6 +1946,11 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     connector.layout_hints = layout_hints
 
     fill_multi_plane_pattern(list(planes), sched_groups, slot_mappings, chunk, ratios)
+    filtered, prefixes = build_filtered_slot_mappings(
+        tuple(sm.cpu() for sm in slot_mappings),
+        compress_ratios=ratios,
+    )
+    filtered_npu = tuple(f.to(dev) for f in filtered)
     with pinned_lmc_chunk((1, 1, chunk, lmc_chunk_row_bytes), torch.uint8) as (
         _mem_obj,
         lmc_chunk,
@@ -1950,6 +1960,8 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
             group_ptrs=ptrs,
             group_params=group_params,
             slot_mappings_by_group=slot_mappings,
+            filtered_slot_mappings_npu=filtered_npu,
+            slot_valid_prefix_by_group=prefixes,
             compress_ratios=ratios,
             g_start=0,
             g_end=chunk,
@@ -1962,7 +1974,7 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
         for sched_g in sched_groups:
             sm = slot_mappings[sched_g]
             sm_parts.append(
-                _compact_slot_mapping_chunk(
+                compact_slot_mapping_chunk(
                     sm,
                     0,
                     chunk,
@@ -2035,6 +2047,11 @@ def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
     slot_mappings[sched_g] = sm
 
     fill_multi_plane_pattern(list(planes), sched_groups, tuple(slot_mappings), chunk, ratios)
+    filtered, prefixes = build_filtered_slot_mappings(
+        tuple(sm.cpu() for sm in slot_mappings),
+        compress_ratios=ratios,
+    )
+    filtered_npu = tuple(f.to(dev) for f in filtered)
     connector = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)
     connector.kvcaches_device = dev
     connector.layout_hints = layout_hints
@@ -2047,6 +2064,8 @@ def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
             group_ptrs=ptrs,
             group_params=group_params,
             slot_mappings_by_group=tuple(slot_mappings),
+            filtered_slot_mappings_npu=filtered_npu,
+            slot_valid_prefix_by_group=prefixes,
             compress_ratios=ratios,
             g_start=0,
             g_end=chunk,
