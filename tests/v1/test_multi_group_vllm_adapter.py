@@ -21,12 +21,20 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     _normalize_block_sizes,
 )
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
-    _compact_slot_mapping_chunk,
-    multi_plane_lmc_row_offset,
+    _uses_multi_plane_kv_transfer,
+    build_mp_launch_meta,
+)
+from lmcache_ascend.v1.slot_mapping_utils import (
+    build_filtered_slot_mappings,
+    compact_slot_mapping_chunk,
+    compute_mp_plane_launch_row,
+    dense_bounds_from_prefix,
+    iter_lmcache_chunk_ranges,
+    iter_store_chunk_ranges,
     multi_plane_slot_slice_bounds,
 )
 
-from .conftest_ds4 import DS4_CHUNK_SIZE
+from .conftest_ds4 import DS4_CHUNK_SIZE, DS4_COMPRESS_RATIOS, make_slot_mappings
 
 
 def _make_tracker(
@@ -290,15 +298,105 @@ def test_compact_slot_mapping_chunk_per_lmcache_chunk() -> None:
     sm = torch.full((128,), -1, dtype=torch.long)
     sm[32:64] = torch.arange(32, 64, dtype=torch.long)
     sm[96:128] = torch.arange(96, 128, dtype=torch.long)
-    chunk0 = _compact_slot_mapping_chunk(sm, 0, 256, 0, (4,))
-    chunk1 = _compact_slot_mapping_chunk(sm, 256, 512, 0, (4,))
+    chunk0 = compact_slot_mapping_chunk(sm, 0, 256, 0, (4,))
+    chunk1 = compact_slot_mapping_chunk(sm, 256, 512, 0, (4,))
     assert chunk0.tolist() == list(range(32, 64))
     assert chunk1.tolist() == list(range(96, 128))
 
 
-def test_multi_plane_lmc_row_offset_is_zero_for_compact_chunks() -> None:
-    assert multi_plane_lmc_row_offset(0, 0, (8,)) == 0
-    assert multi_plane_lmc_row_offset(256, 0, (8,)) == 0
+def test_filtered_slot_mappings_match_runtime_compact() -> None:
+    sm = torch.full((128,), -1, dtype=torch.long)
+    sm[32:64] = torch.arange(32, 64, dtype=torch.long)
+    sm[96:128] = torch.arange(96, 128, dtype=torch.long)
+    mappings = (sm,)
+    ratios = (4,)
+    lmcache_cached_tokens = 512
+    lmcache_chunk_size = 256
+
+    filtered, prefixes = build_filtered_slot_mappings(
+        mappings,
+        compress_ratios=ratios,
+    )
+    for token_start, token_end in iter_lmcache_chunk_ranges(
+        lmcache_cached_tokens,
+        vllm_cached_tokens=0,
+        lmcache_chunk_size=lmcache_chunk_size,
+    ):
+        for sched_g, sm_g in enumerate(mappings):
+            expected = compact_slot_mapping_chunk(
+                sm_g, token_start, token_end, sched_g, ratios
+            )
+            s0, s1 = multi_plane_slot_slice_bounds(
+                token_start, token_end, sched_g, ratios, int(sm_g.shape[0])
+            )
+            dense_start, dense_count = dense_bounds_from_prefix(
+                prefixes[sched_g], s0, s1
+            )
+            actual = filtered[sched_g][dense_start : dense_start + dense_count]
+            assert actual.equal(expected)
+
+
+def test_req_meta_populates_filtered_slot_mappings_on_load() -> None:
+    tracker = _make_tracker(
+        token_ids=list(range(256)),
+        prompt_len=256,
+        allocated_block_ids_by_group=([0, 1], [10, 11]),
+        skip_save=True,
+    )
+    meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_sizes_by_group=(128, 1024),
+        lmcache_chunk_size=DS4_CHUNK_SIZE,
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            lmcache_cached_tokens=256,
+            can_load=True,
+        ),
+        compress_ratios=(8, 1),
+    )
+    assert meta is not None
+    assert meta.filtered_slot_by_group is not None
+    assert meta.slot_valid_prefix_by_group is not None
+    assert len(meta.filtered_slot_by_group) == 2
+    assert len(meta.slot_valid_prefix_by_group) == 2
+
+
+def test_req_meta_populates_filtered_slot_mappings_on_save() -> None:
+    tracker = _make_tracker(
+        token_ids=list(range(32)),
+        prompt_len=32,
+        allocated_block_ids_by_group=([0],),
+    )
+    meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_sizes_by_group=128,
+        lmcache_chunk_size=DS4_CHUNK_SIZE,
+    )
+    assert meta is not None
+    assert meta.filtered_slot_by_group is not None
+    assert meta.slot_valid_prefix_by_group is not None
+
+
+def test_req_meta_skips_filtered_slot_mappings_without_load_or_save() -> None:
+    tracker = _make_tracker(
+        token_ids=list(range(32)),
+        prompt_len=32,
+        allocated_block_ids_by_group=([0],),
+        skip_save=True,
+    )
+    meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_sizes_by_group=128,
+        lmcache_chunk_size=DS4_CHUNK_SIZE,
+        load_spec=LoadSpec(
+            vllm_cached_tokens=0,
+            lmcache_cached_tokens=32,
+            can_load=False,
+        ),
+    )
+    assert meta is not None
+    assert meta.filtered_slot_by_group is None
+    assert meta.slot_valid_prefix_by_group is None
 
 
 def test_build_slot_mappings_by_group_mismatch() -> None:
@@ -573,3 +671,68 @@ def test_record_failed_blocks_no_missing_tokens() -> None:
     )
 
     assert result == set()
+
+
+def test_mp_launch_meta_matches_runtime_row(ds4_setup) -> None:
+    """Precomputed launch rows must match runtime compute_mp_plane_launch_row."""
+    from unittest.mock import patch
+
+    connector, _, kv_caches, dev = ds4_setup
+    num_tokens = DS4_CHUNK_SIZE * 2
+    slot_mappings = make_slot_mappings(num_tokens, dev)
+    cpu_mappings = tuple(sm.cpu() for sm in slot_mappings)
+    filtered_cpu, prefixes = build_filtered_slot_mappings(
+        cpu_mappings,
+        compress_ratios=DS4_COMPRESS_RATIOS[: len(slot_mappings)],
+    )
+    filtered_npu = tuple(f.to(dev) for f in filtered_cpu)
+    ratios = DS4_COMPRESS_RATIOS[: len(slot_mappings)]
+
+    with patch(
+        "lmcache_ascend.v1.npu_connector.npu_connectors.is_310p",
+        return_value=False,
+    ):
+        connector._initialize_pointers(kv_caches)
+
+    load_ranges = iter_lmcache_chunk_ranges(
+        num_tokens,
+        vllm_cached_tokens=0,
+        lmcache_chunk_size=DS4_CHUNK_SIZE,
+    )
+    store_ranges = iter_store_chunk_ranges(num_tokens, 0, DS4_CHUNK_SIZE)
+    chunk_ranges = list(dict.fromkeys(load_ranges + store_ranges))
+
+    meta = build_mp_launch_meta(
+        connector,
+        chunk_ranges=chunk_ranges,
+        slot_mappings_by_group=cpu_mappings,
+        prefixes_by_group=prefixes,
+        filtered_slot_mappings_npu=filtered_npu,
+        compress_ratios=ratios,
+    )
+    assert connector.per_group_params is not None
+    for npu_g, group_params in enumerate(connector.per_group_params):
+        if not _uses_multi_plane_kv_transfer(group_params):
+            continue
+        num_planes = int(group_params["num_planes"])
+        sched_groups = group_params.get("scheduler_groups_per_plane") or []
+        if len(sched_groups) != num_planes:
+            sched_groups = [
+                int(group_params.get("scheduler_slot_group", 0))
+            ] * num_planes
+        for g_start, g_end in chunk_ranges:
+            _, exp_starts, exp_counts = compute_mp_plane_launch_row(
+                g_start,
+                g_end,
+                sched_groups,
+                slot_mappings_by_group=cpu_mappings,
+                prefixes_by_group=prefixes,
+                filtered_slot_mappings_npu=filtered_npu,
+                compress_ratios=ratios,
+            )
+            if sum(exp_counts) == 0:
+                assert (g_start, g_end, npu_g) not in meta
+                continue
+            starts_npu, counts_npu = meta[(g_start, g_end, npu_g)]
+            assert starts_npu.cpu().tolist() == exp_starts
+            assert counts_npu.cpu().tolist() == exp_counts

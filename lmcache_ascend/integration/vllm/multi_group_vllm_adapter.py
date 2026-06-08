@@ -36,6 +36,8 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
 from lmcache.utils import _lmcache_nvtx_annotate, cdiv
 from lmcache.v1.config import LMCacheEngineConfig
 
+from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
@@ -415,6 +417,9 @@ class ReqMeta:
     # (dense / full-sequence path). Used for store/retrieve when only one
     # group's slot_mapping can drive the LMCache engine (Phase 2: all groups).
     primary_kv_group_idx: int = 0
+    # Per-sched-group dense slot mappings (no -1) and valid-slot prefix arrays.
+    filtered_slot_by_group: Optional[tuple[torch.Tensor, ...]] = None
+    slot_valid_prefix_by_group: Optional[tuple[torch.Tensor, ...]] = None
 
     @property
     def num_kv_groups(self) -> int:
@@ -518,7 +523,14 @@ class ReqMeta:
         save_spec = SaveSpec(skip_leading_tokens, not skip_save)
 
         # Calculate the token ids and slot mappings for load and save
-        token_ids = input_token_ids[:num_tokens_to_save]
+        num_tokens = num_tokens_to_save
+        if load_spec is not None and load_spec.can_load:
+            num_tokens = max(num_tokens_to_save, load_spec.lmcache_cached_tokens)
+
+        if num_tokens <= input_token_len:
+            token_ids = input_token_ids[:num_tokens]
+        else:
+            token_ids = list(input_token_ids) + [0] * (num_tokens - input_token_len)
 
         # If the request has multimodal hashes, apply them to the token ids
         if tracker.mm_hashes:
@@ -535,7 +547,7 @@ class ReqMeta:
         slot_mappings_by_group = _build_slot_mappings_by_group(
             tracker.allocated_block_ids_by_group,
             block_sizes,
-            len(token_ids),
+            num_tokens,
             is_store=save_spec.can_save,
             lmcache_chunk_size=lmcache_chunk_size,
             compress_ratios=compress_ratios,
@@ -568,6 +580,18 @@ class ReqMeta:
                 * block_sizes[i],
             )
 
+        filtered_slot_by_group: Optional[tuple[torch.Tensor, ...]] = None
+        slot_valid_prefix_by_group: Optional[tuple[torch.Tensor, ...]] = None
+        needs_filtered = (load_spec is not None and load_spec.can_load) or save_spec.can_save
+        if needs_filtered:
+            ratios = compress_ratios or tuple(1 for _ in block_sizes)
+            filtered_slot_by_group, slot_valid_prefix_by_group = (
+                build_filtered_slot_mappings(
+                    slot_mappings_by_group,
+                    compress_ratios=ratios,
+                )
+            )
+
         # Note: We keep load_spec even when can_load=False to pass metrics to worker
         return ReqMeta(
             req_id=tracker.req_id,
@@ -583,6 +607,8 @@ class ReqMeta:
             disagg_spec=tracker.disagg_spec,
             request_configs=tracker.request_configs,
             primary_kv_group_idx=primary_kv_group_idx,
+            filtered_slot_by_group=filtered_slot_by_group,
+            slot_valid_prefix_by_group=slot_valid_prefix_by_group,
         )
 
 
