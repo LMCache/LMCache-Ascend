@@ -31,7 +31,6 @@ from .conftest_ds4 import (
     DS4_PRODUCTION_CHUNK_TOKENS,
     allocate_multi_group_memory_obj,
     build_bundled_ds4_connector,
-    ds4_setup,
 )
 
 

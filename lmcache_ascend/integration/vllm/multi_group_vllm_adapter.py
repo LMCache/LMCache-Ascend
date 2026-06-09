@@ -6,7 +6,7 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 """
 # Standard
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 # Third Party
 from vllm.config import VllmConfig
@@ -123,7 +123,6 @@ def _normalize_block_sizes(
 
 def _sliding_window_store_mask(
     tokens_uncompressed: torch.Tensor,
-    num_tokens: int,
     sliding_win_size: int,
     lmcache_chunk_size: int,
 ) -> torch.Tensor:
@@ -166,7 +165,6 @@ def _build_slot_mapping_for_group(
     if (is_store and sliding_win_size is not None and sliding_win_size > 0):
         valid_mask &= _sliding_window_store_mask(
             tokens_uncompressed,
-            num_tokens=num_tokens,
             sliding_win_size=sliding_win_size,
             lmcache_chunk_size=lmcache_chunk_size,
         )[::compress_ratio]
@@ -281,7 +279,7 @@ class RequestTracker:
     @_lmcache_nvtx_annotate
     @staticmethod
     def from_new_request(
-        lmcache_config: LMCacheEngineConfig,
+        lmcache_config: LMCacheEngineConfig,  # noqa: ARG004
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
@@ -699,7 +697,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             self._compress_ratios_by_group = (1,)
             self._sliding_window_size_by_group = None
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **_kwargs) -> None:
         """Start loading the KV cache from the connector buffer to vLLM's
         paged KV buffer.
 
@@ -923,7 +921,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         return missing_blocks
 
     @_lmcache_nvtx_annotate
-    def wait_for_layer_load(self, layer_name: str) -> None:
+    def wait_for_layer_load(self, _layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
         paged buffer.
 
@@ -953,10 +951,10 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
 
     def save_kv_layer(
         self,
-        layer_name: str,
-        kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
-        **kwargs,
+        _layer_name: str,
+        _kv_layer: torch.Tensor,
+        _attn_metadata: "AttentionMetadata",
+        **_kwargs,
     ) -> None:
         """Start saving the a layer of KV cache from vLLM's paged buffer
         to the connector.

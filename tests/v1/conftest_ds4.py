@@ -33,7 +33,6 @@ from .conftest_kvcache import (
     ds4_smoke_chunk_sizes,
     multi_plane_round_trip_via_connector,
     npu_available,
-    npu_group_index_with_num_planes,
     power_of_two_boundary_triplet,
     separate_kv_round_trip_via_connector,
     slot_concat_and_offsets,
@@ -181,7 +180,6 @@ def slot_mappings_for_ds4_groups(
     num_tokens: int,
     dev: torch.device,
     *,
-    use_ceil: bool,
     num_blocks: int = 16,
 ) -> tuple[torch.Tensor, ...]:
     block_ids = list(range(1, num_blocks + 1))
@@ -205,7 +203,7 @@ def make_slot_mappings(
     dev: torch.device,
 ) -> tuple[torch.Tensor, ...]:
     return slot_mappings_for_ds4_groups(
-        num_tokens, dev, use_ceil=False, num_blocks=32
+        num_tokens, dev, num_blocks=32
     )
 
 
@@ -246,7 +244,7 @@ def make_production_slot_mappings(
     dev: torch.device,
 ) -> tuple[torch.Tensor, ...]:
     return slot_mappings_for_ds4_groups(
-        num_tokens, dev, use_ceil=True, num_blocks=32
+        num_tokens, dev, num_blocks=32
     )
 
 

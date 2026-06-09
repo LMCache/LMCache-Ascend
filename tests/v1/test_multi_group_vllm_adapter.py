@@ -69,11 +69,14 @@ def _make_tracker(
 def test_normalize_block_ids(block_ids, expected_num_groups, expected) -> None:
     result = _normalize_block_ids(block_ids, expected_num_groups)
     assert result == expected
-    if block_ids is not None and block_ids != [] and expected_num_groups == 1:
-        if isinstance(block_ids, list) and not all(
-            isinstance(x, (list, tuple)) for x in block_ids
-        ):
-            assert result[0] is not block_ids
+    if (
+        block_ids is not None
+        and block_ids != []
+        and expected_num_groups == 1
+        and isinstance(block_ids, list)
+        and not all(isinstance(x, (list, tuple)) for x in block_ids)
+    ):
+        assert result[0] is not block_ids
 
 
 @pytest.mark.parametrize(

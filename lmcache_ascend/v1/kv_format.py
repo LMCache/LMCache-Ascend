@@ -192,7 +192,7 @@ class KVCacheFormat(Enum):
     @staticmethod
     def detect(
         kvcaches: List[Union[torch.Tensor, Tuple[torch.Tensor, ...]]],
-        use_mla: bool = False,
+        use_mla: bool = False,  # noqa: ARG004
     ) -> "KVCacheFormat":
         """
         Automatically detect KV cache format based on data structure.
@@ -209,9 +209,13 @@ class KVCacheFormat(Enum):
         first_cache = kvcaches[0]
 
         # SGLang NPU: kvcaches = [K_tensor, V_tensor]
-        if isinstance(kvcaches, list) and len(kvcaches) == 2:
-            if isinstance(first_cache, torch.Tensor) and first_cache.ndim == 5:
-                return KVCacheFormat.SEPARATE_KV
+        if (
+            isinstance(kvcaches, list)
+            and len(kvcaches) == 2
+            and isinstance(first_cache, torch.Tensor)
+            and first_cache.ndim == 5
+        ):
+            return KVCacheFormat.SEPARATE_KV
 
         if isinstance(first_cache, (tuple, list)):
             tuple_len = len(first_cache)
@@ -225,29 +229,28 @@ class KVCacheFormat(Enum):
                 )
                 return KVCacheFormat.MULTI_PLANE_KV
 
-            # DSA_C8_KV: tuple with 4 elements
-            # (k_cache, v_cache, dsa_k_cache, dsa_k_scale_cache)
-            if tuple_len == 4:
-                if all(isinstance(t, torch.Tensor) for t in first_cache):
-                    k_cache, v_cache, dsa_k_cache, dsa_k_scale = first_cache
-                    if k_cache.shape != v_cache.shape:
-                        logger.debug(
-                            f"Detected DSA_C8_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
-                            f", dsa_k_scale_shape={dsa_k_scale.shape}"
-                        )
-                        return KVCacheFormat.DSA_C8_KV
+            # DSA_C8_KV: tuple with four tensor elements (k, v, dsa_k, dsa_k_scale)
+            if tuple_len == 4 and all(isinstance(t, torch.Tensor) for t in first_cache):
+                k_cache, v_cache, dsa_k_cache, dsa_k_scale = first_cache
+                if k_cache.shape != v_cache.shape:
+                    logger.debug(
+                        f"Detected DSA_C8_KV format: k_shape={k_cache.shape}, "
+                        f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
+                        f", dsa_k_scale_shape={dsa_k_scale.shape}"
+                    )
+                    return KVCacheFormat.DSA_C8_KV
 
             # DSA_KV: tuple with 3 elements (k_cache, v_cache, dsa_k_cache)
             if tuple_len == 3:
                 k_cache, v_cache, dsa_k_cache = first_cache
-                if all(isinstance(t, torch.Tensor) for t in first_cache):
-                    if k_cache.shape != v_cache.shape:
-                        logger.debug(
-                            f"Detected DSA_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
-                        )
-                        return KVCacheFormat.DSA_KV
+                if all(isinstance(t, torch.Tensor) for t in first_cache) and (
+                    k_cache.shape != v_cache.shape
+                ):
+                    logger.debug(
+                        f"Detected DSA_KV format: k_shape={k_cache.shape}, "
+                        f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
+                    )
+                    return KVCacheFormat.DSA_KV
 
             # MLA_KV or SEPARATE_KV: tuple with 2 elements
             if tuple_len == 2:

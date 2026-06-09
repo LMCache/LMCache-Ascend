@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import os
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
@@ -29,11 +28,9 @@ from vllm.config import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
-    KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 import torch
 
@@ -239,7 +236,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 slot_mappings_cpu.append(group_slot_mapping.pin_memory())
 
             pg = request.primary_kv_group_idx
-            slot_mapping_cpu = slot_mappings_cpu[pg]
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
 
             slot_mappings_npu: list[torch.Tensor] = []

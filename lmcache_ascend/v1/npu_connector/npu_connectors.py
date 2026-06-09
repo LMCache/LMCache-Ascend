@@ -651,7 +651,6 @@ class _V2KVTransferMixin:
         g_end: int,
         is_store: bool,
         npu_group_idx: int,
-        req_id: str | None = None,
         mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
         | None = None,
     ) -> None:
@@ -1904,7 +1903,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     slot_mappings,
                     is_store=is_store,
                     stream=stream,
-                    req_id=kwargs.get("req_id"),
                     filtered_slot_mappings_npu=filtered_slot_mappings_npu,
                     slot_valid_prefix_by_group=slot_valid_prefix_by_group,
                     mp_launch_meta=kwargs.get("mp_launch_meta"),
@@ -1931,7 +1929,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         *,
         is_store: bool,
         stream: Any,
-        req_id: str | None = None,
         filtered_slot_mappings_npu: tuple[torch.Tensor, ...],
         slot_valid_prefix_by_group: tuple[torch.Tensor, ...],
         mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
@@ -1978,7 +1975,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                         g_end=end,
                         is_store=is_store,
                         npu_group_idx=i,
-                        req_id=req_id,
                         mp_launch_meta=mp_launch_meta,
                     )
                     continue
@@ -1998,9 +1994,9 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                 ]
 
                 scale_plane_bytes = int(group_params.get("s_extra", 0))
-                if mem_tensor.dtype in (torch.int8, torch.float32):
-                    mem_tensor = mem_tensor.view(torch.uint8)
-                elif mem_tensor.dtype == torch.float16 and scale_plane_bytes > 0:
+                if mem_tensor.dtype in (torch.int8, torch.float32) or (
+                    mem_tensor.dtype == torch.float16 and scale_plane_bytes > 0
+                ):
                     mem_tensor = mem_tensor.view(torch.uint8)
 
                 lmc_ops.multi_layer_kv_transfer(

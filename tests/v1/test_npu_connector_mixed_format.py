@@ -19,7 +19,6 @@ from .conftest_ds4 import (
     DS4_CHUNK_SIZE,
     allocate_multi_group_memory_obj,
     build_bundled_ds4_connector,
-    ds4_setup,
     make_slot_mappings,
     make_slot_transfer_kwargs,
     npu_available,

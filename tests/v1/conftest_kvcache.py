@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import os
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
@@ -11,10 +10,8 @@ import pytest
 import torch
 
 from lmcache.v1.memory_management import PinMemoryAllocator, TensorMemoryObj
-from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
-    _pointers_for_entry,
 )
 from lmcache_ascend.v1.slot_mapping_utils import (
     build_filtered_slot_mappings,
