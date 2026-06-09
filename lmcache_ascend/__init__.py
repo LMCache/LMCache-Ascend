@@ -523,16 +523,22 @@ def _patch_metadata_get_shapes():
         if klg_manager is not None and klg_manager.kv_layer_groups:
             shapes: list[torch.Size] = []
             for group in klg_manager.kv_layer_groups:
-                hidden = group.hidden_dim_size
                 plane_bytes = getattr(group, "multi_plane_hidden_bytes", None)
+                physical = group.physical_chunk_size or num_tokens
+                if num_tokens != self.chunk_size and physical:
+                    physical = max(1, num_tokens * physical // self.chunk_size)
                 if plane_bytes is not None:
-                    hidden = _multi_plane_lmc_row_bytes(plane_bytes, num_tokens)
+                    token_dim = num_tokens
+                    hidden = _multi_plane_lmc_row_bytes(plane_bytes, token_dim)
+                else:
+                    token_dim = physical
+                    hidden = group.hidden_dim_size
                 shapes.append(
                     torch.Size(
                         [
                             group.shape_desc.kv_size,
                             group.num_layers,
-                            num_tokens,
+                            token_dim,
                             hidden,
                         ]
                     )

@@ -19,6 +19,7 @@ import pytest
 import torch
 
 # First Party
+import lmcache_ascend  # noqa: F401  — applies get_shapes patch
 from lmcache_ascend.v1.kv_format import (
     KVCacheFormat,
     _get_primary_blob_view,
@@ -29,7 +30,10 @@ from lmcache_ascend.v1.kv_layer_groups import (
     _get_kv_cache_group_key_and_info,
     build_kv_layer_groups,
 )
-from lmcache_ascend.v1.npu_connector.npu_connectors import _derive_group_params
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
+    _derive_group_params,
+    _split_kv_layer_groups_by_scheduler_slot,
+)
 
 
 def _make_ascend_format_manager(
@@ -429,3 +433,81 @@ def test_sliding_window_reduces_physical_chunk_size_and_multi_plane_row_width():
         g.multi_plane_hidden_bytes,
         g.physical_chunk_size,
     )
+
+
+def test_get_shapes_single_plane_sw_uses_physical_token_dim():
+    """Single-plane CR128 SW group allocates ``physical_chunk_size`` token rows."""
+    num_blocks, block_size, hidden = 8, 128, 1024
+    layer = torch.empty(num_blocks, block_size, hidden, dtype=torch.uint8)
+    layout_hints = {
+        "compress_ratios_by_group": (128,),
+        "sliding_window_size_by_group": (128,),
+        "scheduler_group_by_flat_layer": (0,),
+    }
+    mgr = _make_ascend_format_manager(
+        [layer],
+        KVCacheFormat.SEPARATE_KV,
+        num_blocks,
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=256,
+    )
+    g = mgr.kv_layer_groups[0]
+    assert g.physical_chunk_size == 1
+    md = _make_metadata(mgr, chunk_size=256)
+    shape = md.get_shapes(256)[0]
+    assert shape[1] == 1
+    assert shape[2] == 1
+    assert shape[3] == hidden
+
+
+def test_get_shapes_multi_plane_keeps_logical_token_dim():
+    """Bundled multi-plane groups keep logical chunk size in the token dimension."""
+    num_blocks, block_size = 8, 128
+    layer = (
+        torch.empty(num_blocks, block_size, 1, 512, dtype=torch.bfloat16),
+        torch.empty(num_blocks, block_size, 1, 64, dtype=torch.bfloat16),
+        torch.empty(num_blocks, 1024, 1, 32, dtype=torch.int8),
+        torch.empty(num_blocks, 32, 1, 64, dtype=torch.float32),
+    )
+    layout_hints = {
+        "compress_ratios_by_group": (4, 1, 4, 4),
+        "scheduler_group_by_flat_layer": (0,),
+    }
+    mgr = _make_ascend_format_manager(
+        [layer],
+        KVCacheFormat.MULTI_PLANE_KV,
+        num_blocks,
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=256,
+    )
+    md = _make_metadata(mgr, chunk_size=256)
+    assert md.get_shapes(256)[0][2] == 256
+
+
+def test_split_sw_physical_chunk_size():
+    """Post-split groups inherit SW-aware ``physical_chunk_size`` (sw // ratio)."""
+    num_blocks, block_size, hidden = 8, 128, 1024
+    layer_a = torch.empty(num_blocks, block_size, hidden, dtype=torch.uint8)
+    layer_b = torch.empty(num_blocks, block_size, hidden, dtype=torch.uint8)
+    layout_hints = {
+        "compress_ratios_by_group": (1, 128),
+        "sliding_window_size_by_group": (None, 128),
+        "scheduler_group_by_flat_layer": (0, 1),
+    }
+    mgr = _make_ascend_format_manager(
+        [layer_a, layer_b],
+        KVCacheFormat.SEPARATE_KV,
+        num_blocks,
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=256,
+    )
+    assert len(mgr.kv_layer_groups) == 1
+    _split_kv_layer_groups_by_scheduler_slot(
+        mgr,
+        (0, 1),
+        layout_hints=layout_hints,
+        lmcache_logical_chunk_size=256,
+    )
+    by_ratio = {g.compress_ratio: g for g in mgr.kv_layer_groups}
+    assert by_ratio[1].physical_chunk_size == 256
+    assert by_ratio[128].physical_chunk_size == 1
