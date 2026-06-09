@@ -10,6 +10,7 @@ crashed because the MemoryObj was allocated with a single flat shape.
 
 from unittest.mock import patch
 
+import lmcache_ascend  # noqa: F401
 import pytest
 import torch
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
@@ -25,7 +26,13 @@ from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
-from .conftest_ds4 import DS4_CHUNK_SIZE, allocate_multi_group_memory_obj, ds4_setup
+from .conftest_ds4 import (
+    DS4_CHUNK_SIZE,
+    DS4_PRODUCTION_CHUNK_TOKENS,
+    allocate_multi_group_memory_obj,
+    build_bundled_ds4_connector,
+    ds4_setup,
+)
 
 
 def _make_ascend_format_manager(
@@ -195,6 +202,30 @@ def test_mixed_block_size_two_groups_allocation():
         t = mem_obj.get_tensor(i)
         assert t is not None
         assert t.shape == shapes[i]
+
+
+def test_bundled_ds4_sw_group_uses_physical_token_dim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CR128 sliding-window NPU group allocates ``physical_chunk_size`` rows."""
+    _, metadata, _, _ = build_bundled_ds4_connector(monkeypatch)
+    mgr = metadata.kv_layer_groups_manager
+    assert mgr is not None
+    num = DS4_PRODUCTION_CHUNK_TOKENS
+    shapes = metadata.get_shapes(num)
+    sw_groups = [
+        g
+        for g in mgr.kv_layer_groups
+        if g.compress_ratio > 1 and g.physical_chunk_size < num
+    ]
+    if not sw_groups:
+        pytest.skip("5-layer DS4 fixture has no compressed SW group")
+    for group in sw_groups:
+        idx = mgr.kv_layer_groups.index(group)
+        assert shapes[idx][2] == group.physical_chunk_size
+    for group_idx, group in enumerate(mgr.kv_layer_groups):
+        if getattr(group, "multi_plane_hidden_bytes", None) is not None:
+            assert shapes[group_idx][2] == num
 
 
 def test_multi_group_memory_obj_tensor_view_fails(ds4_setup) -> None:

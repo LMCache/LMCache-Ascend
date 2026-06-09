@@ -344,10 +344,13 @@ def build_kv_layer_groups(
                 sliding_window_size_by_group
             ), f"scheduler group {sched_g} out of range for sliding_window_size_by_group"
             sw = sliding_window_size_by_group[sched_g]
-        live_tokens = lmcache_logical_chunk_size
         if sw is not None:
-            live_tokens = min(lmcache_logical_chunk_size, int(sw))
-        physical_chunk_size = (live_tokens + compress_ratio - 1) // compress_ratio
+            physical_chunk_size = max(1, int(sw) // compress_ratio)
+        else:
+            physical_chunk_size = max(
+                1,
+                (lmcache_logical_chunk_size + compress_ratio - 1) // compress_ratio,
+            )
         multi_plane_hidden_bytes: tuple[int, ...] | None = None
         if isinstance(rep, (tuple, list)) and _is_multi_plane_tuple(rep):
             rep_dtype = torch.uint8
