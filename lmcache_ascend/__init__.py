@@ -297,6 +297,40 @@ def _patch_storage_backend_init():
     lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
 
 
+def _patch_storage_manager():
+    # Rebind StorageManager.get / batched_get so the delay-pull proxy
+    # write-back guard lives in the Ascend overlay instead of upstream LMCache.
+    # Also rebind LocalCPUBackend/LocalDiskBackend.touch_cache so a key evicted
+    # between lookup-pin and touch_cache degrades the eviction-policy update to a
+    # no-op instead of aborting the lookup (which dropped local hits and timed
+    # out the lookup RPC). Prefetch all-done callback mirrors loaded tiers into
+    # the local hot cache when enabled. See lmcache_ascend.v1.storage_backend
+    # .storage_manager.
+    # Third Party
+    import lmcache.v1.storage_backend.local_cpu_backend as lm_local_cpu_backend
+    import lmcache.v1.storage_backend.local_disk_backend as lm_local_disk_backend
+    import lmcache.v1.storage_backend.storage_manager as lm_storage_manager
+
+    # First Party
+    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        batched_get as ascend_batched_get,
+    )
+    from lmcache_ascend.v1.storage_backend.storage_manager import get as ascend_get
+    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        local_cpu_touch_cache,
+        local_disk_touch_cache,
+        patched_prefetch_all_done_callback,
+    )
+
+    lm_storage_manager.StorageManager.get = ascend_get
+    lm_storage_manager.StorageManager.batched_get = ascend_batched_get
+    lm_storage_manager.StorageManager.prefetch_all_done_callback = (
+        patched_prefetch_all_done_callback
+    )
+    lm_local_cpu_backend.LocalCPUBackend.touch_cache = local_cpu_touch_cache
+    lm_local_disk_backend.LocalDiskBackend.touch_cache = local_disk_touch_cache
+
+
 def _patch_torch_capability():
     # Third Party
     from torch_npu.contrib import transfer_to_npu  # noqa: F401
@@ -632,20 +666,6 @@ def _patch_rpc_utils():
         _factory_mod.get_zmq_rpc_path_lmcache = get_zmq_rpc_path_lmcache
 
 
-def _patch_storage_manager():
-    # Prefetch all done callback: write loaded data back to hot cache
-    # so subsequent requests hit DDR instead of SSD/P2P.
-    # Third Party
-    from lmcache.v1.storage_backend.storage_manager import StorageManager
-
-    # First Party
-    from lmcache_ascend.v1.storage_backend.storage_manager import (
-        patched_prefetch_all_done_callback,
-    )
-
-    StorageManager.prefetch_all_done_callback = patched_prefetch_all_done_callback
-
-
 def _patch_lookup_client_factory():
     # Replace LMCacheAsyncLookupClient with Ascend subclass that caches
     # chunk_hashes during lookup and exposes them via get_cached_hashes().
@@ -706,6 +726,7 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_storage_backend_init()
+        _patch_storage_manager()
         _patch_transfer_channel()
         _patch_cacheblend()
         _patch_multi_process()
@@ -726,7 +747,6 @@ if not LMCACHE_ASCEND_PATCHED:
 
         _patch_cache_engine()
 
-        _patch_storage_manager()
         _patch_api_server()
 
     if _build_info.__framework_name__ == "mindspore":

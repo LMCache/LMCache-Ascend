@@ -63,6 +63,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             self._wait_for_save_done = True
             return
 
+        # lmcache-ascend start: skip save on passive ranks ---------------------
+        # Under save_only_first_rank (default for MLA/DSA), only the first rank
+        # owns a storage_manager; the other ranks are "passive" and neither
+        # store nor look up locally. The base store() already no-ops for them,
+        # and _local_persist_skip's local lookup would assert on the missing
+        # storage_manager. Short-circuit the whole save path for these ranks.
+        if self.lmcache_engine is not None and self.lmcache_engine._is_passive():
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+            self._wait_for_save_done = True
+            self._replay_finished_stores_after_save()
+            return
+        # lmcache-ascend end --------------------------------------------------
+
         if self.use_layerwise:
             assert not self.store_async, (
                 "Layerwise storing is not supported with async store"
@@ -93,12 +107,26 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
             try:
                 save_spec = request.save_spec
-                if (
-                    save_spec is None or not save_spec.can_save
-                ) and self.kv_role != "kv_producer":
-                    continue
-
                 token_ids = request.token_ids
+
+                # lmcache-ascend start: local-vs-remote hit distinction ------
+                # ``save_spec.skip_leading_tokens`` is seeded from the *total*
+                # LMCache hit (local + remote). When the matched prefix was
+                # pulled from a remote peer, the local CPU backend is still
+                # cold for those chunks, so skipping them here makes every
+                # subsequent request re-pull the same KV from the peer.
+                # Re-derive how many leading tokens are *already local* and, if
+                # a remote-loaded prefix is missing locally, persist it into the
+                # local backend so later hits stay local.
+                persist_remote_skip = self._local_persist_skip(request, token_ids)
+                # lmcache-ascend end ----------------------------------------
+
+                if (
+                    (save_spec is None or not save_spec.can_save)
+                    and self.kv_role != "kv_producer"
+                    and persist_remote_skip is None
+                ):
+                    continue
 
                 slot_mapping = request.slot_mapping
                 assert isinstance(slot_mapping, torch.Tensor)
@@ -112,7 +140,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                     )
                 # lmcache-ascend end ---------------------
 
-                skip_leading_tokens = save_spec.skip_leading_tokens
+                if persist_remote_skip is not None:
+                    skip_leading_tokens = persist_remote_skip
+                elif save_spec is not None:
+                    skip_leading_tokens = save_spec.skip_leading_tokens
+                else:
+                    skip_leading_tokens = 0
 
                 if skip_leading_tokens == len(token_ids):
                     continue
@@ -177,6 +210,58 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
         self._wait_for_save_done = True
         self._replay_finished_stores_after_save()
+
+    def _local_persist_skip(self, request, token_ids) -> Optional[int]:
+        """Decide whether a remote-loaded prefix must be persisted locally.
+
+        The base save path skips every token LMCache reported as a hit
+        (``save_spec.skip_leading_tokens`` == total local + remote hit). For a
+        prefix pulled from a remote peer, the local CPU backend is still cold,
+        so skipping it forces a re-pull on every subsequent request.
+
+        Returns the chunk-aligned number of leading tokens to skip when the
+        request must back-fill the local cache (i.e. some matched-and-loaded
+        prefix is not yet local), or ``None`` to keep the base save behavior
+        unchanged.
+        """
+        if self.kv_role == "kv_consumer":
+            return None
+        # Only meaningful when a local CPU backend exists to back-fill into.
+        if not getattr(self.config, "local_cpu", False):
+            return None
+        save_spec = request.save_spec
+        if save_spec is None:
+            return None
+        load_spec = getattr(request, "load_spec", None)
+        if load_spec is None or not load_spec.can_load:
+            return None
+        loaded_prefix = load_spec.lmcache_cached_tokens
+        if loaded_prefix <= 0:
+            return None
+
+        # Contiguous prefix already resident in the local CPU backend.
+        local_present = self.lmcache_engine.lookup(
+            token_ids,
+            search_range=["LocalCPUBackend"],
+            pin=False,
+            request_configs=request.request_configs,
+        )
+        local_present = (
+            local_present // self._lmcache_chunk_size * self._lmcache_chunk_size
+        )
+        if local_present >= loaded_prefix:
+            # Whole matched prefix is already local; nothing to back-fill.
+            return None
+
+        logger.info(
+            "Persisting remote-loaded KV into local cache for request %s: "
+            "local_prefix=%d loaded_prefix=%d (storing %d trailing tokens)",
+            request.req_id,
+            local_present,
+            loaded_prefix,
+            len(token_ids) - local_present,
+        )
+        return local_present
 
     def _may_register_store_after_wait_for_save(self, request: "Request") -> bool:
         if self.kv_role == "kv_consumer":
