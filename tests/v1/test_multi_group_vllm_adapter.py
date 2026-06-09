@@ -16,7 +16,6 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     RequestTracker,
     _build_slot_mapping_for_group,
     _build_slot_mappings_by_group,
-    _count_leading_null_blocks,
     _normalize_block_ids,
     _normalize_block_sizes,
 )
@@ -34,7 +33,7 @@ from lmcache_ascend.v1.slot_mapping_utils import (
     multi_plane_slot_slice_bounds,
 )
 
-from .conftest_ds4 import DS4_CHUNK_SIZE, DS4_COMPRESS_RATIOS, make_slot_mappings
+from .conftest_ds4 import DS4_CHUNK_SIZE, DS4_COMPRESS_RATIOS, make_ds4_setup, make_slot_mappings
 
 
 def _make_tracker(
@@ -49,6 +48,7 @@ def _make_tracker(
         req_id="r1",
         prompt_len=prompt_len,
         token_ids=list(token_ids if token_ids is not None else [0, 1]),
+        allocated_block_ids=list(allocated_block_ids_by_group[0]),
         allocated_block_ids_by_group=allocated_block_ids_by_group,
         num_saved_tokens=num_saved_tokens,
         skip_save=skip_save,
@@ -69,11 +69,14 @@ def _make_tracker(
 def test_normalize_block_ids(block_ids, expected_num_groups, expected) -> None:
     result = _normalize_block_ids(block_ids, expected_num_groups)
     assert result == expected
-    if block_ids is not None and block_ids != [] and expected_num_groups == 1:
-        if isinstance(block_ids, list) and not all(
-            isinstance(x, (list, tuple)) for x in block_ids
-        ):
-            assert result[0] is not block_ids
+    if (
+        block_ids is not None
+        and block_ids != []
+        and expected_num_groups == 1
+        and isinstance(block_ids, list)
+        and not all(isinstance(x, (list, tuple)) for x in block_ids)
+    ):
+        assert result[0] is not block_ids
 
 
 @pytest.mark.parametrize(
@@ -270,20 +273,6 @@ def test_build_slot_mapping_single_block_no_index_error() -> None:
     )
     assert len(sm) == 128
     assert (sm >= 0).all()
-
-
-@pytest.mark.parametrize(
-    ("block_ids", "expected"),
-    [
-        pytest.param([0], 0, id="single_zero"),
-        pytest.param([3], 0, id="no_prefix"),
-        pytest.param([1, 2, 3], 0, id="no_zeros"),
-        pytest.param([0, 0, 0, 5], 3, id="strip_three"),
-        pytest.param([0, 0, 0], 0, id="all_zeros"),
-    ],
-)
-def test_count_leading_null_blocks(block_ids, expected) -> None:
-    assert _count_leading_null_blocks(block_ids) == expected
 
 
 def test_multi_plane_slot_slice_bounds_global_sm() -> None:
@@ -673,11 +662,11 @@ def test_record_failed_blocks_no_missing_tokens() -> None:
     assert result == set()
 
 
-def test_mp_launch_meta_matches_runtime_row(ds4_setup) -> None:
+def test_mp_launch_meta_matches_runtime_row() -> None:
     """Precomputed launch rows must match runtime compute_mp_plane_launch_row."""
     from unittest.mock import patch
 
-    connector, _, kv_caches, dev = ds4_setup
+    connector, _, kv_caches, dev = make_ds4_setup()
     num_tokens = DS4_CHUNK_SIZE * 2
     slot_mappings = make_slot_mappings(num_tokens, dev)
     cpu_mappings = tuple(sm.cpu() for sm in slot_mappings)

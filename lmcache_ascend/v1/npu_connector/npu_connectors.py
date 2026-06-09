@@ -651,7 +651,6 @@ class _V2KVTransferMixin:
         g_end: int,
         is_store: bool,
         npu_group_idx: int,
-        req_id: str | None = None,
         mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
         | None = None,
     ) -> None:
@@ -1846,21 +1845,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             int(self.block_size),
         )
 
-    def _slot_mapping_for_npu_group(
-        self,
-        npu_group_idx: int,
-        group_params: dict[str, Any],
-        slot_mappings_by_group: Union[tuple[torch.Tensor, ...], list[torch.Tensor]],
-    ) -> torch.Tensor:
-        """Resolve scheduler slot mapping for one NPU layer group."""
-        slot_g = int(group_params.get("scheduler_slot_group", npu_group_idx))
-        if slot_g >= len(slot_mappings_by_group):
-            raise IndexError(
-                f"Scheduler slot group {slot_g} out of range "
-                f"(num={len(slot_mappings_by_group)}) for NPU group {npu_group_idx}"
-            )
-        return slot_mappings_by_group[slot_g]
-
     def _try_multi_group_dispatch(
         self,
         memory_obj: MemoryObj,
@@ -1904,7 +1888,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     slot_mappings,
                     is_store=is_store,
                     stream=stream,
-                    req_id=kwargs.get("req_id"),
                     filtered_slot_mappings_npu=filtered_slot_mappings_npu,
                     slot_valid_prefix_by_group=slot_valid_prefix_by_group,
                     mp_launch_meta=kwargs.get("mp_launch_meta"),
@@ -1931,7 +1914,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         *,
         is_store: bool,
         stream: Any,
-        req_id: str | None = None,
         filtered_slot_mappings_npu: tuple[torch.Tensor, ...],
         slot_valid_prefix_by_group: tuple[torch.Tensor, ...],
         mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
@@ -1978,7 +1960,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                         g_end=end,
                         is_store=is_store,
                         npu_group_idx=i,
-                        req_id=req_id,
                         mp_launch_meta=mp_launch_meta,
                     )
                     continue
@@ -1998,9 +1979,9 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                 ]
 
                 scale_plane_bytes = int(group_params.get("s_extra", 0))
-                if mem_tensor.dtype in (torch.int8, torch.float32):
-                    mem_tensor = mem_tensor.view(torch.uint8)
-                elif mem_tensor.dtype == torch.float16 and scale_plane_bytes > 0:
+                if mem_tensor.dtype in (torch.int8, torch.float32) or (
+                    mem_tensor.dtype == torch.float16 and scale_plane_bytes > 0
+                ):
                     mem_tensor = mem_tensor.view(torch.uint8)
 
                 lmc_ops.multi_layer_kv_transfer(
@@ -2566,38 +2547,6 @@ class VLLMPagedMemLayerwiseNPUConnector(
             assert memory_obj.tensor is not None
             transfers.append((memory_obj.tensor, slot_mapping[start:end]))
         return transfers
-
-    def _run_layerwise_dsa_c8_transfers(
-        self,
-        layer_id: int,
-        transfers: list[tuple[torch.Tensor, torch.Tensor, int, int]],
-        *,
-        slot_mapping_full: torch.Tensor,
-        is_store: bool,
-    ) -> None:
-        ptrs = _layer_paged_kv_ptrs_tensor(self.kvcaches[layer_id], self.kv_format)
-        filtered_npu, prefixes = _filtered_slot_kwargs_for_groups(
-            (slot_mapping_full,), (1,)
-        )
-        for data_tensor, _sm, g_start, g_end in transfers:
-            self._invoke_multi_plane_kv_transfer(
-                mem_tensor=data_tensor,
-                group_ptrs=ptrs,
-                group_params=_build_dsa_c8_multi_plane_group_params(
-                    self.dsa_c8_plane_bytes,
-                    block_size=int(self.block_size),
-                    page_buffer_size=int(self.page_buffer_size),
-                    num_tokens=g_end - g_start,
-                ),
-                slot_mappings_by_group=(slot_mapping_full,),
-                filtered_slot_mappings_npu=filtered_npu,
-                slot_valid_prefix_by_group=prefixes,
-                compress_ratios=(1,),
-                g_start=g_start,
-                g_end=g_end,
-                is_store=is_store,
-                npu_group_idx=0,
-            )
 
     def _run_layerwise_v2_transfers(
         self,

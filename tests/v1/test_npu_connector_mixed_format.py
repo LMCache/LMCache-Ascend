@@ -19,7 +19,7 @@ from .conftest_ds4 import (
     DS4_CHUNK_SIZE,
     allocate_multi_group_memory_obj,
     build_bundled_ds4_connector,
-    ds4_setup,
+    make_ds4_setup,
     make_slot_mappings,
     make_slot_transfer_kwargs,
     npu_available,
@@ -152,9 +152,9 @@ def test_initialize_pointers_mixed_format_no_unpack_crash() -> None:
     assert ptrs is not None
 
 
-def test_ds4_pointer_init_matches_scheduler_map(ds4_setup) -> None:
+def test_ds4_pointer_init_matches_scheduler_map() -> None:
     """Per-group pointers and scheduler_slot_group align with flatten map."""
-    connector, metadata, kv_caches, _ = ds4_setup
+    connector, metadata, kv_caches, _ = make_ds4_setup()
     sched_map = connector.layout_hints["scheduler_group_by_flat_layer"]
     with patch(
         "lmcache_ascend.v1.npu_connector.npu_connectors.is_310p",
@@ -185,9 +185,9 @@ def test_ds4_pointer_init_matches_scheduler_map(ds4_setup) -> None:
     assert 1 in sched_groups
 
 
-def test_multi_group_store_dispatches_uint8_kernels(ds4_setup) -> None:
+def test_multi_group_store_dispatches_uint8_kernels() -> None:
     """int8/float32 memory groups must pass uint8 tensors to transfer kernels."""
-    connector, metadata, kv_caches, dev = ds4_setup
+    connector, metadata, kv_caches, dev = make_ds4_setup()
     num_tokens = 64
     mem_obj = allocate_multi_group_memory_obj(metadata, num_tokens)
     assert metadata.get_dtypes().count(torch.uint8) >= 2
@@ -384,9 +384,9 @@ def test_materialize_mp_device_params_idempotent() -> None:
     assert params["mp_device"]["pbs"] is pbs_first
 
 
-def test_mp_device_lazy_materialized_on_first_transfer(ds4_setup) -> None:
+def test_mp_device_lazy_materialized_on_first_transfer() -> None:
     """mp_device tensors are created on first transfer, not at pointer init."""
-    connector, metadata, kv_caches, dev = ds4_setup
+    connector, metadata, kv_caches, dev = make_ds4_setup()
     num_tokens = 64
     mem_obj = allocate_multi_group_memory_obj(metadata, num_tokens)
     slot_mappings = make_slot_mappings(num_tokens, dev)

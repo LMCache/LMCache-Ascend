@@ -9,7 +9,7 @@ from typing import Any, Optional, Sequence, Union
 
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
+from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
 import torch
 
 # First Party
@@ -201,9 +201,8 @@ def _get_kv_cache_group_key_and_info(
             hidden = int(kv_cache.shape[2])
             return (1, hidden, bs, kv_cache.dtype, 1)
 
-        # MERGED_KV single tensor: 910B [2, NB, BS, NH, HS] / 310P
-        # [2, NB, NH*HS//16, BS, 16]; second-form [NB, 2, BS, NH, HS]
-        # also accepted (flash-infer).
+        # MERGED_KV single tensor layouts vary by chip (910B vs 310P); flash-infer
+        # second form is also accepted.
         rep = kv_cache
         dtype = rep.dtype
         if is_310p:

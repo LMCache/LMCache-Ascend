@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import os
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
@@ -24,21 +23,17 @@ from lmcache_ascend.v1.slot_mapping_utils import (
     iter_lmcache_chunk_ranges,
     iter_store_chunk_ranges,
 )
-from vllm.config import (
-    VllmConfig,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
-    KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 import torch
 
 if TYPE_CHECKING:
     # Third Party
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
@@ -239,7 +234,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 slot_mappings_cpu.append(group_slot_mapping.pin_memory())
 
             pg = request.primary_kv_group_idx
-            slot_mapping_cpu = slot_mappings_cpu[pg]
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
 
             slot_mappings_npu: list[torch.Tensor] = []
@@ -415,7 +409,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     group_slot_mapping = request.get_slot_mapping(group_idx)
                     assert isinstance(group_slot_mapping, torch.Tensor)
                     assert len(group_slot_mapping) <= len(token_ids)
-                    slot_mappings_cpu.append(group_slot_mapping)
+                    slot_mappings_cpu.append(group_slot_mapping.pin_memory())
 
                 slot_mapping = slot_mappings_cpu[pg]
                 if request.num_kv_groups > 1:
@@ -444,12 +438,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 with torch.npu.stream(self.lmcache_engine.gpu_connector.store_stream):
                     for sm_cpu in slot_mappings_cpu:
                         slot_mappings_npu.append(
-                            sm_cpu.to(device="npu", dtype=torch.long)
+                            sm_cpu.to(device="npu", dtype=torch.long, non_blocking=True)
                         )
                     slot_mapping_npu = slot_mappings_npu[pg]
                     if request.filtered_slot_by_group is not None:
                         filtered_slot_mappings_npu = tuple(
-                            sm_cpu.to(device="npu", dtype=torch.long)
+                            sm_cpu.to(device="npu", dtype=torch.long, non_blocking=True)
                             for sm_cpu in request.filtered_slot_by_group
                         )
                 # lmcache-ascend end ---------------------

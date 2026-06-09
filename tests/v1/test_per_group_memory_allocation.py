@@ -31,7 +31,7 @@ from .conftest_ds4 import (
     DS4_PRODUCTION_CHUNK_TOKENS,
     allocate_multi_group_memory_obj,
     build_bundled_ds4_connector,
-    ds4_setup,
+    make_ds4_setup,
 )
 
 
@@ -228,9 +228,9 @@ def test_bundled_ds4_sw_group_uses_physical_token_dim(
             assert shapes[group_idx][2] == num
 
 
-def test_multi_group_memory_obj_tensor_view_fails(ds4_setup) -> None:
+def test_multi_group_memory_obj_tensor_view_fails() -> None:
     """Document why single-group ``memory_obj.tensor`` must not be used on multi-group."""
-    _, metadata, _, _ = ds4_setup
+    _, metadata, _, _ = make_ds4_setup()
     mem_obj = allocate_multi_group_memory_obj(metadata, DS4_CHUNK_SIZE)
     assert len(mem_obj.group_prefix_sum) >= 3
     with pytest.raises(RuntimeError, match="invalid for input of size"):
