@@ -50,6 +50,7 @@ def setup_lmcache_dependency():
         current_tag = get_current_git_tag(LMCACHEPATH)
         if current_tag == VERSION_TAG:
             return  # Already on correct version
+
         print(f"⚠️ Version mismatch (Found: {current_tag}). Syncing to {VERSION_TAG}...")
         run_git_cmd(["fetch", "--tags"], cwd=LMCACHEPATH)
         run_git_cmd(["checkout", f"tags/{VERSION_TAG}"], cwd=LMCACHEPATH)
@@ -93,5 +94,5 @@ def register_alias():
 
 def prepare_environment():
     """Main entry point to prepare the test environment."""
-    #setup_lmcache_dependency()
+    setup_lmcache_dependency()
     register_alias()
