@@ -63,6 +63,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
             self._wait_for_save_done = True
             return
 
+        # lmcache-ascend start: skip save on passive ranks ---------------------
+        # Under save_only_first_rank (default for MLA/DSA), only the first rank
+        # owns a storage_manager; the other ranks are "passive" and neither
+        # store nor look up locally. The base store() already no-ops for them,
+        # and _local_persist_skip's local lookup would assert on the missing
+        # storage_manager. Short-circuit the whole save path for these ranks.
+        if self.lmcache_engine is not None and self.lmcache_engine._is_passive():
+            for request in connector_metadata.requests:
+                self.lmcache_engine.lookup_unpin(request.req_id)
+            self._wait_for_save_done = True
+            self._replay_finished_stores_after_save()
+            return
+        # lmcache-ascend end --------------------------------------------------
+
         if self.use_layerwise:
             assert not self.store_async, (
                 "Layerwise storing is not supported with async store"
@@ -128,8 +142,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
                 if persist_remote_skip is not None:
                     skip_leading_tokens = persist_remote_skip
-                else:
+                elif save_spec is not None:
                     skip_leading_tokens = save_spec.skip_leading_tokens
+                else:
+                    skip_leading_tokens = 0
 
                 if skip_leading_tokens == len(token_ids):
                     continue

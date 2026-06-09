@@ -298,8 +298,10 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         put_submitted = False
         try:
-            with store_stats.profile_from_gpu():
-                self.gpu_connector.batched_from_gpu(memory_objs, starts, ends, **kwargs)
+            result = self.gpu_connector.batched_from_gpu(
+                memory_objs, starts, ends, **kwargs
+            )
+            store_stats.from_gpu_time = result if isinstance(result, float) else 0.0
 
             with self._engine_state_lock:
                 with store_stats.profile_put():
