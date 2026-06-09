@@ -33,6 +33,14 @@ void multi_layer_kv_transfer_kernel_v2(
     const int64_t kHiddenDims = 0, const int64_t vHiddenDims = 0,
     const int64_t dsaHiddenDims = 0);
 
+void multi_layer_kv_transfer_multi_plane_kernel_v2(
+    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
+    int64_t *perPlaneSlotPtrs, int32_t *perPlaneSlotStarts, int32_t *perPlaneSlotCounts,
+    int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes, int32_t *perPlanePageBuffSizes,
+    int32_t *perPlaneLmcRowOffset, int32_t numPlanes, int32_t numLayers,
+    int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
+    int32_t maxTokensPerLoop, bool page2L);
+
 void single_layer_kv_transfer_kernel_v2(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
     uint32_t blockDim, void *stream, uint8_t *lmcKeyValueCache,
@@ -71,7 +79,8 @@ void multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
-    const int64_t dsa_hidden_dims = 0);
+    const int64_t dsa_hidden_dims = 0, const int64_t dsa_c8_scale_plane_bytes = 0,
+    const int32_t paged_kv_block_size = 0);
 
 void fused_multi_layer_kv_transfer(
     torch::Tensor &key_value,
@@ -80,7 +89,8 @@ void fused_multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
-    const int64_t dsa_hidden_dims = 0);
+    const int64_t dsa_hidden_dims = 0, const int64_t dsa_c8_scale_plane_bytes = 0,
+    const int32_t paged_kv_block_size = 0);
 
 void multi_layer_kv_transfer_310p(
     torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]
@@ -120,3 +130,14 @@ void reshape_and_cache_back_flash(torch::Tensor &key_value,
                                   torch::Tensor &value_cache,
                                   torch::Tensor &slot_mapping,
                                   const int layer_idx);
+
+// Per-plane slot_mapping_ptrs must point at dense mappings (no -1); see .cpp.
+void multi_layer_kv_transfer_multi_plane(
+    torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
+    const torch::Tensor &slot_mapping_ptrs,
+    const torch::Tensor &slot_mapping_starts,
+    const torch::Tensor &slot_mapping_counts,
+    const torch::Tensor &page_buffer_sizes, const torch::Tensor &block_sizes,
+    const torch::Tensor &hidden_dim_bytes, const int64_t max_hidden_dim_bytes,
+    const torch::Device &paged_memory_device, const bool direction,
+    const int num_planes, const torch::Tensor &lmc_row_offsets);

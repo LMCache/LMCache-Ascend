@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from __future__ import annotations
+
 import random
 
 # Third Party
@@ -10,15 +12,22 @@ import torch
 
 # First Party
 import lmcache_ascend.c_ops as lmc_ops
+from lmcache_ascend.v1.kv_format import KVCacheFormat
 
 # Local
 from .utils import (
     check_paged_kv_cache_equal,
+    generate_dsa_c8_kv_cache,
     generate_dsa_kv_cache,
     generate_kv_cache_paged_list_tensors,
     generate_kv_cache_paged_list_tuple_tensors,
     generate_mla_kv_cache,
 )
+
+
+
+def _npu_available() -> bool:
+    return hasattr(torch, "npu") and torch.npu.is_available()
 
 
 @pytest.mark.parametrize("num_tokens", [256, 500, 1024, 2048])
@@ -1488,3 +1497,584 @@ def test_multi_layer_kv_transfer_dsa_format(
     )
 
     mem_allocator.close()
+
+@pytest.mark.parametrize(
+    "num_tokens,chunk_size",
+    [
+        (64, 512),
+        (127, 512),
+        (128, 512),
+        (129, 512),
+        (255, 512),
+        (256, 512),
+        (257, 512),
+        (511, 512),
+        (512, 512),
+        (513, 512),
+        (1024, 256),
+        (1025, 512),
+        (40959, 512),
+        (40960, 512),
+        (40961, 512),
+    ],
+)
+@pytest.mark.parametrize("num_kv_heads", [8, 1])
+@pytest.mark.parametrize("num_layers", [1, 3])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [128])
+@pytest.mark.parametrize("dsa_head_dim", [128])
+def test_multi_layer_kv_transfer_dsa_c8_format(
+    num_tokens,
+    num_kv_heads,
+    chunk_size,
+    num_layers,
+    block_size,
+    kv_lora_rank,
+    qk_rope_head_dim,
+    dsa_head_dim,
+):
+    """DSA+C8: byte-oriented LMCache chunk (uint8) and four paged pointers per layer."""
+    # Unique scope: this is the only direct c_ops multi-plane round-trip (store+load+parity).
+    # Other multi-plane tests route through connector wrappers or only verify store-side layout.
+    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+
+    device = "npu"
+    num_blocks = max((num_tokens // block_size) * 2, 256)
+    kv_dtype = torch.bfloat16
+
+    kv_cache_src = generate_dsa_c8_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+        block_size=block_size,
+        kv_dtype=kv_dtype,
+    )
+    page_buffer_size = num_blocks * block_size
+    k0, v0, d0, s0 = kv_cache_src[0]
+    kb = int(k0.numel() * k0.element_size() // page_buffer_size)
+    vb = int(v0.numel() * v0.element_size() // page_buffer_size)
+    db = int(d0.numel() * d0.element_size() // page_buffer_size)
+    sb = int(s0.numel() * s0.element_size() // page_buffer_size)
+    plane_bytes = (kb, vb, db, sb)
+
+    slot_mapping = torch.arange(0, num_tokens, device=device, dtype=torch.long)
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+
+    # Regression guard: _multi_plane_layer_block_bytes previously asserted
+    # plane_stride % 32 == 0, which fires for the scale plane (hd=2, sb=2) when
+    # a partial last chunk has a token count not divisible by 16.  Verify every
+    # chunk size — including partial ones — is handled without error, and that
+    # the returned value matches the kernel's AlignUp32Bytes accumulation.
+    for chunk_toks in {int(c.shape[0]) for c in slot_mapping_chunked}:
+        block = _multi_plane_layer_block_bytes(list(plane_bytes), chunk_toks)
+        expected = sum((hd * chunk_toks + 31) & ~31 for hd in plane_bytes)
+        assert block == expected, (
+            f"_multi_plane_layer_block_bytes mismatch for chunk_toks={chunk_toks}: "
+            f"got {block}, expected {expected}"
+        )
+
+    row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
+    pinned_cpu_size = max(
+        256 * 1024 * 1024,
+        row_bytes * num_layers * num_tokens * 2,
+    )
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    kv_cache_pointers = torch.empty(
+        num_layers * 4, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache, dsa_k_cache, dsa_k_scale = kv_cache_src[i]
+        kv_cache_pointers[i * 4 + 0] = k_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 1] = v_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 2] = dsa_k_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 3] = dsa_k_scale.data_ptr()
+    kv_cache_pointers = kv_cache_pointers.npu()
+
+    def _dsa_c8_multi_plane_xfer(
+        mem_tensor: torch.Tensor,
+        ptrs: torch.Tensor,
+        slots: torch.Tensor,
+        *,
+        is_store: bool,
+    ) -> None:
+        n_tok = int(slots.shape[0])
+        chunk_tensor = mem_tensor
+        if chunk_tensor.dtype != torch.uint8:
+            chunk_tensor = chunk_tensor.view(torch.uint8)
+        dev = kv_cache_src[0][0].device
+        slot_ptr = slots.data_ptr()
+        slot_ptrs = torch.full((4,), slot_ptr, dtype=torch.int64, device=dev)
+        slot_starts = torch.zeros(4, dtype=torch.int32, device=dev)
+        slot_counts = torch.full((4,), n_tok, dtype=torch.int32, device=dev)
+        pbs = torch.tensor([page_buffer_size] * 4, dtype=torch.int32, device=dev)
+        bss = torch.tensor([block_size] * 4, dtype=torch.int32, device=dev)
+        hds = torch.tensor(list(plane_bytes), dtype=torch.int32, device=dev)
+        lmc_row_offsets = torch.zeros(4, dtype=torch.int32, device=dev)
+        lmc_ops.multi_layer_kv_transfer_multi_plane(
+            chunk_tensor,
+            ptrs,
+            slot_ptrs,
+            slot_starts,
+            slot_counts,
+            pbs,
+            bss,
+            hds,
+            max(plane_bytes),
+            dev,
+            is_store,
+            4,
+            lmc_row_offsets,
+        )
+
+    memory_obj_list = []
+    for slot_temp in slot_mapping_chunked:
+        chunk_row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
+        mem_obj_shape = torch.Size([1, num_layers, chunk_size, chunk_row_bytes])
+        memory_obj = mem_allocator.allocate(mem_obj_shape, torch.uint8)
+        _dsa_c8_multi_plane_xfer(
+            memory_obj.tensor, kv_cache_pointers, slot_temp, is_store=True
+        )
+        memory_obj_list.append(memory_obj)
+
+    kv_cache_dst = generate_dsa_c8_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+        block_size=block_size,
+        kv_dtype=kv_dtype,
+    )
+
+    kv_cache_pointers_dst = torch.empty(
+        num_layers * 4, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache, dsa_k_cache, dsa_k_scale = kv_cache_dst[i]
+        kv_cache_pointers_dst[i * 4 + 0] = k_cache.data_ptr()
+        kv_cache_pointers_dst[i * 4 + 1] = v_cache.data_ptr()
+        kv_cache_pointers_dst[i * 4 + 2] = dsa_k_cache.data_ptr()
+        kv_cache_pointers_dst[i * 4 + 3] = dsa_k_scale.data_ptr()
+    kv_cache_pointers_dst = kv_cache_pointers_dst.npu()
+
+    for chunk_id, slot_temp in enumerate(slot_mapping_chunked):
+        _dsa_c8_multi_plane_xfer(
+            memory_obj_list[chunk_id].tensor,
+            kv_cache_pointers_dst,
+            slot_temp,
+            is_store=False,
+        )
+
+    check_paged_kv_cache_equal(
+        kv_cache_src,
+        kv_cache_dst,
+        slot_mapping,
+        num_heads=num_kv_heads,
+        head_size=128,
+        kv_format=5,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+    )
+
+    mem_allocator.close()
+
+
+@pytest.mark.parametrize(
+    "num_tokens,chunk_size",
+    [
+        (256, 512),
+        (255, 512),
+        (513, 512),
+    ],
+)
+@pytest.mark.parametrize("num_kv_heads", [1, 4])
+@pytest.mark.parametrize("num_layers", [1])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("kv_lora_rank", [512])
+@pytest.mark.parametrize("qk_rope_head_dim", [128])
+@pytest.mark.parametrize("dsa_head_dim", [128])
+def test_fused_multi_layer_kv_transfer_dsa_c8_format(
+    num_tokens,
+    num_kv_heads,
+    chunk_size,
+    num_layers,
+    block_size,
+    kv_lora_rank,
+    qk_rope_head_dim,
+    dsa_head_dim,
+):
+    """DSA-C8 fused offload matches direct multi-plane extract (from_gpu path)."""
+    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+
+    device = "npu"
+    num_blocks = max((num_tokens // block_size) * 2, 256)
+    kv_dtype = torch.bfloat16
+
+    kv_cache = generate_dsa_c8_kv_cache(
+        num_blocks=num_blocks,
+        device=device,
+        num_layers=num_layers,
+        num_kv_heads=num_kv_heads,
+        kv_lora_rank=kv_lora_rank,
+        qk_rope_head_dim=qk_rope_head_dim,
+        dsa_head_dim=dsa_head_dim,
+        block_size=block_size,
+        kv_dtype=kv_dtype,
+    )
+    page_buffer_size = num_blocks * block_size
+    k0, v0, d0, s0 = kv_cache[0]
+    kb = int(k0.numel() * k0.element_size() // page_buffer_size)
+    vb = int(v0.numel() * v0.element_size() // page_buffer_size)
+    db = int(d0.numel() * d0.element_size() // page_buffer_size)
+    sb = int(s0.numel() * s0.element_size() // page_buffer_size)
+    plane_bytes = (kb, vb, db, sb)
+    chunk_row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
+
+    slot_mapping = torch.arange(0, num_tokens, device=device, dtype=torch.long)
+    slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
+
+    pinned_cpu_size = max(
+        256 * 1024 * 1024,
+        chunk_row_bytes * num_layers * chunk_size * 4,
+    )
+    mem_allocator = PinMemoryAllocator(pinned_cpu_size)
+
+    kv_cache_pointers = torch.empty(
+        num_layers * 4, dtype=torch.int64, device="cpu", pin_memory=True
+    )
+    for i in range(num_layers):
+        k_cache, v_cache, dsa_k_cache, dsa_k_scale = kv_cache[i]
+        kv_cache_pointers[i * 4 + 0] = k_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 1] = v_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 2] = dsa_k_cache.data_ptr()
+        kv_cache_pointers[i * 4 + 3] = dsa_k_scale.data_ptr()
+    kv_cache_pointers = kv_cache_pointers.npu()
+
+    staging_buffer = torch.empty(
+        (1, num_layers, chunk_size, chunk_row_bytes),
+        dtype=torch.uint8,
+        device=device,
+    )
+
+    def _dsa_c8_multi_plane_from_gpu(
+        mem_tensor: torch.Tensor, slots: torch.Tensor
+    ) -> None:
+        n_tok = int(slots.shape[0])
+        chunk_tensor = mem_tensor
+        if chunk_tensor.dtype != torch.uint8:
+            chunk_tensor = chunk_tensor.view(torch.uint8)
+        dev = kv_cache[0][0].device
+        slot_ptr = slots.data_ptr()
+        slot_ptrs = torch.full((4,), slot_ptr, dtype=torch.int64, device=dev)
+        slot_starts = torch.zeros(4, dtype=torch.int32, device=dev)
+        slot_counts = torch.full((4,), n_tok, dtype=torch.int32, device=dev)
+        pbs = torch.tensor([page_buffer_size] * 4, dtype=torch.int32, device=dev)
+        bss = torch.tensor([block_size] * 4, dtype=torch.int32, device=dev)
+        hds = torch.tensor(list(plane_bytes), dtype=torch.int32, device=dev)
+        lmc_row_offsets = torch.zeros(4, dtype=torch.int32, device=dev)
+        lmc_ops.multi_layer_kv_transfer_multi_plane(
+            chunk_tensor,
+            kv_cache_pointers,
+            slot_ptrs,
+            slot_starts,
+            slot_counts,
+            pbs,
+            bss,
+            hds,
+            max(plane_bytes),
+            dev,
+            True,
+            4,
+            lmc_row_offsets,
+        )
+
+    memory_obj_baseline_list = []
+    for slot_temp in slot_mapping_chunked:
+        mem_obj_shape = torch.Size([1, num_layers, chunk_size, chunk_row_bytes])
+        memory_obj = mem_allocator.allocate(mem_obj_shape, torch.uint8)
+        memory_obj.tensor.zero_()
+        _dsa_c8_multi_plane_from_gpu(memory_obj.tensor, slot_temp)
+        memory_obj_baseline_list.append(memory_obj)
+
+    memory_obj_fused_list = []
+    for slot_temp in slot_mapping_chunked:
+        staging_buffer.zero_()
+        mem_obj_shape = torch.Size([1, num_layers, chunk_size, chunk_row_bytes])
+        memory_obj = mem_allocator.allocate(mem_obj_shape, torch.uint8)
+        memory_obj.tensor.zero_()
+        lmc_ops.fused_multi_layer_kv_transfer(
+            memory_obj.tensor,
+            staging_buffer,
+            kv_cache_pointers,
+            slot_temp,
+            kv_cache[0][0].device,
+            page_buffer_size,
+            True,  # from_gpu
+            False,
+            KVCacheFormat.DSA_C8_KV.value,
+            kb,
+            vb,
+            db,
+            sb,
+            block_size,
+        )
+        memory_obj_fused_list.append(memory_obj)
+
+    torch.npu.synchronize()
+    for baseline_obj, fused_obj, slot_temp in zip(
+        memory_obj_baseline_list, memory_obj_fused_list, slot_mapping_chunked, strict=True
+    ):
+        n_tok = int(slot_temp.shape[0])
+        left = baseline_obj.tensor
+        right = fused_obj.tensor
+        assert left.shape == right.shape
+        assert torch.equal(left[:, :, :n_tok, :], right[:, :, :n_tok, :])
+
+    mem_allocator.close()
+
+
+# --- Generic multi-plane kernel tests (real NPU; see also test_ds4_kvcache_roundtrip) ---
+
+from .conftest_kvcache import (
+    device as _kvcache_device,
+    fill_multi_plane_pattern,
+    npu_available as _kvcache_npu_available,
+    pinned_lmc_chunk,
+)
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    _build_slot_mapping_for_group,
+)
+from lmcache_ascend.v1.kv_layer_groups import _multi_plane_layer_block_bytes
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
+    VLLMPagedMemNPUConnectorV2,
+    _derive_group_params,
+)
+from lmcache_ascend.v1.slot_mapping_utils import (
+    build_filtered_slot_mappings,
+    compact_slot_mapping_chunk,
+    multi_plane_slot_slice_bounds,
+)
+
+
+_GENERIC_BLOCK_SIZES = (128, 128, 128, 1024, 32, 32, 128, 128, 128, 128, 64, 64)
+
+
+def _generic_compress_ratios_12() -> tuple[int, ...]:
+    """Unit ratios for 12 scheduler groups (1024 // block_size)."""
+    return tuple(1024 // bs for bs in _GENERIC_BLOCK_SIZES)
+
+
+def test_compact_slot_mapping_chunk_filters_dead_rows_preserving_order() -> None:
+    sm = torch.tensor([-1, -1, 10, 11, -1, 12], dtype=torch.long)
+    compact = compact_slot_mapping_chunk(sm, 0, 6, 0, (1,))
+    assert compact.tolist() == [10, 11, 12]
+
+
+def _generic_slot_mappings(
+    num_tokens: int, dev: torch.device
+) -> tuple[torch.Tensor, ...]:
+    block_ids = list(range(1, 17))
+    ratios = _generic_compress_ratios_12()
+    mappings: list[torch.Tensor] = []
+    for ratio, bs in zip(ratios, _GENERIC_BLOCK_SIZES):
+        mappings.append(
+            _build_slot_mapping_for_group(
+                block_ids,
+                int(bs),
+                num_tokens,
+                is_store=False,
+                compress_ratio=ratio,
+            ).to(dev)
+        )
+    return tuple(mappings)
+
+
+@pytest.mark.skipif(
+    not _kvcache_npu_available(),
+    reason="NPU required for per-plane contiguous LMCache layout check",
+)
+def test_multi_plane_chunk_uses_per_plane_layout() -> None:
+    """Store lays out each plane as a contiguous block inside the layer slice."""
+    # Unique scope: validates packed LMCache byte layout (plane contiguity and boundaries) post-store.
+    # Other tests focus on round-trip parity or slot-window corner cases, not raw packed offsets.
+    dev = _kvcache_device()
+    num_blocks = 4
+    chunk = 64
+    ratios = _generic_compress_ratios_12()
+    planes = (
+        torch.zeros(num_blocks, 128, 1, 512, dtype=torch.bfloat16, device=dev),
+        torch.zeros(num_blocks, 128, 1, 64, dtype=torch.bfloat16, device=dev),
+        torch.zeros(num_blocks, 1024, 1, 32, dtype=torch.int8, device=dev),
+        torch.zeros(num_blocks, 32, 1, 64, dtype=torch.float32, device=dev),
+    )
+    sched_groups = [0, 2, 3, 4]
+    entry_format = KVCacheFormat.detect([planes])
+    assert entry_format == KVCacheFormat.MULTI_PLANE_KV
+    layout_hints = {
+        "block_sizes_by_group": _GENERIC_BLOCK_SIZES,
+        "inference_engine_logical_block_size": 1024,
+        "scheduler_groups_per_plane": sched_groups,
+    }
+    shape_desc = __import__(
+        "lmcache_ascend.c_ops", fromlist=["PageBufferShapeDesc"]
+    ).PageBufferShapeDesc()
+    shape_desc.nb = num_blocks
+    shape_desc.bs = 128
+    group_params = _derive_group_params(
+        planes, entry_format, shape_desc, layout_hints=layout_hints, num_tokens=chunk
+    )
+    plane_bytes = group_params["per_plane_hidden_dim_bytes"]
+    # AlignUp32 per plane to match the kernel's AlignUp32Bytes accumulation.
+    plane_block_sizes = [(b * chunk + 31) & ~31 for b in plane_bytes]
+    lmc_chunk_row_bytes = int(group_params["k_extra"])
+    layer_block_bytes = _multi_plane_layer_block_bytes(plane_bytes, chunk)
+    ptrs = torch.tensor(
+        [p.data_ptr() for p in planes], dtype=torch.int64, device=dev
+    )
+    slot_mappings = _generic_slot_mappings(max(chunk, 128), dev)
+    connector = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)
+    connector.kvcaches_device = dev
+    connector.layout_hints = layout_hints
+
+    fill_multi_plane_pattern(list(planes), sched_groups, slot_mappings, chunk, ratios)
+    filtered, prefixes = build_filtered_slot_mappings(
+        tuple(sm.cpu() for sm in slot_mappings),
+        compress_ratios=ratios,
+    )
+    filtered_npu = tuple(f.to(dev) for f in filtered)
+    with pinned_lmc_chunk((1, 1, chunk, lmc_chunk_row_bytes), torch.uint8) as (
+        _mem_obj,
+        lmc_chunk,
+    ):
+        connector._invoke_multi_plane_kv_transfer(
+            mem_tensor=lmc_chunk,
+            group_ptrs=ptrs,
+            group_params=group_params,
+            slot_mappings_by_group=slot_mappings,
+            filtered_slot_mappings_npu=filtered_npu,
+            slot_valid_prefix_by_group=prefixes,
+            compress_ratios=ratios,
+            g_start=0,
+            g_end=chunk,
+            is_store=True,
+            npu_group_idx=0,
+        )
+        torch.npu.synchronize()
+
+        sm_parts: list[torch.Tensor] = []
+        for sched_g in sched_groups:
+            sm = slot_mappings[sched_g]
+            sm_parts.append(
+                compact_slot_mapping_chunk(
+                    sm,
+                    0,
+                    chunk,
+                    sched_g,
+                    ratios,
+                )
+            )
+        n_toks_per_plane = [int(p.shape[0]) for p in sm_parts]
+
+        layer_base = 0
+        flat = lmc_chunk.reshape(-1)
+        for pi, (plane_block, hd, n_tok) in enumerate(
+            zip(plane_block_sizes, plane_bytes, n_toks_per_plane)
+        ):
+            plane_block_base = layer_base + sum(plane_block_sizes[q] for q in range(pi))
+            plane_block_end = plane_block_base + plane_block
+            assert plane_block_end <= flat.numel()
+            plane_block_payload = flat[plane_block_base:plane_block_end]
+            assert plane_block_payload.any(), (
+                f"plane {pi} block has no written bytes after store"
+            )
+            if pi + 1 < len(plane_block_sizes):
+                next_plane_base = layer_base + sum(
+                    plane_block_sizes[q] for q in range(pi + 1)
+                )
+                assert next_plane_base == plane_block_end
+        assert layer_block_bytes == sum(plane_block_sizes)
+        assert layer_block_bytes <= lmc_chunk_row_bytes * chunk
+
+
+@pytest.mark.skipif(
+    not _kvcache_npu_available(),
+    reason="NPU required for windowed cross-block bulk regression",
+)
+def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
+    # Unique scope: stresses windowed copy where mapped slots cross a paged block boundary.
+    # Other tests do not isolate this boundary-transition bulk path with hand-crafted slot slices.
+    dev = _kvcache_device()
+    num_blocks = 8
+    chunk = 64
+    ratios = _generic_compress_ratios_12()
+    planes = (torch.zeros(num_blocks, 128, 1, 512, dtype=torch.bfloat16, device=dev),)
+    sched_groups = [0]
+    layout_hints = {
+        "block_sizes_by_group": _GENERIC_BLOCK_SIZES,
+        "inference_engine_logical_block_size": 1024,
+        "scheduler_groups_per_plane": sched_groups,
+    }
+    shape_desc = __import__(
+        "lmcache_ascend.c_ops", fromlist=["PageBufferShapeDesc"]
+    ).PageBufferShapeDesc()
+    shape_desc.nb = num_blocks
+    shape_desc.bs = 128
+    group_params = _derive_group_params(
+        planes, KVCacheFormat.MULTI_PLANE_KV, shape_desc, layout_hints=layout_hints, num_tokens=chunk
+    )
+    hd = group_params["per_plane_hidden_dim_bytes"][0]
+    lmc_chunk_row_bytes = int(group_params["k_extra"])
+    ptrs = torch.tensor([planes[0].data_ptr()], dtype=torch.int64, device=dev)
+    sched_g = 0
+    block_size = 128
+    s0, s1 = multi_plane_slot_slice_bounds(0, chunk, sched_g, ratios, chunk)
+    n_plane = s1 - s0
+    block_ids = list(range(1, num_blocks + 1))
+    sm = _build_slot_mapping_for_group(
+        block_ids, block_size, 132, is_store=False
+    )[124:132].to(dev)
+    assert int(sm.shape[0]) == n_plane
+    slot_mappings = list(_generic_slot_mappings(max(chunk, 128), dev))
+    slot_mappings[sched_g] = sm
+
+    fill_multi_plane_pattern(list(planes), sched_groups, tuple(slot_mappings), chunk, ratios)
+    filtered, prefixes = build_filtered_slot_mappings(
+        tuple(sm.cpu() for sm in slot_mappings),
+        compress_ratios=ratios,
+    )
+    filtered_npu = tuple(f.to(dev) for f in filtered)
+    connector = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)
+    connector.kvcaches_device = dev
+    connector.layout_hints = layout_hints
+    with pinned_lmc_chunk((1, 1, chunk, lmc_chunk_row_bytes), torch.uint8) as (
+        _mem_obj,
+        lmc_chunk,
+    ):
+        connector._invoke_multi_plane_kv_transfer(
+            mem_tensor=lmc_chunk,
+            group_ptrs=ptrs,
+            group_params=group_params,
+            slot_mappings_by_group=tuple(slot_mappings),
+            filtered_slot_mappings_npu=filtered_npu,
+            slot_valid_prefix_by_group=prefixes,
+            compress_ratios=ratios,
+            g_start=0,
+            g_end=chunk,
+            is_store=True,
+            npu_group_idx=0,
+        )
+        torch.npu.synchronize()
+
+        flat = lmc_chunk.reshape(-1)
+        for t in range(n_plane):
+            row = flat[t * hd : (t + 1) * hd]
+            assert row.any(), f"token {t} empty after cross-block store"

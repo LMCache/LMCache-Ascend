@@ -1,5 +1,6 @@
 #include "utils.h"
 #include "dcmi_management.h"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -20,6 +21,8 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
     return kvcache_ops::AscendType::INT64;
   } else if (scalarType == at::ScalarType::Int) {
     return kvcache_ops::AscendType::INT32;
+  } else if (scalarType == at::ScalarType::Byte || scalarType == at::ScalarType::Char) {
+    return kvcache_ops::AscendType::INT8;
   } else {
     TORCH_CHECK(false, "ScalarType not supported.");
   }
@@ -30,7 +33,8 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,
     int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw,
-    int64_t k_hidden_dims, int64_t v_hidden_dims, int64_t dsa_hidden_dims) {
+    int64_t k_hidden_dims, int64_t v_hidden_dims, int64_t dsa_hidden_dims,
+    int64_t dsa_c8_scale_plane_bytes, int32_t paged_kv_block_size) {
   MultiLayerKVConfig config;
 
   config.page_buffer_ptrs =
@@ -40,7 +44,11 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
 
   config.num_layers = key_value.size(1);
   config.num_tokens = slot_mapping.size(0);
+  config.num_tokens_lmc_chunk =
+      (key_value.dim() >= 3) ? static_cast<int>(key_value.size(2)) : config.num_tokens;
 
+  config.kvcache_format_raw = kvcache_format_raw;
+  config.is_dsa_c8 = (kvcache_format_raw == 5);
   config.kvcache_format =
       static_cast<kvcache_ops::KVCacheFormat>(kvcache_format_raw);
 
@@ -55,23 +63,34 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
   config.k_hidden_dims = k_hidden_dims;
   config.v_hidden_dims = v_hidden_dims;
   config.dsa_hidden_dims = dsa_hidden_dims;
+  config.dsa_c8_scale_plane_bytes = dsa_c8_scale_plane_bytes;
+  config.paged_kv_block_size = paged_kv_block_size;
+
+  if (config.is_dsa_c8) {
+    config.kv_size = 4;
+    // C8 uses multi-plane transfer; hidden_dims stores per-plane K bytes for compatibility.
+    config.hidden_dims = config.k_hidden_dims;
+    return config;
+  }
 
   switch (config.kvcache_format) {
   case kvcache_ops::KVCacheFormat::MERGED_KV:
-    config.kv_size = 2;
+    config.kv_size = static_cast<int>(key_value.size(0));
     config.hidden_dims = key_value.size(-1);
     break;
   case kvcache_ops::KVCacheFormat::SEPARATE_KV:
-    config.kv_size = 2;
+    config.kv_size = static_cast<int>(key_value.size(0));
     config.hidden_dims = key_value.size(-1);
     break;
   case kvcache_ops::KVCacheFormat::MLA_KV:
     config.kv_size = 2;
-    config.hidden_dims = config.k_hidden_dims;
+    // LMC chunk is [*, layers, tokens, kv_lora_rank + qk_rope_head_dim] (planes per token).
+    config.hidden_dims = config.k_hidden_dims + config.v_hidden_dims;
     break;
   case kvcache_ops::KVCacheFormat::DSA_KV:
     config.kv_size = 3;
-    config.hidden_dims = config.k_hidden_dims;
+    config.hidden_dims =
+        config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims;
     break;
   default:
     TORCH_CHECK(false, "Unsupported KVCacheFormat: ", kvcache_format_raw);
@@ -101,15 +120,23 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   // step 1. use per tokens buff size to derive how many tokens can be allocated
   // per loop
   int64_t max_hidden_dims = config.hidden_dims;
-  if (config.kvcache_format == kvcache_ops::KVCacheFormat::MLA_KV) {
+  if (config.is_dsa_c8) {
+    max_hidden_dims = std::max({config.k_hidden_dims, config.v_hidden_dims,
+                                config.dsa_hidden_dims,
+                                config.dsa_c8_scale_plane_bytes});
+  } else if (config.kvcache_format == kvcache_ops::KVCacheFormat::MLA_KV) {
     max_hidden_dims = std::max(config.k_hidden_dims, config.v_hidden_dims);
   } else if (config.kvcache_format == kvcache_ops::KVCacheFormat::DSA_KV) {
     max_hidden_dims = std::max(
         {config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims});
   }
 
-  int64_t baseBuffSize =
-      numBuffsOnDev * max_hidden_dims * key_value.element_size();
+  int64_t elem_size = static_cast<int64_t>(key_value.element_size());
+  if (config.is_dsa_c8) {
+    elem_size = 1;
+  }
+
+  int64_t baseBuffSize = numBuffsOnDev * max_hidden_dims * elem_size;
 
   if (ubSize < static_cast<uint64_t>(baseBuffSize)) {
     std::string errStr =

@@ -271,6 +271,9 @@ def _patch_ops():
     if not hasattr(ascend_c_ops, "GPUKVFormat"):
 
         class GPUKVFormat(IntEnum):
+            # Keep numeric values in lockstep with ``csrc/mem_kernels.cuh``
+            # (CUDA ``lmcache.c_ops.GPUKVFormat``) so IntEnum comparisons stay
+            # consistent when upstream MP code passes raw ints.
             NB_NL_TWO_BS_NH_HS = 0
             NL_X_TWO_NB_BS_NH_HS = 1
             NL_X_NB_TWO_BS_NH_HS = 2
@@ -279,8 +282,17 @@ def _patch_ops():
             NL_X_NBBS_ONE_HS = 5
             NL_X_TWO_NB_NH_BS_HS = 6
             NL_X_NB_TWO_NH_BS_HS = 7
+            NB_NL_TWO_NH_BS_HS = 8
 
         ascend_c_ops.GPUKVFormat = GPUKVFormat
+
+    # PR #3171 PageBufferShapeDesc is CUDA pybind only; reuse the
+    # Python equivalent (same __slots__) for Ascend.
+    if not hasattr(ascend_c_ops, "PageBufferShapeDesc"):
+        # Third Party
+        from lmcache.non_cuda_equivalents import PageBufferShapeDesc
+
+        ascend_c_ops.PageBufferShapeDesc = PageBufferShapeDesc
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
@@ -393,21 +405,6 @@ def _patch_multi_process():
     lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
 
 
-def _patch_kv_layer_group():
-    # Third Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
-
-    # First Party
-    import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-
-    KVLayerGroupsManager.build_kv_layer_groups = (
-        ascend_kv_layer_groups.build_kv_layer_groups
-    )
-    KVLayerGroupInfo.hidden_dim_size = property(
-        ascend_kv_layer_groups.patched_hidden_dim_size
-    )
-
-
 def _patch_gpu_connector():
     """Patch CreateGPUConnector to return NPU connectors on Ascend.
 
@@ -478,10 +475,21 @@ def _patch_vllm_v1_adapter():
     import lmcache.integration.vllm.vllm_v1_adapter as lmc_vllm_v1_adapter
 
     # First Party
+    from lmcache_ascend.integration.vllm import multi_group_vllm_adapter as mg
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         LMCacheAscendConnectorV1Impl as ascend_LMCacheAscendConnectorV1Impl,
     )
 
+    lmc_vllm_v1_adapter.RequestTracker = mg.RequestTracker
+    lmc_vllm_v1_adapter.ReqMeta = mg.ReqMeta
+    lmc_vllm_v1_adapter.BlockIdsLike = mg.BlockIdsLike
+    lmc_vllm_v1_adapter._empty_block_ids_by_group = mg._empty_block_ids_by_group
+    lmc_vllm_v1_adapter._normalize_block_ids = mg._normalize_block_ids
+    lmc_vllm_v1_adapter._normalize_block_sizes = mg._normalize_block_sizes
+    lmc_vllm_v1_adapter._build_slot_mapping_for_group = mg._build_slot_mapping_for_group
+    lmc_vllm_v1_adapter._build_slot_mappings_by_group = (
+        mg._build_slot_mappings_by_group
+    )
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
     def handle_preemptions(self, preempted_req_ids):
@@ -490,6 +498,55 @@ def _patch_vllm_v1_adapter():
             method(preempted_req_ids)
 
     vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
+
+
+def _patch_metadata_get_shapes():
+    """Chunk-dependent multi-plane row bytes for ``LMCacheMetadata.get_shapes``.
+    This patch is used to get the correct shapes for the multi-plane KV cache that
+    stores layers contiguously in the LMCache chunk."""
+    # Third Party
+    from typing import Optional
+
+    import torch
+    from lmcache.v1.metadata import LMCacheMetadata
+
+    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+
+    _orig_get_shapes = LMCacheMetadata.get_shapes
+
+    def _get_shapes(
+        self: LMCacheMetadata, num_tokens: Optional[int] = None
+    ) -> list[torch.Size]:
+        if num_tokens is None:
+            num_tokens = self.chunk_size
+        klg_manager = self.kv_layer_groups_manager
+        if klg_manager is not None and klg_manager.kv_layer_groups:
+            shapes: list[torch.Size] = []
+            for group in klg_manager.kv_layer_groups:
+                plane_bytes = getattr(group, "multi_plane_hidden_bytes", None)
+                physical = group.physical_chunk_size or num_tokens
+                if num_tokens != self.chunk_size and physical:
+                    physical = max(1, num_tokens * physical // self.chunk_size)
+                if plane_bytes is not None:
+                    token_dim = num_tokens
+                    hidden = _multi_plane_lmc_row_bytes(plane_bytes, token_dim)
+                else:
+                    token_dim = physical
+                    hidden = group.hidden_dim_size
+                shapes.append(
+                    torch.Size(
+                        [
+                            group.shape_desc.kv_size,
+                            group.num_layers,
+                            token_dim,
+                            hidden,
+                        ]
+                    )
+                )
+            return shapes
+        return _orig_get_shapes(self, num_tokens)
+
+    LMCacheMetadata.get_shapes = _get_shapes
 
 
 def _patch_cache_engine():
@@ -700,6 +757,7 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_gpu_connector()
 
     _patch_hash_token()
+    _patch_metadata_get_shapes()
 
     _patch_cachegen()
     _patch_remote_backend()
@@ -712,8 +770,6 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_lookup_client()
         _patch_cache_controller_worker()
         _patch_rpc_utils()
-
-    _patch_kv_layer_group()
 
     if is_sgl:
         _patch_sgl()
