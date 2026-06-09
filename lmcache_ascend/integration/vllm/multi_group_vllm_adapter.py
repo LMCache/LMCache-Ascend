@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 # Third Party
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -40,6 +39,7 @@ from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.sched.output import NewRequestData
@@ -175,19 +175,6 @@ def _build_slot_mapping_for_group(
         return slots
     # Mixed valid/null rows: keep index alignment; callers slice away -1 before kernels.
     return slots.masked_fill(~valid_mask, -1)
-
-def _count_leading_null_blocks(block_ids: list[int]) -> int:
-    """Count vLLM null-block prefix (block_id 0) before the first real block."""
-    if not block_ids:
-        return 0
-    leading = 0
-    for block_id in block_ids:
-        if block_id != 0:
-            break
-        leading += 1
-    if leading == len(block_ids):
-        leading = 0
-    return leading
 
 
 def _build_slot_mappings_by_group(
@@ -564,7 +551,9 @@ class ReqMeta:
         # For disagg requests, compute total_chunks for sender admission control.
         if tracker.disagg_spec is not None and tracker.disagg_spec.total_chunks == 0:
             # Only compute once (on first batch)
-            total_chunks_for_req = math.ceil(tracker.prompt_len / lmcache_chunk_size)
+            total_chunks_for_req = (
+                tracker.prompt_len + lmcache_chunk_size - 1
+            ) // lmcache_chunk_size
             tracker.disagg_spec.total_chunks = total_chunks_for_req
 
         # Pick the group whose allocated blocks cover the most logical tokens

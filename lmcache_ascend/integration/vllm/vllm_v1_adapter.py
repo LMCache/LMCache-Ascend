@@ -23,9 +23,6 @@ from lmcache_ascend.v1.slot_mapping_utils import (
     iter_lmcache_chunk_ranges,
     iter_store_chunk_ranges,
 )
-from vllm.config import (
-    VllmConfig,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -36,6 +33,7 @@ import torch
 
 if TYPE_CHECKING:
     # Third Party
+    from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 

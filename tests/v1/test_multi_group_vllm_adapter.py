@@ -16,7 +16,6 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     RequestTracker,
     _build_slot_mapping_for_group,
     _build_slot_mappings_by_group,
-    _count_leading_null_blocks,
     _normalize_block_ids,
     _normalize_block_sizes,
 )
@@ -273,20 +272,6 @@ def test_build_slot_mapping_single_block_no_index_error() -> None:
     )
     assert len(sm) == 128
     assert (sm >= 0).all()
-
-
-@pytest.mark.parametrize(
-    ("block_ids", "expected"),
-    [
-        pytest.param([0], 0, id="single_zero"),
-        pytest.param([3], 0, id="no_prefix"),
-        pytest.param([1, 2, 3], 0, id="no_zeros"),
-        pytest.param([0, 0, 0, 5], 3, id="strip_three"),
-        pytest.param([0, 0, 0], 0, id="all_zeros"),
-    ],
-)
-def test_count_leading_null_blocks(block_ids, expected) -> None:
-    assert _count_leading_null_blocks(block_ids) == expected
 
 
 def test_multi_plane_slot_slice_bounds_global_sm() -> None:
