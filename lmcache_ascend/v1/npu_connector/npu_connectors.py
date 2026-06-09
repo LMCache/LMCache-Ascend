@@ -241,15 +241,25 @@ def _split_kv_layer_groups_by_scheduler_slot(
     ratios = (layout_hints or {}).get("compress_ratios_by_group")
     if ratios is not None:
         chunk = max(1, int(lmcache_logical_chunk_size))
+        sw_by_g = (layout_hints or {}).get("sliding_window_size_by_group")
         patched: list[KVLayerGroupInfo] = []
         for group in split_groups:
             sched_g = int(sched_map[group.layer_indices[0]])
             ratio = max(1, int(ratios[sched_g]))
+            sw = (
+                sw_by_g[sched_g]
+                if sw_by_g is not None and sched_g < len(sw_by_g)
+                else None
+            )
+            if sw is not None:
+                physical = max(1, int(sw) // ratio)
+            else:
+                physical = max(1, chunk // ratio)
             patched.append(
                 dataclasses.replace(
                     group,
                     compress_ratio=ratio,
-                    physical_chunk_size=chunk // ratio,
+                    physical_chunk_size=physical,
                 )
             )
         split_groups = patched
