@@ -699,6 +699,12 @@ class AscendP2PBackend(P2PBackend):
         peer is not connected, for the caller to map to retry/miss.
         """
         peer = self.target_peer_info_mapping[target_peer_url]
+        # Check if the reply reader has already exited (e.g. socket reset crashed it
+        reader = peer.reader_task
+        if reader is None or reader.done():
+            raise ConnectionError(
+                f"peer {target_peer_url} reply reader not running; reconnect needed"
+            )
         req_id = peer.next_req_id()
         fut: "asyncio.Future" = asyncio.get_running_loop().create_future()
         peer.pending[req_id] = fut
