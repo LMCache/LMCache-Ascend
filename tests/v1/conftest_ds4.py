@@ -33,7 +33,6 @@ from .conftest_kvcache import (
     ds4_smoke_chunk_sizes,
     multi_plane_round_trip_via_connector,
     npu_available,
-    npu_group_index_with_num_planes,
     power_of_two_boundary_triplet,
     separate_kv_round_trip_via_connector,
     slot_concat_and_offsets,
@@ -181,7 +180,6 @@ def slot_mappings_for_ds4_groups(
     num_tokens: int,
     dev: torch.device,
     *,
-    use_ceil: bool,
     num_blocks: int = 16,
 ) -> tuple[torch.Tensor, ...]:
     block_ids = list(range(1, num_blocks + 1))
@@ -205,7 +203,7 @@ def make_slot_mappings(
     dev: torch.device,
 ) -> tuple[torch.Tensor, ...]:
     return slot_mappings_for_ds4_groups(
-        num_tokens, dev, use_ceil=False, num_blocks=32
+        num_tokens, dev, num_blocks=32
     )
 
 
@@ -246,7 +244,7 @@ def make_production_slot_mappings(
     dev: torch.device,
 ) -> tuple[torch.Tensor, ...]:
     return slot_mappings_for_ds4_groups(
-        num_tokens, dev, use_ceil=True, num_blocks=32
+        num_tokens, dev, num_blocks=32
     )
 
 
@@ -575,6 +573,7 @@ def make_load_req_meta(
     return ReqMeta(
         req_id="ds4-load-test",
         token_ids=list(range(num_tokens)),
+        slot_mapping=slot_mappings[primary_kv_group_idx],
         slot_mappings_by_group=slot_mappings,
         allocated_block_ids_by_group=tuple([list(range(16))] * num_kv_groups),
         primary_kv_group_idx=primary_kv_group_idx,
@@ -592,6 +591,7 @@ def make_partial_fail_load_req_meta() -> ReqMeta:
     return ReqMeta(
         req_id="partial-fail-test",
         token_ids=[0, 1],
+        slot_mapping=torch.tensor([0, 1024], dtype=torch.long),
         slot_mappings_by_group=(
             torch.tensor([0, 1], dtype=torch.long),
             torch.tensor([0, 1024], dtype=torch.long),
@@ -606,8 +606,8 @@ def make_forward_context():
     return SimpleNamespace(attn_metadata=SimpleNamespace())
 
 
-@pytest.fixture
-def ds4_setup():
+def make_ds4_setup():
+    """Build DS4 connector, metadata, KV caches, and device for integration tests."""
     if not npu_available():
         pytest.skip("NPU not available")
     dev = device()
@@ -627,4 +627,4 @@ def ds4_setup():
     return connector, metadata, kv_caches, dev
 
 
-dsv4_setup = ds4_setup
+dsv4_setup = make_ds4_setup

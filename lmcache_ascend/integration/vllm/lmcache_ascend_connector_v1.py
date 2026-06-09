@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.logger import init_logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.request import Request
 
 # First Party
 from lmcache_ascend import _build_info
