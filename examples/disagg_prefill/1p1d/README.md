@@ -6,7 +6,6 @@ This example demonstrates how to run LMCache with disaggregated prefill on a sin
 
 ### Prerequisites
 
-- CANN 8.3+ (for `hccl` channel) or CANN 8.5+ (for `hcomm_onesided` / `hixl` channels)
 - Ascend HDK 25.5.0+ drivers and firmware
 - RoCE connected NPU server (HCCS will be supported later)
 - At least 2 NPUs
@@ -22,8 +21,7 @@ The `transfer_channel` field in the LMCache YAML config selects the NPU communic
 
 | Channel | CANN Requirement | Status |
 | :--- | :--- | :--- |
-| `hccl` | CANN 8.3+ | Legacy |
-| `hcomm_onesided` | CANN 8.5+ | **Recommended** |
+| `hccl` | CANN 8.5+ | **Recommended** |
 | `hixl` | CANN 8.5+ | Experimental |
 
 To switch channels, update the `transfer_channel` field in your YAML configs:
@@ -33,13 +31,9 @@ To switch channels, update the `transfer_channel` field in your YAML configs:
 transfer_channel: "hccl"
 
 # CANN 8.5+ (recommended)
-transfer_channel: "hcomm_onesided"
-
-# CANN 8.5+ (experimental)
 transfer_channel: "hixl"
 ```
 
-The build system auto-detects the installed CANN version and compiles the correct backend. The provided example configs default to `hcomm_onesided`.
 
 #### Buffer Size
 
