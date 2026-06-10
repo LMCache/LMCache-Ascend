@@ -566,15 +566,30 @@ class AscendP2PBackend(P2PBackend):
             if not force_update and current is not None:
                 return
 
-            # Handshake (identical to base): exchange transfer-channel metadata
-            # and learn the peer's lookup URL.
             init_side_msg = P2PInitSideMsg()
-            init_ret_msg = await self.transfer_channel.async_lazy_init_peer_connection(
-                local_id=self.peer_init_url,
-                peer_id=target_peer_init_url,
-                peer_init_url=target_peer_init_url,
-                init_side_msg=init_side_msg,
-            )
+            try:
+                init_ret_msg = await asyncio.wait_for(
+                    self.transfer_channel.async_lazy_init_peer_connection(
+                        local_id=self.peer_init_url,
+                        peer_id=target_peer_init_url,
+                        peer_init_url=target_peer_init_url,
+                        init_side_msg=init_side_msg,
+                    ),
+                    timeout=self._lookup_timeout_s,
+                )
+            except asyncio.TimeoutError as e:
+                logger.warning(
+                    "Peer connection handshake to %s timed out after %.1fs; "
+                    "treating as connection failure.",
+                    target_peer_init_url,
+                    self._lookup_timeout_s,
+                )
+                # Re-raise as ConnectionError so the lookup retry/miss path
+                # handles it uniformly (a bare TimeoutError escaping the
+                # connection-error reconnect branch would not be caught).
+                raise ConnectionError(
+                    f"handshake to {target_peer_init_url} timed out"
+                ) from e
             assert isinstance(init_ret_msg, P2PInitSideRetMsg)
             peer_lookup_url = init_ret_msg.peer_lookup_url
 

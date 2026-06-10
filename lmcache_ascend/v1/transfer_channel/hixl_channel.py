@@ -171,49 +171,55 @@ class HixlChannel(BaseMultiBufferChannel):
             "connect",
         )
 
-        # Step 1: exchange engine IDs
-        init_req = HixlInitRequest(
-            local_id=local_id,
-            engine_id=self.hixl_wrapper.engine_id,
-        )
-        await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
-        resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
-        if not isinstance(resp, HixlInitResponse):
-            raise ValueError(f"Expected HixlInitResponse, got {type(resp).__name__}")
-        self._connect_to_peer(peer_id, resp.engine_id)
-
-        # Step 2: signal ready so server knows connect() finished
-        await init_tmp_socket.send(
-            msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
-        )
-        ready_bytes = await init_tmp_socket.recv()
-        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HixlMsg)
-        if isinstance(ready_resp, HixlReadyResponse) and not ready_resp.ok:
-            raise ConnectionError(
-                f"Server failed to complete handshake for peer {peer_id}"
+        try:
+            # Step 1: exchange engine IDs
+            init_req = HixlInitRequest(
+                local_id=local_id,
+                engine_id=self.hixl_wrapper.engine_id,
             )
+            await init_tmp_socket.send(msgspec.msgpack.encode(init_req))
+            resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
+            if not isinstance(resp, HixlInitResponse):
+                raise ValueError(
+                    f"Expected HixlInitResponse, got {type(resp).__name__}"
+                )
+            self._connect_to_peer(peer_id, resp.engine_id)
 
-        # Step 3: exchange buffer layout info
-        await init_tmp_socket.send(
-            msgspec.msgpack.encode(self._make_mem_info_request(local_id))
-        )
-        mem_resp = msgspec.msgpack.decode(await init_tmp_socket.recv(), type=HixlMsg)
-        if not isinstance(mem_resp, HixlMemInfoResponse):
-            raise ValueError(
-                f"Expected HixlMemInfoResponse, got {type(mem_resp).__name__}"
+            # Step 2: signal ready so server knows connect() finished
+            await init_tmp_socket.send(
+                msgspec.msgpack.encode(HixlReadyRequest(local_id=local_id))
             )
-        self._store_remote_mem_info(peer_id, mem_resp.buffers)
+            ready_bytes = await init_tmp_socket.recv()
+            ready_resp = msgspec.msgpack.decode(ready_bytes, type=HixlMsg)
+            if isinstance(ready_resp, HixlReadyResponse) and not ready_resp.ok:
+                raise ConnectionError(
+                    f"Server failed to complete handshake for peer {peer_id}"
+                )
 
-        # Step 4: optional side message
-        init_ret_msg: Optional[InitSideRetMsgBase] = None
-        if init_side_msg is not None:
-            init_ret_msg = await self.async_send_init_side_msg(
-                init_tmp_socket,
-                init_side_msg,
+            # Step 3: exchange buffer layout info
+            await init_tmp_socket.send(
+                msgspec.msgpack.encode(self._make_mem_info_request(local_id))
             )
+            mem_resp = msgspec.msgpack.decode(
+                await init_tmp_socket.recv(), type=HixlMsg
+            )
+            if not isinstance(mem_resp, HixlMemInfoResponse):
+                raise ValueError(
+                    f"Expected HixlMemInfoResponse, got {type(mem_resp).__name__}"
+                )
+            self._store_remote_mem_info(peer_id, mem_resp.buffers)
 
-        init_tmp_socket.close()
-        return init_ret_msg
+            # Step 4: optional side message
+            init_ret_msg: Optional[InitSideRetMsgBase] = None
+            if init_side_msg is not None:
+                init_ret_msg = await self.async_send_init_side_msg(
+                    init_tmp_socket,
+                    init_side_msg,
+                )
+
+            return init_ret_msg
+        finally:
+            init_tmp_socket.close()
 
     def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
         return receiver_or_sender_id in self.remote_engine_dict
