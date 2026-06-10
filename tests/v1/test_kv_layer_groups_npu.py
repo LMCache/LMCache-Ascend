@@ -247,8 +247,8 @@ def test_shared_storage_blob_padded_storage_uses_primary_view():
     )
     assert params["block_size"] == 128
     assert params["page_buffer_size"] == num_blocks * 128
-    assert params["k_extra"] == 512 * 2  # hidden bytes per slot (bf16)
-    assert params["v_extra"] == 512 * 2
+    assert params["num_planes"] == 1
+    assert params["per_plane_hidden_dim_bytes"] == [512 * 2]
 
 
 def test_layout_hint_block_stride_elems_on_shape_desc():

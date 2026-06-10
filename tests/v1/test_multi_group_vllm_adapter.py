@@ -710,18 +710,17 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
                 int(group_params.get("scheduler_slot_group", 0))
             ] * num_planes
         for g_start, g_end in chunk_ranges:
-            _, exp_starts, exp_counts = compute_mp_plane_launch_row(
+            exp_starts, exp_counts = compute_mp_plane_launch_row(
                 g_start,
                 g_end,
                 sched_groups,
                 slot_mappings_by_group=cpu_mappings,
                 prefixes_by_group=prefixes,
-                filtered_slot_mappings_npu=filtered_npu,
                 compress_ratios=ratios,
             )
-            if sum(exp_counts) == 0:
+            if exp_counts.sum().item() == 0:
                 assert (g_start, g_end, npu_g) not in meta
                 continue
             starts_npu, counts_npu = meta[(g_start, g_end, npu_g)]
-            assert starts_npu.cpu().tolist() == exp_starts
-            assert counts_npu.cpu().tolist() == exp_counts
+            assert starts_npu.cpu().tolist() == exp_starts.tolist()
+            assert counts_npu.cpu().tolist() == exp_counts.tolist()

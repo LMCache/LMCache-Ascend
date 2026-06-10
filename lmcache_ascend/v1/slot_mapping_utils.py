@@ -109,6 +109,18 @@ def iter_store_chunk_ranges(
     return ranges
 
 
+def compute_mp_plane_launch_ptrs(
+    sched_groups: Sequence[int],
+    filtered_slot_mappings_npu: Sequence[torch.Tensor],
+) -> torch.Tensor:
+    """Per-plane device pointers into dense filtered slot mappings."""
+    return torch.tensor(
+        [int(filtered_slot_mappings_npu[g].data_ptr()) for g in sched_groups],
+        dtype=torch.int64,
+        pin_memory=True,
+    )
+
+
 def compute_mp_plane_launch_row(
     g_start: int,
     g_end: int,
@@ -116,11 +128,9 @@ def compute_mp_plane_launch_row(
     *,
     slot_mappings_by_group: Sequence[torch.Tensor],
     prefixes_by_group: Sequence[torch.Tensor],
-    filtered_slot_mappings_npu: Sequence[torch.Tensor],
     compress_ratios: Sequence[int],
-) -> tuple[list[int], list[int], list[int]]:
-    """Per-plane ``ptrs`` / ``starts`` / ``counts`` for one multi-plane chunk."""
-    ptrs: list[int] = []
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-plane dense ``starts`` / ``counts`` for one multi-plane chunk."""
     starts: list[int] = []
     counts: list[int] = []
     for sched_g in sched_groups:
@@ -136,10 +146,12 @@ def compute_mp_plane_launch_row(
         dense_start, dense_count = dense_bounds_from_prefix(
             prefixes_by_group[sched_g], s0, s1
         )
-        ptrs.append(int(filtered_slot_mappings_npu[sched_g].data_ptr()))
         starts.append(dense_start)
         counts.append(dense_count)
-    return ptrs, starts, counts
+    return (
+        torch.tensor(starts, dtype=torch.int32, pin_memory=True),
+        torch.tensor(counts, dtype=torch.int32, pin_memory=True),
+    )
 
 
 def build_filtered_slot_mappings(

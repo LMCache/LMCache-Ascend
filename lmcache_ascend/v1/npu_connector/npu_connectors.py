@@ -32,37 +32,15 @@ from lmcache_ascend.v1.kv_format import (
 )
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.slot_mapping_utils import (
-    build_filtered_slot_mappings,
+    compute_mp_plane_launch_ptrs,
     compute_mp_plane_launch_row,
-    dense_bounds_from_prefix,
-    multi_plane_slot_slice_bounds,
 )
-
-
-def _filtered_slot_kwargs_for_groups(
-    slot_mappings_by_group: Union[tuple[torch.Tensor, ...], list[torch.Tensor]],
-    compress_ratios: tuple[int, ...],
-) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-    """Build filtered NPU mappings and CPU prefix arrays for transfer."""
-    dev = slot_mappings_by_group[0].device
-    filtered_cpu, prefixes = build_filtered_slot_mappings(
-        tuple(sm.cpu() for sm in slot_mappings_by_group),
-        compress_ratios=compress_ratios,
-    )
-    return tuple(f.to(dev) for f in filtered_cpu), prefixes
 from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
 import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
 _IS_310P = None
-
-
-# MLA/DSA tuple formats use the v2 multi-layer kernel (interleaved LMCache rows).
-# DSA-C8 uses ``multi_layer_kv_transfer_multi_plane`` (plane-block layout; scale bulk copy).
-def _kv_tuple_formats_use_multi_layer_transfer(fmt: KVCacheFormat) -> bool:
-    """Formats handled by ``multi_layer_kv_transfer_kernel_v2``, not single-layer."""
-    return fmt in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV)
 
 
 def _uses_multi_plane_kv_transfer(group_params: dict[str, Any]) -> bool:
@@ -88,9 +66,7 @@ def build_mp_launch_meta(
     assert connector.per_group_params is not None
     meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
     device = filtered_slot_mappings_npu[0].device
-    npu_ctx = (
-        torch.npu.stream(stream) if stream is not None else contextlib.nullcontext()
-    )
+    npu_ctx = torch.npu.stream(stream) if stream is not None else contextlib.nullcontext()
     with npu_ctx:
         for npu_g, group_params in enumerate(connector.per_group_params):
             if not _uses_multi_plane_kv_transfer(group_params):
@@ -98,113 +74,95 @@ def build_mp_launch_meta(
             num_planes = int(group_params["num_planes"])
             sched_groups = group_params.get("scheduler_groups_per_plane") or []
             if len(sched_groups) != num_planes:
-                sched_groups = [
-                    int(group_params.get("scheduler_slot_group", 0))
-                ] * num_planes
-            ptrs, _, _ = compute_mp_plane_launch_row(
-                0,
-                0,
-                sched_groups,
-                slot_mappings_by_group=slot_mappings_by_group,
-                prefixes_by_group=prefixes_by_group,
-                filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                compress_ratios=compress_ratios,
-            )
+                raise ValueError(
+                    f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
+                )
             bufs = connector._ensure_mp_launch_bufs(npu_g, num_planes, device)
-            bufs["ptrs"].copy_(
-                torch.tensor(ptrs, dtype=torch.int64, pin_memory=True),
-                non_blocking=True,
+            ptrs = compute_mp_plane_launch_ptrs(
+                sched_groups, filtered_slot_mappings_npu
             )
+            bufs["ptrs"].copy_(ptrs, non_blocking=True)
             for g_start, g_end in chunk_ranges:
-                _, starts, counts = compute_mp_plane_launch_row(
+                starts, counts = compute_mp_plane_launch_row(
                     g_start,
                     g_end,
                     sched_groups,
                     slot_mappings_by_group=slot_mappings_by_group,
                     prefixes_by_group=prefixes_by_group,
-                    filtered_slot_mappings_npu=filtered_slot_mappings_npu,
                     compress_ratios=compress_ratios,
                 )
-                if sum(counts) == 0:
+                if counts.sum().item() == 0:
+                    # No valid slots in this chunk, skip
                     continue
-                starts_cpu = torch.tensor(starts, dtype=torch.int32, pin_memory=True)
-                counts_cpu = torch.tensor(counts, dtype=torch.int32, pin_memory=True)
-                starts_npu = torch.empty(num_planes, dtype=torch.int32, device=device)
-                counts_npu = torch.empty(num_planes, dtype=torch.int32, device=device)
-                starts_npu.copy_(starts_cpu, non_blocking=True)
-                counts_npu.copy_(counts_cpu, non_blocking=True)
-                meta[(g_start, g_end, npu_g)] = (starts_npu, counts_npu)
+                meta[(g_start, g_end, npu_g)] = (
+                    starts.to(device, non_blocking=True),
+                    counts.to(device, non_blocking=True),
+                )
     return meta
 
 
-def _build_dsa_c8_multi_plane_group_params(
-    plane_bytes: Sequence[int],
+def _build_multi_plane_group_params(
     *,
-    block_size: int,
-    page_buffer_size: int,
-    num_tokens: int,
-    per_plane_block_sizes: Optional[Sequence[int]] = None,
-    per_plane_page_buffer_sizes: Optional[Sequence[int]] = None,
+    kv_format: KVCacheFormat,
+    plane_hidden_bytes: Optional[Sequence[int]] = None,
+    planes: Optional[Sequence[torch.Tensor]] = None,
+    block_size: Optional[int] = None,
+    page_buffer_size: Optional[int] = None,
+    scheduler_groups_per_plane: Optional[Sequence[int]] = None,
 ) -> dict[str, Any]:
-    """Build multi-plane kernel params for DSA-C8 (plane-block uint8 LMCache chunk)."""
-    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
-
-    pb = list(plane_bytes)
-    if len(pb) != 4:
-        raise ValueError(f"DSA-C8 expects 4 plane byte widths, got {len(pb)}")
-    n = 4
-    chunk_tokens = int(num_tokens)
-    row_bytes = _multi_plane_lmc_row_bytes(pb, chunk_tokens)
-    kb, vb, db, sb = pb
-    bs_list = (
-        [int(x) for x in per_plane_block_sizes]
-        if per_plane_block_sizes is not None
-        else [int(block_size)] * n
+    """Build multi-plane kernel params from plane tensors or byte widths."""
+    if (plane_hidden_bytes is None) == (planes is None):
+        raise ValueError("Exactly one of plane_hidden_bytes or planes is required")
+    bs_list: list[int] = []
+    pbs_list: list[int] = []
+    if planes is not None:
+        pb: list[int] = []
+        for t in planes:
+            bs = int(t.shape[1])
+            slots = int(t.shape[0]) * bs
+            bs_list.append(bs)
+            pbs_list.append(slots)
+            # Per-token byte width of this plane: total plane bytes / page slots.
+            pb.append(int(t.numel() * t.element_size()) // slots if slots else 0)
+    else:
+        pb = [int(x) for x in plane_hidden_bytes or ()]
+    n = len(pb)
+    if kv_format == KVCacheFormat.DSA_C8_KV and n != 4:
+        raise ValueError(f"DSA-C8 expects 4 plane byte widths, got {n}")
+    if not bs_list:
+        bs_list = [int(block_size or 0)] * n
+        pbs_list = [int(page_buffer_size or 0)] * n
+    sched_per_plane = (
+        [int(x) for x in scheduler_groups_per_plane]
+        if scheduler_groups_per_plane is not None
+        else ([0] * n if kv_format == KVCacheFormat.DSA_C8_KV else [])
     )
-    pbs_list = (
-        [int(x) for x in per_plane_page_buffer_sizes]
-        if per_plane_page_buffer_sizes is not None
-        else [int(page_buffer_size)] * n
-    )
-    return {
-        "kv_format": KVCacheFormat.DSA_C8_KV.value,
-        "use_mla": True,
+    params: dict[str, Any] = {
+        "kv_format": kv_format.value,
+        "use_mla": kv_format
+        in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV, KVCacheFormat.DSA_C8_KV),
         "num_planes": n,
         "per_plane_hidden_dim_bytes": pb,
         "per_plane_block_sizes": bs_list,
         "per_plane_page_buffer_sizes": pbs_list,
-        "scheduler_groups_per_plane": [0, 0, 0, 0],
-        "dsa_c8_plane_bytes": tuple(pb),
-        "block_size": int(block_size),
-        "page_buffer_size": int(page_buffer_size),
-        "k_extra": row_bytes,
-        "v_extra": vb,
-        "d_extra": db,
-        "s_extra": sb,
+        "scheduler_groups_per_plane": sched_per_plane,
+        "block_size": int(block_size if block_size is not None else bs_list[0]),
+        "page_buffer_size": int(
+            page_buffer_size if page_buffer_size is not None else pbs_list[0]
+        ),
     }
+    return params
 
 
-# KV caches may be plain tensors or tuples depending on the format; callers that
-# only need device/dtype/shape from a representative tensor should not branch everywhere.
-def _first_layer_tensor(
-    kv_caches: List[Union[torch.Tensor, tuple, list]],
-) -> torch.Tensor:
-    first = kv_caches[0]
-    if isinstance(first, (tuple, list)):
-        return first[0]
-    return first
-
-
-# Stage-2 NPU grouping after upstream KVLayerGroupsManager (or build_kv_layer_groups): shape-only
-# buckets can mix flat layers that map to different vLLM scheduler groups (DSv4: ~3 shape groups
-# -> 6 NPU groups). Split so each group has one scheduler_slot_group for store/load.
-# multi_layer_kv_transfer applies one slot index per token to every pointer in group_ptrs; without
-# split, _scheduler_slot_group_for_npu_group raises when layer_indices span multiple sched groups.
-# _invoke_multi_plane_kv_transfer slot concat does not replace this: perPlaneSlotOffsets are keyed
-# by planeIdx within one logical layer (bundled tuple), not by flat layer index across SEPARATE_KV
-# entries; num_layers>1 with num_planes=1 would reuse one slot stream for all layerIdx values.
-# TODO(marco): per-layer slot offsets in multi_layer kernel + MemoryObj/get_shapes plane-packed vs
-# nl-row layout if we want to fold some shape-merged groups without re-bundling flat tensors (§2.6.2).
+# Stage-2 NPU grouping after upstream KVLayerGroupsManager (or build_kv_layer_groups):
+# shape-only buckets can mix flat layers from different vLLM scheduler groups (DSv4:
+# ~3 shape groups -> 6 NPU groups). Split so each group has one scheduler_slot_group.
+# multi_layer_kv_transfer uses one slot_mapping for every pointer in group_ptrs; without
+# split, _scheduler_slot_group_for_npu_group raises when layer_indices span sched groups.
+# _invoke_multi_plane_kv_transfer per-plane slot ptrs/starts/counts do not replace this:
+# slots are keyed by planeIdx within one logical layer (bundled tuple), not by flat layer
+# index across SEPARATE_KV entries; num_layers>1 with num_planes=1 reuses one slot stream
+# for all layerIdx values.
 def _split_kv_layer_groups_by_scheduler_slot(
     manager: Any,
     sched_map: Sequence[int],
@@ -358,9 +316,7 @@ def _pointers_for_entry(
     raise ValueError(f"Unsupported KV cache entry type: {type(entry)}")
 
 
-# Each KV layer group needs its own block_size, page_buffer_size, and hidden-dim
-# byte counts passed to the transfer kernel; this centralises that per-format logic
-# so _initialize_group_pointers_and_params doesn't duplicate it for every format.
+# Multi-plane kernel params per KV layer group (mixed-format / DSv4 only).
 def _derive_group_params(
     entry: Union[torch.Tensor, Tuple[torch.Tensor, ...], list],
     entry_format: KVCacheFormat,
@@ -370,237 +326,79 @@ def _derive_group_params(
     layout_hints: Optional[dict] = None,
     num_tokens: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Kernel parameters for one KV layer group."""
+    """Build multi-plane kernel params for one mixed-format KV layer group."""
     nb = int(shape_desc.nb)
     bs = int(shape_desc.bs)
-    params: dict[str, Any] = {
-        "kv_format": entry_format.value,
-        "use_mla": entry_format
-        in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV, KVCacheFormat.DSA_C8_KV),
-        "block_size": bs,
-        "page_buffer_size": nb * bs,
-        "k_extra": 0,
-        "v_extra": 0,
-        "d_extra": 0,
-        "s_extra": 0,
-    }
-
-    if entry_format == KVCacheFormat.MULTI_PLANE_KV:
-        # Plane-tail layout: dense hd bytes per token, hd*T per plane block.
-        from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
-
-        planes = list(entry)
-        num_planes = len(planes)
-        plane_block_sizes: list[int] = []
-        plane_page_buffer_sizes: list[int] = []
-        plane_hidden_bytes: list[int] = []
-        sched_groups = (layout_hints or {}).get("layer_to_scheduler_groups", {})
-        layer_name = (layout_hints or {}).get("_current_layer_name")
-        sched_per_plane: list[int] = []
-        if layer_name and layer_name in sched_groups:
-            sched_per_plane = list(sched_groups[layer_name])
-        elif layout_hints and "scheduler_groups_per_plane" in layout_hints:
-            sched_per_plane = list(layout_hints["scheduler_groups_per_plane"])
-        for t in planes:
-            bs = int(t.shape[1])
-            slots = int(t.shape[0]) * bs
-            plane_block_sizes.append(bs)
-            plane_page_buffer_sizes.append(slots)
-            plane_hidden_bytes.append(
-                int(t.numel() * t.element_size()) // slots if slots else 0
-            )
-        params["num_planes"] = num_planes
-        params["per_plane_block_sizes"] = plane_block_sizes
-        params["per_plane_page_buffer_sizes"] = plane_page_buffer_sizes
-        params["per_plane_hidden_dim_bytes"] = plane_hidden_bytes
-        params["scheduler_groups_per_plane"] = sched_per_plane
-        params["block_size"] = plane_block_sizes[0]
-        params["page_buffer_size"] = plane_page_buffer_sizes[0]
-        chunk_tokens = int(num_tokens) if num_tokens is not None else 256
-        params["k_extra"] = _multi_plane_lmc_row_bytes(
-            plane_hidden_bytes, chunk_tokens
-        )
-    elif entry_format == KVCacheFormat.DSA_KV:
-        k_cache, v_cache, dsa_k_cache = entry
-        params["block_size"] = int(k_cache.shape[1])
-        slots = logical_page_slots or (
-            int(k_cache.shape[0]) * int(k_cache.shape[1])
-        )
-        params["page_buffer_size"] = slots
-        params["k_extra"] = int(k_cache.shape[-1])
-        params["v_extra"] = int(v_cache.shape[-1])
-        params["d_extra"] = int(dsa_k_cache.shape[-1])
-    elif entry_format == KVCacheFormat.DSA_C8_KV:
-        k_cache, v_cache, dsa_k_cache, dsa_k_scale = entry
-        planes = [k_cache, v_cache, dsa_k_cache, dsa_k_scale]
-        block_size = int(k_cache.shape[1])
-        slots = logical_page_slots or (
-            int(k_cache.shape[0]) * int(k_cache.shape[1])
-        )
-        plane_block_sizes: list[int] = []
-        plane_page_buffer_sizes: list[int] = []
-        plane_hidden_bytes: list[int] = []
-        for t in planes:
-            bs_p = int(t.shape[1])
-            slots_p = int(t.shape[0]) * bs_p
-            plane_block_sizes.append(bs_p)
-            plane_page_buffer_sizes.append(slots_p)
-            plane_hidden_bytes.append(
-                int(t.numel() * t.element_size()) // slots_p if slots_p else 0
-            )
-        chunk_tokens = int(num_tokens) if num_tokens is not None else 256
-        params.update(
-            _build_dsa_c8_multi_plane_group_params(
-                plane_hidden_bytes,
-                block_size=block_size,
-                page_buffer_size=slots,
-                num_tokens=chunk_tokens,
-                per_plane_block_sizes=plane_block_sizes,
-                per_plane_page_buffer_sizes=plane_page_buffer_sizes,
-            )
-        )
-    elif entry_format == KVCacheFormat.MLA_KV:
-        k_cache, v_cache = entry
-        params["block_size"] = int(k_cache.shape[1])
-        params["page_buffer_size"] = int(k_cache.shape[0]) * int(k_cache.shape[1])
-        params["k_extra"] = int(k_cache.shape[-1])
-        params["v_extra"] = int(v_cache.shape[-1])
-    elif entry_format == KVCacheFormat.SEPARATE_KV and _is_shared_storage_blob(entry):
-        primary = _get_primary_blob_view(entry)
-        num_blocks = int(primary.shape[0])
-        block_size = int(primary.shape[1])
-        if block_size <= 0 or num_blocks <= 0:
-            raise ValueError(
-                "Shared-storage KV blob requires a positive block_size from "
-                "the primary view tensor shape."
-            )
-        params["block_size"] = block_size
-        params["page_buffer_size"] = num_blocks * block_size
-        hidden_bytes = int(primary.numel() * primary.element_size()) // (
-            num_blocks * block_size
-        )
-        params["k_extra"] = hidden_bytes
-        params["v_extra"] = hidden_bytes
-    elif entry_format == KVCacheFormat.SEPARATE_KV:
-        if isinstance(entry, torch.Tensor):
-            k_cache = entry
-        elif isinstance(entry, (tuple, list)) and len(entry) == 2:
-            k_cache, v_cache = entry
-        elif isinstance(entry, (tuple, list)) and len(entry) > 0:
-            k_cache = entry[0]
-        else:
-            return params
-        if is_310p():
-            params["block_size"] = int(k_cache.shape[-2])
-            params["page_buffer_size"] = int(k_cache.shape[0]) * params["block_size"]
-        else:
-            params["block_size"] = int(k_cache.shape[1])
-            params["page_buffer_size"] = (
-                int(k_cache.shape[0]) * int(k_cache.shape[1])
-            )
-        hidden_bytes = int(k_cache.shape[-1]) * k_cache.element_size()
-        params["k_extra"] = hidden_bytes
-        if (
-            isinstance(entry, (tuple, list))
-            and len(entry) >= 2
-            and not _is_shared_storage_blob(entry)
-        ):
-            v_cache = entry[1]
-            params["v_extra"] = int(v_cache.shape[-1]) * v_cache.element_size()
-        else:
-            params["v_extra"] = hidden_bytes
-        if hidden_bytes > 0 and hidden_bytes < 16:
-            # Per-token MTE copy is under 32 bytes; route to processScalePlane.
-            params["s_extra"] = hidden_bytes
-    elif entry_format == KVCacheFormat.MERGED_KV:
-        tensor = entry
-        if is_310p():
-            params["block_size"] = int(tensor.shape[-2])
-            params["page_buffer_size"] = int(tensor.shape[1]) * params["block_size"]
-        else:
-            params["page_buffer_size"] = int(tensor.shape[1]) * int(tensor.shape[2])
-            params["block_size"] = int(tensor.shape[2])
-
-    if (
-        entry_format == KVCacheFormat.SEPARATE_KV
-        and int(getattr(shape_desc, "kv_size", 2)) == 1
-        and not (
-            isinstance(entry, (tuple, list))
-            and len(entry) >= 2
-            and not _is_shared_storage_blob(entry)
-            and int(params["v_extra"]) != int(params["k_extra"])
-        )
-    ):
-        params["num_planes"] = 1
-        params["per_plane_hidden_dim_bytes"] = [int(params["k_extra"])]
-        params["per_plane_block_sizes"] = [int(params["block_size"])]
-        params["per_plane_page_buffer_sizes"] = [int(params["page_buffer_size"])]
-
     stride_elems = int(getattr(shape_desc, "block_stride_elems", 0) or 0)
+
+    if entry_format in (KVCacheFormat.MULTI_PLANE_KV, KVCacheFormat.DSA_C8_KV):
+        build_kw: dict[str, Any] = {
+            "kv_format": entry_format,
+            "planes": list(entry),
+        }
+        if entry_format == KVCacheFormat.MULTI_PLANE_KV:
+            sched_groups = (layout_hints or {}).get("layer_to_scheduler_groups", {})
+            layer_name = (layout_hints or {}).get("_current_layer_name")
+            sched_per_plane: list[int] = []
+            if layer_name and layer_name in sched_groups:
+                sched_per_plane = list(sched_groups[layer_name])
+            elif layout_hints and "scheduler_groups_per_plane" in layout_hints:
+                sched_per_plane = list(layout_hints["scheduler_groups_per_plane"])
+            build_kw["scheduler_groups_per_plane"] = sched_per_plane
+        else:
+            k_cache = entry[0]
+            build_kw["block_size"] = int(k_cache.shape[1])
+            build_kw["page_buffer_size"] = logical_page_slots or (
+                int(k_cache.shape[0]) * build_kw["block_size"]
+            )
+        params = _build_multi_plane_group_params(**build_kw)
+    elif entry_format == KVCacheFormat.SEPARATE_KV:
+        kv_size = int(getattr(shape_desc, "kv_size", 2))
+        if _is_shared_storage_blob(entry):
+            primary = _get_primary_blob_view(entry)
+            num_blocks = int(primary.shape[0])
+            block_size = int(primary.shape[1])
+            if block_size <= 0 or num_blocks <= 0:
+                raise ValueError(
+                    "Shared-storage KV blob requires a positive block_size from "
+                    "the primary view tensor shape."
+                )
+            page_buffer_size = num_blocks * block_size
+            hidden_bytes = int(primary.numel() * primary.element_size()) // (
+                num_blocks * block_size
+            )
+        else:
+            if isinstance(entry, (tuple, list)):
+                if (len(entry) >= 2 and kv_size == 2) or not entry:
+                    raise ValueError(f"Unsupported SEPARATE_KV entry for multi-plane: {type(entry)}")
+                k_cache = entry[0]
+            elif isinstance(entry, torch.Tensor):
+                k_cache = entry
+            else:
+                raise ValueError(
+                    f"Unsupported SEPARATE_KV entry for multi-plane: {type(entry)}"
+                )
+            if is_310p():
+                block_size = int(k_cache.shape[-2])
+                page_buffer_size = int(k_cache.shape[0]) * block_size
+            else:
+                block_size = int(k_cache.shape[1])
+                page_buffer_size = int(k_cache.shape[0]) * block_size
+            hidden_bytes = int(k_cache.shape[-1]) * k_cache.element_size()
+        params = _build_multi_plane_group_params(
+            kv_format=entry_format,
+            plane_hidden_bytes=[hidden_bytes],
+            block_size=block_size,
+            page_buffer_size=page_buffer_size,
+        )
+    else:
+        raise ValueError(
+            f"Cannot derive multi-plane params for {entry_format.name} in mixed-format path"
+        )
+
     if stride_elems > 0:
         params["page_buffer_size"] = nb * bs
-
     return params
-
-
-def _init_mla_dsa_connector_dims(
-    connector: Any,
-    entry: Union[torch.Tensor, tuple, list],
-    kv_format: KVCacheFormat,
-    *,
-    logical_page_slots: Optional[int] = None,
-) -> Any:
-    """Derive MLA/DSA/DSA-C8 connector fields from the first layer via ``_derive_group_params``."""
-    k0 = entry[0] if isinstance(entry, (tuple, list)) else entry
-    sd = SimpleNamespace(
-        nb=int(k0.shape[0]), bs=int(k0.shape[1]), block_stride_elems=0
-    )
-    params = _derive_group_params(
-        entry, kv_format, sd, logical_page_slots=logical_page_slots
-    )
-    connector.block_size = int(params["block_size"])
-    connector.page_buffer_size = int(params["page_buffer_size"])
-    k_cache, v_cache = entry[0], entry[1]
-    connector.kv_lora_rank = int(k_cache.shape[-1])
-    connector.qk_rope_head_dim = int(v_cache.shape[-1])
-    connector.dsa_head_dim = (
-        int(entry[2].shape[-1]) if len(entry) >= 3 else 0
-    )
-    connector.dsa_c8_plane_bytes = (
-        tuple(params["dsa_c8_plane_bytes"])
-        if kv_format == KVCacheFormat.DSA_C8_KV
-        else (0, 0, 0, 0)
-    )
-    return k0.shape
-
-
-# The layerwise connector transfers one layer at a time and needs a device-resident
-# pointer tensor for that single layer; this builds it without the full flat table.
-def _layer_paged_kv_ptrs_tensor(
-    layer_cache: Union[torch.Tensor, tuple, list], kv_format: KVCacheFormat
-) -> torch.Tensor:
-    """Build a 1-D int64 pointer tensor on the same device as the paged KV tensors."""
-    if kv_format in (
-        KVCacheFormat.MLA_KV,
-        KVCacheFormat.DSA_KV,
-        KVCacheFormat.DSA_C8_KV,
-    ):
-        if not isinstance(layer_cache, (tuple, list)):
-            raise ValueError(
-                f"_layer_paged_kv_ptrs_tensor: {kv_format.name} expects a tuple entry"
-            )
-        ptrs = _pointers_for_entry(layer_cache, kv_format)
-        dev = layer_cache[0].device
-        return torch.tensor(ptrs, dtype=torch.int64, device=dev)
-    if kv_format == KVCacheFormat.SEPARATE_KV and _is_shared_storage_blob(layer_cache):
-        blob_ptr = layer_cache[0].untyped_storage().data_ptr()
-        dev = layer_cache[0].device
-        return torch.tensor(
-            [blob_ptr, blob_ptr],
-            dtype=torch.int64,
-            device=dev,
-        )
-    raise ValueError(f"_layer_paged_kv_ptrs_tensor: unexpected format {kv_format}")
 
 
 def is_310p():
@@ -611,119 +409,6 @@ def is_310p():
 
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
-
-
-class _V2KVTransferMixin:
-    """Shared v2 kernel plane extras and staging hidden dim for paged NPU connectors."""
-
-    kv_format: KVCacheFormat
-    kv_lora_rank: int
-    qk_rope_head_dim: int
-    dsa_head_dim: int
-    dsa_c8_plane_bytes: tuple[int, int, int, int]
-
-    @property
-    def v2_plane_extras(self) -> tuple[int, int, int, int]:
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            return self.dsa_c8_plane_bytes
-        return (self.kv_lora_rank, self.qk_rope_head_dim, self.dsa_head_dim, 0)
-
-    @property
-    def v2_staging_hidden_dim(self) -> int:
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            # Plane-block row width; get_shape recomputes with num_tokens for alignment.
-            return sum(self.dsa_c8_plane_bytes)
-        if self.kv_format == KVCacheFormat.DSA_KV:
-            return self.kv_lora_rank + self.qk_rope_head_dim + self.dsa_head_dim
-        return self.kv_lora_rank + self.qk_rope_head_dim
-
-    def _invoke_multi_plane_kv_transfer(
-        self,
-        *,
-        mem_tensor: torch.Tensor,
-        group_ptrs: torch.Tensor,
-        group_params: dict[str, Any],
-        slot_mappings_by_group: Union[tuple[torch.Tensor, ...], list[torch.Tensor]],
-        filtered_slot_mappings_npu: tuple[torch.Tensor, ...],
-        slot_valid_prefix_by_group: tuple[torch.Tensor, ...],
-        compress_ratios: tuple[int, ...],
-        g_start: int,
-        g_end: int,
-        is_store: bool,
-        npu_group_idx: int,
-        mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
-        | None = None,
-    ) -> None:
-        """One logical kernel op per bundled multi-spec layer (per-plane transfers)."""
-        if (
-            mem_tensor.dtype != torch.uint8
-            and int(group_params.get("num_planes", 0)) > 0
-        ):
-            mem_tensor = mem_tensor.view(torch.uint8)
-        num_planes = int(group_params["num_planes"])
-        sched_groups = group_params.get("scheduler_groups_per_plane") or []
-        if len(sched_groups) != num_planes:
-            sched_groups = [int(group_params.get("scheduler_slot_group", 0))] * num_planes
-
-        device = filtered_slot_mappings_npu[0].device
-        bufs = self._ensure_mp_launch_bufs(npu_group_idx, num_planes, device)
-        key = (g_start, g_end, npu_group_idx)
-        if mp_launch_meta is not None and key in mp_launch_meta:
-            starts_npu, counts_npu = mp_launch_meta[key]
-        else:
-            ptrs, starts, counts = compute_mp_plane_launch_row(
-                g_start,
-                g_end,
-                sched_groups,
-                slot_mappings_by_group=slot_mappings_by_group,
-                prefixes_by_group=slot_valid_prefix_by_group,
-                filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                compress_ratios=compress_ratios,
-            )
-            if sum(counts) == 0:
-                return
-            bufs["ptrs"].copy_(
-                torch.tensor(ptrs, dtype=torch.int64, pin_memory=True),
-                non_blocking=True,
-            )
-            bufs["starts"].copy_(
-                torch.tensor(starts, dtype=torch.int32, pin_memory=True),
-                non_blocking=True,
-            )
-            bufs["counts"].copy_(
-                torch.tensor(counts, dtype=torch.int32, pin_memory=True),
-                non_blocking=True,
-            )
-            starts_npu, counts_npu = bufs["starts"], bufs["counts"]
-
-        plane_hidden_bytes = group_params["per_plane_hidden_dim_bytes"]
-        max_hidden_dim_bytes = max(plane_hidden_bytes)
-        _materialize_mp_device_params(group_params, self.kvcaches_device)
-        mp_device = group_params.get("mp_device")
-        if mp_device is None:
-            raise RuntimeError(
-                "multi-plane KV transfer requires materialized mp_device params"
-            )
-        pbs = mp_device["pbs"]
-        bss = mp_device["bss"]
-        hds = mp_device["hds"]
-        lmc_row_offsets = mp_device["lmc_row_offsets"]
-
-        lmc_ops.multi_layer_kv_transfer_multi_plane(
-            mem_tensor,
-            group_ptrs,
-            bufs["ptrs"],
-            starts_npu,
-            counts_npu,
-            pbs,
-            bss,
-            hds,
-            max_hidden_dim_bytes,
-            self.kvcaches_device,
-            is_store,
-            num_planes,
-            lmc_row_offsets,
-        )
 
 
 class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
@@ -741,13 +426,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
         self.use_mla = bool(kwargs.get("use_mla", False))
         self.fused_rotary_emb: Any = None
-        # Populated for MLA/DSA/DSA-C8 buffer sizing (transfer uses paged layerwise / V2).
-        self.kv_lora_rank: int = 0
-        self.qk_rope_head_dim: int = 0
-        self.dsa_head_dim: int = 0
-        self.dsa_c8_plane_bytes: tuple[int, int, int, int] = (0, 0, 0, 0)
-        self.page_buffer_size: int = 0
-        self.block_size: int = 0
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -799,33 +477,14 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
                 # Flash Attention: [2, num_blocks, block_size, num_heads, head_size]
                 k_cache_shape_per_layer = first_layer_cache[0].shape
-            elif self.kv_format in (
-                KVCacheFormat.MLA_KV,
-                KVCacheFormat.DSA_KV,
-                KVCacheFormat.DSA_C8_KV,
-            ):
-                k_cache_shape_per_layer = _init_mla_dsa_connector_dims(
-                    self, first_layer_cache, self.kv_format
-                )
             else:
                 raise ValueError(f"Unsupported KV cache format: {self.kv_format}")
 
             self.vllm_two_major = True
 
             max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
-            if self.kv_format in (
-                KVCacheFormat.MLA_KV,
-                KVCacheFormat.DSA_KV,
-                KVCacheFormat.DSA_C8_KV,
-            ):
-                if not isinstance(first_layer_cache, (tuple, list)):
-                    raise TypeError("Expected tuple/list KV cache for MLA/DSA formats.")
-                gpu_buffer_size = sum(
-                    int(t.numel()) * int(t.element_size()) for t in first_layer_cache
-                )
-            else:
-                num_elements = k_cache_shape_per_layer.numel() * 2
-                gpu_buffer_size = num_elements * self.element_size
+            num_elements = k_cache_shape_per_layer.numel() * 2
+            gpu_buffer_size = num_elements * self.element_size
 
             logger.info(
                 f"Lazily initializing GPU buffer:\n"
@@ -928,13 +587,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         slot_mapping_full, num_all_tokens = self._get_full_slot_mapping(
             slot_mapping, starts, ends, mode="slice"
         )
-
-        if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-            raise NotImplementedError(
-                "VLLMBufferLayerwiseNPUConnector does not support MLA/DSA/DSA-C8 "
-                "(single-layer kernels accept only MERGED_KV/SEPARATE_KV). Use "
-                "VLLMPagedMemLayerwiseNPUConnector or VLLMPagedMemNPUConnectorV2."
-            )
 
         # compute gap positions
         gap_mask = torch.ones(
@@ -1076,13 +728,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         """
         slot_mapping = self._prepare_transfer_context(kwargs)
 
-        if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-            raise NotImplementedError(
-                "VLLMBufferLayerwiseNPUConnector does not support MLA/DSA/DSA-C8 "
-                "(single-layer kernels accept only MERGED_KV/SEPARATE_KV). Use "
-                "VLLMPagedMemLayerwiseNPUConnector or VLLMPagedMemNPUConnectorV2."
-            )
-
         buf_start = 0
         buf_starts_ends = []
         old_positions_chunks = []
@@ -1146,7 +791,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         yield
 
 
-class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2):
+class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     def __init__(
         self,
         hidden_dim_size: int,
@@ -1238,16 +883,12 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         connector.metadata = metadata
         return connector
 
-    # The NPU group index does not correspond 1:1 to the vLLM scheduler group
-    # index (e.g. 6 NPU groups vs 11 scheduler groups on DSv4). Each kernel
-    # call needs the correct slot_mapping, so we resolve the scheduler group
-    # from the per-layer map and verify the flatten contract (one sched group
-    # per NPU group).
     def _scheduler_slot_group_for_npu_group(
         self,
         group_idx: int,
         layer_indices: list[int],
     ) -> int:
+        """Map one NPU KV layer group to its IE scheduler slot group index."""
         hints = self.layout_hints or {}
         sched_map = hints.get("scheduler_group_by_flat_layer")
         if sched_map is not None:
@@ -1262,6 +903,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         return primary
 
     def _compress_ratios_by_group(self) -> tuple[int, ...]:
+        """Per-scheduler-group LMCache compress ratios from layout hints."""
         hints = self.layout_hints or {}
         ratios = hints.get("compress_ratios_by_group")
         if ratios:
@@ -1339,6 +981,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         self._sync_logical_page_slots_from_manager()
 
     def _sync_logical_page_slots_from_manager(self) -> None:
+        """Set ``_logical_page_slots`` when the manager uses block_stride_elems."""
         if (
             self.metadata is not None
             and self.metadata.kv_layer_groups_manager is not None
@@ -1348,15 +991,21 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             if getattr(sd, "block_stride_elems", 0) > 0:
                 self._logical_page_slots = int(sd.nb) * int(sd.bs)
 
-    # For each NPU group, build a device-resident pointer tensor and kernel params.
     def _reset_mp_launch_bufs(self) -> None:
+        """Drop cached per-group multi-plane launch buffers (ptrs/starts/counts)."""
         self._mp_launch_bufs = None
 
     def _ensure_mp_launch_bufs(
         self, npu_group_idx: int, num_planes: int, device: torch.device
     ) -> dict[str, torch.Tensor]:
-        if self._mp_launch_bufs is None:
-            n = len(self.per_group_params) if self.per_group_params else npu_group_idx + 1
+        """Get or allocate reusable NPU launch buffers for one multi-plane group."""
+        if getattr(self, "_mp_launch_bufs", None) is None:
+            per_group_params = getattr(self, "per_group_params", None)
+            n = (
+                len(per_group_params)
+                if per_group_params
+                else npu_group_idx + 1
+            )
             self._mp_launch_bufs = [None] * n
         while len(self._mp_launch_bufs) <= npu_group_idx:
             self._mp_launch_bufs.append(None)
@@ -1369,6 +1018,89 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             }
             self._mp_launch_bufs[npu_group_idx] = bufs
         return bufs
+
+    def _invoke_multi_plane_kv_transfer(
+        self,
+        *,
+        mem_tensor: torch.Tensor,
+        group_ptrs: torch.Tensor,
+        group_params: dict[str, Any],
+        slot_mappings_by_group: Union[tuple[torch.Tensor, ...], list[torch.Tensor]],
+        filtered_slot_mappings_npu: tuple[torch.Tensor, ...],
+        slot_valid_prefix_by_group: tuple[torch.Tensor, ...],
+        compress_ratios: tuple[int, ...],
+        g_start: int,
+        g_end: int,
+        is_store: bool,
+        npu_group_idx: int,
+        mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
+        | None = None,
+    ) -> None:
+        """One logical kernel op per bundled multi-spec layer (per-plane transfers)."""
+        if (
+            mem_tensor.dtype != torch.uint8
+            and int(group_params.get("num_planes", 0)) > 0
+        ):
+            mem_tensor = mem_tensor.view(torch.uint8)
+        num_planes = int(group_params["num_planes"])
+        sched_groups = group_params.get("scheduler_groups_per_plane") or []
+        if len(sched_groups) != num_planes:
+            raise ValueError(
+                f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
+            )
+
+        device = filtered_slot_mappings_npu[0].device
+        bufs = self._ensure_mp_launch_bufs(npu_group_idx, num_planes, device)
+        key = (g_start, g_end, npu_group_idx)
+        if mp_launch_meta is not None and key in mp_launch_meta:
+            starts_npu, counts_npu = mp_launch_meta[key]
+        else:
+            starts, counts = compute_mp_plane_launch_row(
+                g_start,
+                g_end,
+                sched_groups,
+                slot_mappings_by_group=slot_mappings_by_group,
+                prefixes_by_group=slot_valid_prefix_by_group,
+                compress_ratios=compress_ratios,
+            )
+            if counts.sum().item() == 0:
+                return
+            ptrs = compute_mp_plane_launch_ptrs(
+                    sched_groups, filtered_slot_mappings_npu
+            )
+            bufs["ptrs"].copy_(ptrs, non_blocking=True)
+            bufs["starts"].copy_(starts, non_blocking=True)
+            bufs["counts"].copy_(counts, non_blocking=True)
+            starts_npu, counts_npu = bufs["starts"], bufs["counts"]
+
+        plane_hidden_bytes = group_params["per_plane_hidden_dim_bytes"]
+        max_hidden_dim_bytes = max(plane_hidden_bytes)
+        _materialize_mp_device_params(group_params, self.kvcaches_device)
+        mp_device = group_params.get("mp_device")
+        if mp_device is None:
+            raise RuntimeError(
+                "multi-plane KV transfer requires materialized mp_device params"
+            )
+        pbs = mp_device["pbs"]
+        bss = mp_device["bss"]
+        hds = mp_device["hds"]
+        lmc_row_offsets = mp_device["lmc_row_offsets"]
+
+        lmc_ops.multi_layer_kv_transfer_multi_plane(
+            mem_tensor,
+            group_ptrs,
+            bufs["ptrs"],
+            starts_npu,
+            counts_npu,
+            pbs,
+            bss,
+            hds,
+            max_hidden_dim_bytes,
+            self.kvcaches_device,
+            is_store,
+            num_planes,
+            lmc_row_offsets,
+        )
 
     def _initialize_group_pointers_and_params(
         self, kv_caches: List[torch.Tensor]
@@ -1436,6 +1168,18 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             params["scheduler_slot_group"] = self._scheduler_slot_group_for_npu_group(
                 group_idx, indices
             )
+            if (
+                not params.get("scheduler_groups_per_plane")
+                and int(params.get("num_planes", 0)) > 0
+            ):
+                params["scheduler_groups_per_plane"] = [
+                    params["scheduler_slot_group"]
+                ] * int(params["num_planes"])
+            if self._is_mixed_format and not int(params.get("num_planes", 0)):
+                raise ValueError(
+                    f"Group {group_idx}: cannot derive multi-plane params for "
+                    f"{entry_format.name}"
+                )
             params["layer_indices"] = list(indices)
             group_params.append(params)
 
@@ -1447,9 +1191,29 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         )
 
 
+    def _needs_per_group_pointers(self, kv_caches: List[torch.Tensor]) -> bool:
+        """True when store/retrieve uses per-group pointer tables."""
+        if self._is_mixed_format or self.kv_format == KVCacheFormat.DSA_C8_KV:
+            return True
+        if (self.layout_hints or {}).get("bundle_multi_spec"):
+            return True
+        if self.kv_format == KVCacheFormat.SEPARATE_KV and isinstance(
+            kv_caches[0], torch.Tensor
+        ):
+            return True
+        manager = (
+            self.metadata.kv_layer_groups_manager
+            if self.metadata is not None
+            else None
+        )
+        return manager is not None and len(manager.kv_layer_groups) > 1
+
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
-        ref_tensor = _first_layer_tensor(kv_caches)
-        self.kvcaches_device = ref_tensor.device
+        first_entry = kv_caches[0]
+        if isinstance(first_entry, (tuple, list)):
+            self.kvcaches_device = first_entry[0].device
+        else:
+            self.kvcaches_device = first_entry.device
 
         assert self.kvcaches_device.type == "npu", "The device should be Ascend NPU."
         idx = self.kvcaches_device.index
@@ -1467,21 +1231,15 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                 "Unable to determine the format of input kv_caches."
             )
 
-        # Detect mixed-format entries (e.g. DSA 3-tuples alongside Mamba
-        # 8-element state lists). A flat pointer table assumes one
-        # KVCacheFormat for every layer, which is impossible here.
         tuple_lens = set()
         for entry in kv_caches:
             if isinstance(entry, (tuple, list)):
                 tuple_lens.add(len(entry))
             else:
                 tuple_lens.add(0)
-        is_mixed_format = len(tuple_lens) > 1
-        self._is_mixed_format = is_mixed_format
+        self._is_mixed_format = len(tuple_lens) > 1
 
-        # Mixed format: skip flat pointer table entirely; only per-group
-        # pointers are used for store/retrieve.
-        if is_mixed_format:
+        if self._is_mixed_format:
             logger.info(
                 "Mixed KV entry lengths %s detected; skipping flat pointer "
                 "table (per-group pointers will be used instead)",
@@ -1500,13 +1258,36 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             self._initialize_group_pointers_and_params(kv_caches)
             return self.kv_cache_pointers_on_gpu[idx]
 
-        # --- Uniform format from here on: build flat pointer table ---
         self.kv_size = self.kv_format.get_kv_size()
-        pointers_list: list[int] = []
+        pointers_list = []
 
-        if self.kv_format == KVCacheFormat.SEPARATE_KV:
+        if self.kv_format == KVCacheFormat.DSA_KV:
+            for cache_tuple in kv_caches:
+                k_cache, v_cache, dsa_k_cache = cache_tuple
+                pointers_list.append(k_cache.data_ptr())
+                pointers_list.append(v_cache.data_ptr())
+                pointers_list.append(dsa_k_cache.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers * self.kv_size, dtype=torch.int64, device="cpu"
+            )
+        elif self.kv_format == KVCacheFormat.MLA_KV:
+            for k_cache, v_cache in kv_caches:
+                pointers_list.append(k_cache.data_ptr())
+                pointers_list.append(v_cache.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers * self.kv_size, dtype=torch.int64, device="cpu"
+            )
+        elif self.kv_format == KVCacheFormat.DSA_C8_KV:
+            for entry in kv_caches:
+                pointers_list.extend(_pointers_for_entry(entry, self.kv_format))
+
+            self.kv_cache_pointers = torch.empty(
+                len(pointers_list), dtype=torch.int64, device="cpu"
+            )
+        elif self.kv_format == KVCacheFormat.SEPARATE_KV:
             if kv_caches and isinstance(kv_caches[0], torch.Tensor):
-                # Flattened multi-spec page buffers: one tensor per logical layer.
                 self.kv_size = 1
                 flat_layer_count = len(kv_caches)
                 if self.num_layers != flat_layer_count:
@@ -1517,66 +1298,68 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                         flat_layer_count,
                     )
                     self.num_layers = flat_layer_count
+                for entry in kv_caches:
+                    pointers_list.extend(_pointers_for_entry(entry, self.kv_format))
             else:
                 self.kv_size = 2
-        elif self.kv_format == KVCacheFormat.MERGED_KV:
+                for k, v in kv_caches:
+                    pointers_list.append(k.data_ptr())
+                    pointers_list.append(v.data_ptr())
+
+            self.kv_cache_pointers = torch.empty(
+                len(pointers_list), dtype=torch.int64, device="cpu"
+            )
+        else:
             self.kv_size = 1
-            flat_layer_count = len(kv_caches)
-            if self.num_layers != flat_layer_count:
-                logger.info(
-                    "Adjusting connector num_layers from metadata count %d "
-                    "to flat KV cache count %d",
-                    self.num_layers,
-                    flat_layer_count,
-                )
-                self.num_layers = flat_layer_count
+            if self.kv_format == KVCacheFormat.MERGED_KV:
+                flat_layer_count = len(kv_caches)
+                if self.num_layers != flat_layer_count:
+                    logger.info(
+                        "Adjusting connector num_layers from metadata count %d "
+                        "to flat KV cache count %d",
+                        self.num_layers,
+                        flat_layer_count,
+                    )
+                    self.num_layers = flat_layer_count
+            pointers_list = [t.data_ptr() for t in kv_caches]
 
-        for entry in kv_caches:
-            pointers_list.extend(_pointers_for_entry(entry, self.kv_format))
+            self.kv_cache_pointers = torch.empty(
+                self.num_layers, dtype=torch.int64, device="cpu"
+            )
 
-        self.kv_cache_pointers = torch.empty(
-            len(pointers_list), dtype=torch.int64, device="cpu"
-        )
         self.kv_cache_pointers.numpy()[:] = pointers_list
 
         self.kv_cache_pointers_on_gpu[idx] = torch.empty(
             self.kv_cache_pointers.shape, dtype=torch.int64, device=self.kvcaches_device
         )
+
         self.kv_cache_pointers_on_gpu[idx].copy_(self.kv_cache_pointers)
 
-        # --- Extract connector-level kernel params from first layer ---
-        first_entry = kv_caches[0]
-        if isinstance(first_entry, (tuple, list)) and _is_shared_storage_blob(
-            first_entry
-        ):
-            # Shared-storage blob: multiple dtype views over one allocation.
-            first_tensor = first_entry[0]
-        elif self.kv_format.is_tuple_format():
-            # MLA/DSA/DSA-C8/SEPARATE tuple: first element is the k_cache tensor.
-            first_tensor = kv_caches[0][0]
-        else:
-            # Single tensor per layer (MERGED_KV or flattened page buffer).
-            first_tensor = kv_caches[0]
+        first_tensor = (
+            kv_caches[0][0] if self.kv_format.is_tuple_format() else kv_caches[0]
+        )
 
-        if self.kv_format in (
+        if self.use_mla or self.kv_format in (
             KVCacheFormat.MLA_KV,
             KVCacheFormat.DSA_KV,
-            KVCacheFormat.DSA_C8_KV,
         ):
-            _init_mla_dsa_connector_dims(
-                self,
-                kv_caches[0],
-                self.kv_format,
-                logical_page_slots=self._logical_page_slots,
-            )
+            if self.kv_format == KVCacheFormat.MLA_KV:
+                k_cache, v_cache = kv_caches[0]
+                self.page_buffer_size = k_cache.shape[0] * k_cache.shape[1]
+                self.kv_lora_rank = k_cache.shape[-1]
+                self.qk_rope_head_dim = v_cache.shape[-1]
+            elif self.kv_format == KVCacheFormat.DSA_KV:
+                k_cache, v_cache, dsa_k_cache = kv_caches[0]
+                self.page_buffer_size = k_cache.shape[0] * k_cache.shape[1]
+                self.kv_lora_rank = k_cache.shape[-1]
+                self.qk_rope_head_dim = v_cache.shape[-1]
+                self.dsa_head_dim = dsa_k_cache.shape[-1]
         else:
-            # Non-MLA/DSA formats: derive block_size and page_buffer_size from tensor shape.
             if self.kv_format == KVCacheFormat.SEPARATE_KV:
+                first_entry = kv_caches[0]
                 if isinstance(first_entry, (tuple, list)) and _is_shared_storage_blob(
                     first_entry
                 ):
-                    # Compress layers (DSv4): bf16+int8 views over one int8 blob;
-                    # derive geometry from the primary (largest-byte) view.
                     primary = _get_primary_blob_view(first_entry)
                     effective_bs = int(primary.shape[1])
                     num_blocks = int(primary.shape[0])
@@ -1585,23 +1368,10 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                             "Shared-storage KV blob requires a positive block_size "
                             "from the primary view tensor shape."
                         )
-                    hidden_per_token = int(primary.numel()) // (
-                        num_blocks * effective_bs
-                    )
-                    page_bytes = hidden_per_token * effective_bs
                     self.block_size = effective_bs
                     self.page_buffer_size = num_blocks * effective_bs
-                    logger.debug(
-                        "Shared-storage blob: num_blocks=%s effective_bs=%s "
-                        "hidden_per_token=%s page_bytes=%s (primary_dtype=%s)",
-                        num_blocks,
-                        effective_bs,
-                        hidden_per_token,
-                        page_bytes,
-                        primary.dtype,
-                    )
                 else:
-                    # Standard separate (k, v) pair with independent allocations.
+                    # kv_caches[0]: [tuple(k,v)]
                     # 310P: [num_blocks, num_kv_heads * head_size // 16, block_size, 16]
                     # 910B: [num_blocks, block_size, num_kv_heads, head_size]
                     assert first_tensor.dim() >= 2
@@ -1609,12 +1379,12 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                         self.block_size = first_tensor.shape[-2]
                         self.page_buffer_size = first_tensor.shape[0] * self.block_size
                     else:
-                        self.block_size = int(first_tensor.shape[1])
                         self.page_buffer_size = (
-                            first_tensor.shape[0] * self.block_size
+                            first_tensor.shape[0] * first_tensor.shape[1]
                         )
 
             elif self.kv_format == KVCacheFormat.MERGED_KV:
+                # kv_caches[0].shape: [2, num_pages, page_size, num_heads, head_size]
                 # 310P: [2, num_blocks, num_kv_heads * head_size // 16, block_size, 16]
                 # 910B: [2, num_blocks, block_size, num_kv_heads, head_size]
                 assert first_tensor.dim() == 5
@@ -1622,13 +1392,41 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     self.block_size = first_tensor.shape[-2]
                     self.page_buffer_size = first_tensor.shape[1] * self.block_size
                 else:
-                    self.block_size = int(first_tensor.shape[2])
                     self.page_buffer_size = (
-                        first_tensor.shape[1] * self.block_size
+                        first_tensor.shape[1] * first_tensor.shape[2]
                     )
 
-        self._initialize_group_pointers_and_params(kv_caches)
+        if self._needs_per_group_pointers(kv_caches):
+            self._initialize_group_pointers_and_params(kv_caches)
+        if self.kv_format == KVCacheFormat.DSA_C8_KV:
+            self.dsa_c8_plane_bytes = tuple(
+                self._dsa_c8_group_params(kv_caches)[
+                    "per_plane_hidden_dim_bytes"
+                ]
+            )
         return self.kv_cache_pointers_on_gpu[idx]
+
+    def _dsa_c8_group_params(
+        self,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+    ) -> dict[str, Any]:
+        """Multi-plane kernel params for uniform DSA-C8 (per-group or legacy)."""
+        if self.per_group_params:
+            return self.per_group_params[0]
+        caches = kv_caches if kv_caches is not None else self.kvcaches
+        assert caches is not None
+        entry = caches[0]
+        k_cache = entry[0]
+        return _derive_group_params(
+            entry,
+            KVCacheFormat.DSA_C8_KV,
+            SimpleNamespace(
+                nb=int(k_cache.shape[0]),
+                bs=int(k_cache.shape[1]),
+                block_stride_elems=0,
+            ),
+            logical_page_slots=self._logical_page_slots,
+        )
 
     def to_gpu_310p(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
@@ -1751,21 +1549,6 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
-    def _validate_memory_format(self, memory_obj: MemoryObj) -> None:
-        """Raise ValueError if memory_obj format doesn't match the connector's KV format."""
-        if (
-            (self.use_mla and memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT)
-            or (self.kv_format == KVCacheFormat.DSA_C8_KV and memory_obj.tensor.dtype != torch.uint8)
-            or (not self.use_mla and self.kv_format != KVCacheFormat.DSA_C8_KV
-                and memory_obj.metadata.fmt != MemoryFormat.KV_2LTD)
-        ):
-            raise ValueError(
-                f"Memory format mismatch: use_mla={self.use_mla}, "
-                f"kv_format={self.kv_format}, "
-                f"mem_fmt={memory_obj.metadata.fmt}, "
-                f"tensor_dtype={memory_obj.tensor.dtype}"
-            )
-
     def to_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
         """Expect a kwarg 'kvcaches' which is a nested tuple of K and V tensors.
         The kvcaches should correspond to the "WHOLE token sequence".
@@ -1796,39 +1579,35 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
 
         kv_cache_pointers = self._initialize_pointers(self.kvcaches)
 
-        if self._try_multi_group_dispatch(
-            memory_obj, start, end, kwargs, is_store=False,
+        if self._try_multi_plane_dispatch(
+            memory_obj,
+            start,
+            end,
+            kwargs,
+            is_store=False,
+            kv_cache_pointers=kv_cache_pointers,
+            slot_mapping=slot_mapping,
         ):
             return
 
+        # After multi-plane dispatch: per-group MemoryObjs use
+        # get_tensor(i), not memory_obj.tensor (group-0 view only).
+        # Only the flat single-group fallback below needs .tensor.
         assert memory_obj.tensor is not None
-        self._validate_memory_format(memory_obj)
 
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            filtered_npu, prefixes = _filtered_slot_kwargs_for_groups(
-                (slot_mapping,), (1,)
-            )
-            self._invoke_multi_plane_kv_transfer(
-                mem_tensor=memory_obj.tensor,
-                group_ptrs=kv_cache_pointers,
-                group_params=_build_dsa_c8_multi_plane_group_params(
-                    self.dsa_c8_plane_bytes,
-                    block_size=int(self.block_size),
-                    page_buffer_size=int(self.page_buffer_size),
-                    num_tokens=end - start,
-                ),
-                slot_mappings_by_group=(slot_mapping,),
-                filtered_slot_mappings_npu=filtered_npu,
-                slot_valid_prefix_by_group=prefixes,
-                compress_ratios=(1,),
-                g_start=start,
-                g_end=end,
-                is_store=False,
-                npu_group_idx=0,
-            )
-            return
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    " order to be processed by VLLMPagedMemNPUConnector."
+                )
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError(
+                    "The memory object should be in KV_2LTD format in "
+                    " order to be processed by VLLMPagedMemNPUConnector."
+                )
 
-        k1, k2, k3, k4 = self.v2_plane_extras
         lmc_ops.multi_layer_kv_transfer(
             memory_obj.tensor,
             kv_cache_pointers,
@@ -1838,14 +1617,20 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
             False,
             self.use_mla,
             self.kv_format.value,
-            k1,
-            k2,
-            k3,
-            k4,
-            int(self.block_size),
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.dsa_head_dim,
         )
 
-    def _try_multi_group_dispatch(
+    def _has_per_group_transfer_infra(self) -> bool:
+        """True when per-NPU-group pointer tables and params are initialized."""
+        return (
+            self.group_kv_cache_pointers is not None
+            and self.per_group_params is not None
+            and len(self.group_kv_cache_pointers) > 0
+        )
+
+    def _try_multi_plane_dispatch(
         self,
         memory_obj: MemoryObj,
         start: int,
@@ -1853,57 +1638,80 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         kwargs: dict[str, Any],
         *,
         is_store: bool,
+        kv_cache_pointers: torch.Tensor,
+        slot_mapping: torch.Tensor,
     ) -> bool:
-        """Dispatch to multi-group transfer if per-group slot mappings are available.
+        """Route mixed multi-group or uniform DSA-C8 multi-plane transfers.
 
-        Returns True if the multi-group path handled the transfer, False for
-        single-group fallback.  Raises on mixed-format caches that lack the
-        required per-group infrastructure.
+        Returns True when this call handled the transfer; False for the flat
+        single-group path.  Raises on mixed-format caches that lack per-group
+        infrastructure.
         """
-        slot_mappings = kwargs.get("slot_mappings_npu_by_group")
         op = "store" if is_store else "retrieve"
-        if slot_mappings is not None:
+        stream = self.store_stream if is_store else self.load_stream
+        slot_mappings = kwargs.get("slot_mappings_npu_by_group")
+
+        if slot_mappings is not None and self._has_per_group_transfer_infra():
+            filtered_slot_mappings_npu = kwargs.get("filtered_slot_mappings_npu")
+            slot_valid_prefix_by_group = kwargs.get("slot_valid_prefix_by_group")
             if (
-                self.group_kv_cache_pointers is not None
-                and self.per_group_params is not None
-                and len(self.group_kv_cache_pointers) > 0
+                filtered_slot_mappings_npu is None
+                or slot_valid_prefix_by_group is None
             ):
-                stream = self.store_stream if is_store else self.load_stream
-                filtered_slot_mappings_npu = kwargs.get("filtered_slot_mappings_npu")
-                slot_valid_prefix_by_group = kwargs.get(
-                    "slot_valid_prefix_by_group"
-                )
-                if (
-                    filtered_slot_mappings_npu is None
-                    or slot_valid_prefix_by_group is None
-                ):
-                    raise ValueError(
-                        f"Mixed-format KV {op} requires filtered_slot_mappings_npu "
-                        "and slot_valid_prefix_by_group."
-                    )
-                self._multi_group_kv_transfer(
-                    memory_obj,
-                    start,
-                    end,
-                    slot_mappings,
-                    is_store=is_store,
-                    stream=stream,
-                    filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                    slot_valid_prefix_by_group=slot_valid_prefix_by_group,
-                    mp_launch_meta=kwargs.get("mp_launch_meta"),
-                )
-                return True
-            if self._is_mixed_format:
                 raise ValueError(
-                    "Mixed-format KV caches require initialized per-group "
-                    f"pointers and slot_mappings_npu_by_group for {op}."
+                    f"Mixed-format KV {op} requires filtered_slot_mappings_npu "
+                    "and slot_valid_prefix_by_group."
                 )
-        if self._is_mixed_format:
-            raise ValueError(
-                "Mixed-format KV caches require slot_mappings_npu_by_group "
-                f"for {op}; single-group slot_mapping is invalid."
+            self._multi_group_kv_transfer(
+                memory_obj,
+                start,
+                end,
+                slot_mappings,
+                is_store=is_store,
+                stream=stream,
+                filtered_slot_mappings_npu=filtered_slot_mappings_npu,
+                slot_valid_prefix_by_group=slot_valid_prefix_by_group,
+                mp_launch_meta=kwargs.get("mp_launch_meta"),
             )
-        return False
+            return True
+
+        if self._is_mixed_format:
+            if slot_mappings is None:
+                raise ValueError(
+                    f"Mixed-format KV caches require slot_mappings_npu_by_group "
+                    f"for {op}; single-group slot_mapping is invalid."
+                )
+            raise ValueError(
+                "Mixed-format KV caches require initialized per-group "
+                f"pointers and slot_mappings_npu_by_group for {op}."
+            )
+
+        if self.kv_format != KVCacheFormat.DSA_C8_KV:
+            return False
+
+        assert memory_obj.tensor is not None
+        if memory_obj.tensor.dtype != torch.uint8:
+            raise ValueError(
+                "DSA-C8 memory objects must use uint8 LMCache chunks."
+            )
+        sm_len = int(slot_mapping.shape[0])
+        with torch.npu.stream(stream):
+            self._invoke_multi_plane_kv_transfer(
+                mem_tensor=memory_obj.tensor,
+                group_ptrs=kv_cache_pointers,
+                group_params=self._dsa_c8_group_params(),
+                slot_mappings_by_group=(slot_mapping,),
+                filtered_slot_mappings_npu=(slot_mapping,),
+                slot_valid_prefix_by_group=(
+                    torch.arange(sm_len + 1, dtype=torch.int32),
+                ),
+                compress_ratios=(1,),
+                g_start=start,
+                g_end=end,
+                is_store=is_store,
+                npu_group_idx=0,
+            )
+        return True
 
     def _multi_group_kv_transfer(
         self,
@@ -1919,7 +1727,7 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         mp_launch_meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]]
         | None = None,
     ) -> None:
-        """Run multi_layer_kv_transfer per NPU layer group (store or retrieve)."""
+        """Run multi-plane transfer per NPU layer group (store or retrieve)."""
         assert self.group_kv_cache_pointers is not None
         assert self.per_group_params is not None
 
@@ -1947,57 +1755,24 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     )
                     continue
 
-                if _uses_multi_plane_kv_transfer(group_params):
-                    self._invoke_multi_plane_kv_transfer(
-                        mem_tensor=mem_tensor,
-                        group_ptrs=group_ptrs,
-                        group_params=group_params,
-                        slot_mappings_by_group=slot_mappings_by_group,
-                        filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                        slot_valid_prefix_by_group=slot_valid_prefix_by_group,
-                        compress_ratios=compress_ratios,
-                        g_start=start,
-                        g_end=end,
-                        is_store=is_store,
-                        npu_group_idx=i,
-                        mp_launch_meta=mp_launch_meta,
+                if not int(group_params.get("num_planes", 0)):
+                    raise RuntimeError(
+                        f"NPU group {i}: mixed-format requires multi-plane "
+                        "params (num_planes > 0)"
                     )
-                    continue
-
-                slot_g = int(group_params.get("scheduler_slot_group", 0))
-                sm_len = int(slot_mappings_by_group[slot_g].shape[0])
-                s0, s1 = multi_plane_slot_slice_bounds(
-                    start, end, slot_g, compress_ratios, sm_len
-                )
-                dense_start, dense_count = dense_bounds_from_prefix(
-                    slot_valid_prefix_by_group[slot_g], s0, s1
-                )
-                if dense_count == 0:
-                    continue
-                slot_slice = filtered_slot_mappings_npu[slot_g][
-                    dense_start : dense_start + dense_count
-                ]
-
-                scale_plane_bytes = int(group_params.get("s_extra", 0))
-                if mem_tensor.dtype in (torch.int8, torch.float32) or (
-                    mem_tensor.dtype == torch.float16 and scale_plane_bytes > 0
-                ):
-                    mem_tensor = mem_tensor.view(torch.uint8)
-
-                lmc_ops.multi_layer_kv_transfer(
-                    mem_tensor,
-                    group_ptrs,
-                    slot_slice,
-                    self.kvcaches_device,
-                    group_params["page_buffer_size"],
-                    is_store,
-                    group_params["use_mla"],
-                    group_params["kv_format"],
-                    group_params["k_extra"],
-                    group_params["v_extra"],
-                    group_params["d_extra"],
-                    group_params["s_extra"],
-                    int(group_params["block_size"]),
+                self._invoke_multi_plane_kv_transfer(
+                    mem_tensor=mem_tensor,
+                    group_ptrs=group_ptrs,
+                    group_params=group_params,
+                    slot_mappings_by_group=slot_mappings_by_group,
+                    filtered_slot_mappings_npu=filtered_slot_mappings_npu,
+                    slot_valid_prefix_by_group=slot_valid_prefix_by_group,
+                    compress_ratios=compress_ratios,
+                    g_start=start,
+                    g_end=end,
+                    is_store=is_store,
+                    npu_group_idx=i,
+                    mp_launch_meta=mp_launch_meta,
                 )
 
     def from_gpu(self, memory_obj: MemoryObj, start: int, end: int, **kwargs):
@@ -2050,50 +1825,40 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
         if self.kv_format == KVCacheFormat.UNDEFINED:
             raise ValueError("KV cache format is not initialized!")
 
-        if self._try_multi_group_dispatch(
-            memory_obj, start, end, kwargs, is_store=True,
+        no_sync = kwargs.get("no_sync", False)
+        if self._try_multi_plane_dispatch(
+            memory_obj,
+            start,
+            end,
+            kwargs,
+            is_store=True,
+            kv_cache_pointers=kv_cache_pointers,
+            slot_mapping=slot_mapping,
         ):
-            no_sync = kwargs.get("no_sync", False)
             if not no_sync:
                 self.store_stream.synchronize()
             if self.use_mla:
                 memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
             return
 
+        # After multi-plane dispatch: per-group MemoryObjs use
+        # get_tensor(i), not memory_obj.tensor (group-0 view only).
+        # Only the flat single-group fallback below needs .tensor.
         assert memory_obj.tensor is not None
-        self._validate_memory_format(memory_obj)
 
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            filtered_npu, prefixes = _filtered_slot_kwargs_for_groups(
-                (slot_mapping,), (1,)
-            )
-            with torch.npu.stream(self.store_stream):
-                self._invoke_multi_plane_kv_transfer(
-                    mem_tensor=memory_obj.tensor,
-                    group_ptrs=kv_cache_pointers,
-                    group_params=_build_dsa_c8_multi_plane_group_params(
-                        self.dsa_c8_plane_bytes,
-                        block_size=int(self.block_size),
-                        page_buffer_size=int(self.page_buffer_size),
-                        num_tokens=end - start,
-                    ),
-                    slot_mappings_by_group=(slot_mapping,),
-                    filtered_slot_mappings_npu=filtered_npu,
-                    slot_valid_prefix_by_group=prefixes,
-                    compress_ratios=(1,),
-                    g_start=start,
-                    g_end=end,
-                    is_store=True,
-                    npu_group_idx=0,
+        if self.use_mla:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
+                raise ValueError(
+                    "The memory object should be in KV_MLA_FMT format in"
+                    " order to be processed by VLLMPagedMemNPUConnector."
                 )
-            no_sync = kwargs.get("no_sync", False)
-            if not no_sync:
-                self.store_stream.synchronize()
-            if self.use_mla:
-                memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
-            return
+        else:
+            if memory_obj.metadata.fmt != MemoryFormat.KV_2LTD:
+                raise ValueError(
+                    "The memory object should be in KV_2LTD format in "
+                    " order to be processed by VLLMPagedMemNPUConnector."
+                )
 
-        k1, k2, k3, k4 = self.v2_plane_extras
         with torch.npu.stream(self.store_stream):
             # No staging buffer or token count mismatch
             if self.gpu_buffer is None or end - start != self.gpu_buffer.shape[2]:
@@ -2106,11 +1871,9 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     True,
                     self.use_mla,
                     self.kv_format.value,
-                    k1,
-                    k2,
-                    k3,
-                    k4,
-                    int(self.block_size),
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                    self.dsa_head_dim,
                 )
             else:
                 assert self.gpu_buffer.device == self.kvcaches_device
@@ -2125,13 +1888,11 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                     True,  # from_gpu
                     self.use_mla,
                     self.kv_format.value,
-                    k1,
-                    k2,
-                    k3,
-                    k4,
-                    int(self.block_size),
+                    self.kv_lora_rank,
+                    self.qk_rope_head_dim,
+                    self.dsa_head_dim,
                 )
-        no_sync = kwargs.get("no_sync", False)
+
         if not no_sync and not memory_obj.tensor.is_cuda:
             # Force a synchronize if the target buffer is NOT CUDA device
             # NOTE: for better performance, we may not want to sync for every
@@ -2361,18 +2122,22 @@ class VLLMPagedMemNPUConnectorV2(_V2KVTransferMixin, VLLMPagedMemGPUConnectorV2)
                 list(self.dsa_c8_plane_bytes), num_tokens
             )
             return torch.Size([1, self.num_layers, num_tokens, row_bytes])
-        if self.kv_format in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV):
-            return torch.Size(
-                [1, self.num_layers, num_tokens, self.v2_staging_hidden_dim]
+        if self.kv_format == KVCacheFormat.MLA_KV:
+            total_hidden_dims = self.kv_lora_rank + self.qk_rope_head_dim
+            return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
+        elif self.kv_format == KVCacheFormat.DSA_KV:
+            total_hidden_dims = (
+                self.kv_lora_rank + self.qk_rope_head_dim + self.dsa_head_dim
             )
-        return torch.Size(
-            [2, self.num_layers, num_tokens, self.hidden_dim_size]
-        )
+            return torch.Size([1, self.num_layers, num_tokens, total_hidden_dims])
+        else:
+            kv_size = 2
+            return torch.Size(
+                [kv_size, self.num_layers, num_tokens, self.hidden_dim_size]
+            )
 
 
-class VLLMPagedMemLayerwiseNPUConnector(
-    _V2KVTransferMixin, VLLMPagedMemLayerwiseGPUConnector
-):
+class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
     def __init__(
         self,
         hidden_dim_size: int,
@@ -2384,13 +2149,8 @@ class VLLMPagedMemLayerwiseNPUConnector(
 
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
 
-        self.use_mla = bool(kwargs.get("use_mla", False))
-        self.kv_lora_rank: int = 0
-        self.qk_rope_head_dim: int = 0
-        self.dsa_head_dim: int = 0
-        self.dsa_c8_plane_bytes: tuple[int, int, int, int] = (0, 0, 0, 0)
-        self.page_buffer_size: int = 0
-        self.block_size: int = 0
+        # layerwise mode currently does not support MLA/DSA/DSA-C8
+        self.use_mla = kwargs.get("use_mla", False)
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -2449,14 +2209,6 @@ class VLLMPagedMemLayerwiseNPUConnector(
                 else:
                     # Flash Infer: [num_blocks, 2, block_size, num_heads, head_size]
                     k_cache_shape_per_layer = first_layer_cache[:, 0].shape
-            elif self.kv_format in (
-                KVCacheFormat.MLA_KV,
-                KVCacheFormat.DSA_KV,
-                KVCacheFormat.DSA_C8_KV,
-            ):
-                k_cache_shape_per_layer = _init_mla_dsa_connector_dims(
-                    self, first_layer_cache, self.kv_format
-                )
             else:
                 raise ValueError(f"Unsupported KV cache format: {self.kv_format}")
 
@@ -2469,123 +2221,12 @@ class VLLMPagedMemLayerwiseNPUConnector(
                 f"  - Max tokens: {max_tokens}"
             )
 
-            if self.kv_format in (
-                KVCacheFormat.MLA_KV,
-                KVCacheFormat.DSA_KV,
-                KVCacheFormat.DSA_C8_KV,
-            ):
-                if not isinstance(first_layer_cache, (tuple, list)):
-                    raise TypeError("Expected tuple/list KV cache for MLA/DSA formats.")
-                gpu_buffer_size = sum(
-                    int(t.numel()) * int(t.element_size()) for t in first_layer_cache
-                )
-            else:
-                num_elements_key = k_cache_shape_per_layer.numel()
-                num_elements = num_elements_key * 2
-                gpu_buffer_size = num_elements * self.element_size
+            num_elements_key = k_cache_shape_per_layer.numel()
+            num_elements = num_elements_key * 2
+            gpu_buffer_size = num_elements * self.element_size
 
             self.gpu_buffer_allocator = GPUMemoryAllocator(
                 gpu_buffer_size, device=self.device
-            )
-
-    def get_shape(self, num_tokens: int) -> torch.Size:
-        """Staging buffer for one layer (``num_layers=1`` in transfer kernels)."""
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
-
-            row_bytes = _multi_plane_lmc_row_bytes(
-                list(self.dsa_c8_plane_bytes), num_tokens
-            )
-            return torch.Size([1, 1, num_tokens, row_bytes])
-        if self.kv_format in (KVCacheFormat.MLA_KV, KVCacheFormat.DSA_KV):
-            return torch.Size([1, 1, num_tokens, self.v2_staging_hidden_dim])
-        return super().get_shape(num_tokens)
-
-    def _layerwise_v2_transfers(
-        self,
-        *,
-        is_store: bool,
-        memory_objs_layer: list,
-        slot_mapping: torch.Tensor,
-        slot_mapping_full: torch.Tensor,
-        starts: List[int],
-        ends: List[int],
-        chunk_offsets: List[int],
-        chunk_sizes: List[int],
-        staging: Optional[torch.Tensor],
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """Build (data_tensor, slot_mapping) pairs for one layerwise v2 transfer."""
-        if is_store:
-            if staging is not None:
-                return [(staging, slot_mapping_full)]
-            transfers = []
-            for start, end, memory_obj in zip(
-                starts, ends, memory_objs_layer, strict=False
-            ):
-                self._assert_memory_obj_format_ml(memory_obj)
-                assert memory_obj.tensor is not None
-                transfers.append((memory_obj.tensor, slot_mapping[start:end]))
-            return transfers
-
-        if staging is not None:
-            staging.zero_()
-            for i, memory_obj in enumerate(memory_objs_layer):
-                self._assert_memory_obj_format_ml(memory_obj)
-                assert memory_obj.tensor is not None
-                off = chunk_offsets[i]
-                cs = chunk_sizes[i]
-                staging[0, 0, off : off + cs].copy_(
-                    memory_obj.tensor[0, 0, :cs], non_blocking=True
-                )
-            return [(staging, slot_mapping_full)]
-
-        transfers = []
-        for start, end, memory_obj in zip(
-            starts, ends, memory_objs_layer, strict=False
-        ):
-            self._assert_memory_obj_format_ml(memory_obj)
-            assert memory_obj.tensor is not None
-            transfers.append((memory_obj.tensor, slot_mapping[start:end]))
-        return transfers
-
-    def _run_layerwise_v2_transfers(
-        self,
-        layer_id: int,
-        transfers: list[tuple[torch.Tensor, torch.Tensor]],
-        *,
-        is_store: bool,
-    ) -> None:
-        ptrs = _layer_paged_kv_ptrs_tensor(self.kvcaches[layer_id], self.kv_format)
-        kdev = ptrs.device
-        k1, k2, k3, k4 = self.v2_plane_extras
-        for data_tensor, sm in transfers:
-            lmc_ops.multi_layer_kv_transfer(
-                data_tensor,
-                ptrs,
-                sm,
-                kdev,
-                self.page_buffer_size,
-                is_store,
-                self.use_mla,
-                self.kv_format.value,
-                k1,
-                k2,
-                k3,
-                k4,
-                int(self.block_size),
-            )
-
-    def _assert_memory_obj_format_ml(self, memory_obj: MemoryObj) -> None:
-        if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            assert memory_obj.tensor is not None
-            if memory_obj.tensor.dtype != torch.uint8:
-                raise ValueError(
-                    "DSA_C8_KV expects uint8 packed LMCache chunk tensors on memory objects."
-                )
-        elif memory_obj.metadata.fmt != MemoryFormat.KV_MLA_FMT:
-            raise ValueError(
-                f"Expected MemoryFormat.KV_MLA_FMT for {self.kv_format.name}, "
-                f"got {memory_obj.metadata.fmt}"
             )
 
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
@@ -2647,19 +2288,9 @@ class VLLMPagedMemLayerwiseNPUConnector(
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-                buf_dtype = (
-                    torch.uint8
-                    if self.kv_format == KVCacheFormat.DSA_C8_KV
-                    else self.dtype
-                )
-                tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                    buffer_shape, buf_dtype, MemoryFormat.KV_MLA_FMT
-                )
-            else:
-                tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
             )
@@ -2675,28 +2306,7 @@ class VLLMPagedMemLayerwiseNPUConnector(
                 logger.debug(f"Finished loading layer {layer_id - 1}")
             # memobj -> gpu_buffer -> kvcaches
             with torch.npu.stream(self.load_stream):
-                if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-                    staging = (
-                        tmp_gpu_buffer_obj.tensor if self.use_gpu else None
-                    )
-                    if self.use_gpu:
-                        assert tmp_gpu_buffer_obj is not None
-                        assert staging is not None
-                    transfers = self._layerwise_v2_transfers(
-                        is_store=False,
-                        memory_objs_layer=memory_objs_layer,
-                        slot_mapping=slot_mapping,
-                        slot_mapping_full=slot_mapping_full,
-                        starts=starts,
-                        ends=ends,
-                        chunk_offsets=chunk_offsets,
-                        chunk_sizes=chunk_sizes,
-                        staging=staging,
-                    )
-                    self._run_layerwise_v2_transfers(
-                        layer_id, transfers, is_store=False
-                    )
-                elif self.use_gpu:
+                if self.use_gpu:
                     cpu_tensors = []
                     for memory_obj in memory_objs_layer:
                         assert memory_obj.tensor is not None
@@ -2813,19 +2423,9 @@ class VLLMPagedMemLayerwiseNPUConnector(
         if self.use_gpu:
             buffer_shape = self.get_shape(num_tokens)
             assert self.gpu_buffer_allocator is not None
-            if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-                buf_dtype = (
-                    torch.uint8
-                    if self.kv_format == KVCacheFormat.DSA_C8_KV
-                    else self.dtype
-                )
-                tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                    buffer_shape, buf_dtype, MemoryFormat.KV_MLA_FMT
-                )
-            else:
-                tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
-                    buffer_shape, self.dtype, MemoryFormat.KV_T2D
-                )
+            tmp_gpu_buffer_obj = self.gpu_buffer_allocator.allocate(
+                buffer_shape, self.dtype, MemoryFormat.KV_T2D
+            )
             assert tmp_gpu_buffer_obj is not None, (
                 "Failed to allocate NPU buffer in NPUConnector"
             )
@@ -2839,38 +2439,7 @@ class VLLMPagedMemLayerwiseNPUConnector(
             with torch.npu.stream(self.store_stream):
                 self.store_stream.wait_stream(current_stream)
 
-                if _kv_tuple_formats_use_multi_layer_transfer(self.kv_format):
-                    staging = (
-                        tmp_gpu_buffer_obj.tensor if self.use_gpu else None
-                    )
-                    if self.use_gpu:
-                        assert tmp_gpu_buffer_obj is not None
-                        assert staging is not None
-                    transfers = self._layerwise_v2_transfers(
-                        is_store=True,
-                        memory_objs_layer=memory_objs_layer,
-                        slot_mapping=slot_mapping,
-                        slot_mapping_full=slot_mapping_full,
-                        starts=starts,
-                        ends=ends,
-                        chunk_offsets=chunk_offsets,
-                        chunk_sizes=chunk_sizes,
-                        staging=staging,
-                    )
-                    self._run_layerwise_v2_transfers(
-                        layer_id, transfers, is_store=True
-                    )
-                    if self.use_gpu:
-                        assert staging is not None
-                        for i, memory_obj in enumerate(memory_objs_layer):
-                            self._assert_memory_obj_format_ml(memory_obj)
-                            assert memory_obj.tensor is not None
-                            off = chunk_offsets[i]
-                            cs = chunk_sizes[i]
-                            memory_obj.tensor[0, 0, :cs].copy_(
-                                staging[0, 0, off : off + cs], non_blocking=True
-                            )
-                elif self.use_gpu:
+                if self.use_gpu:
                     cpu_tensors = []
                     for memory_obj in memory_objs_layer:
                         assert memory_obj.tensor is not None

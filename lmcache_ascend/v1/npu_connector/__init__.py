@@ -55,6 +55,11 @@ def CreateNPUConnector(
             raise ValueError(
                 "We haven't supported MLA with Cacheblend yet. Please disable blending."
             )
+        if config.use_layerwise and metadata.use_mla:
+            raise ValueError(
+                "Layerwise mode on Ascend supports only MERGED_KV/SEPARATE_KV. "
+                "Disable use_layerwise for DSA/DSA-C8 models (use V2 connector)."
+            )
 
         if config.use_layerwise:
             if config.enable_blending:

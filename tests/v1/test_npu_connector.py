@@ -21,13 +21,53 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType
+from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.metadata import LMCacheMetadata
+from lmcache_ascend.v1.npu_connector import CreateNPUConnector
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     SGLangLayerwiseNPUConnector,
     VLLMPagedMemLayerwiseNPUConnector,
     VLLMPagedMemNPUConnectorV2,
 )
+from tests.v1.conftest_kvcache import npu_available
 from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
 import lmcache_ascend.c_ops as lmc_ops
+
+
+@pytest.mark.skipif(not npu_available(), reason="NPU required")
+def test_create_npu_connector_rejects_layerwise_mla() -> None:
+    """Tuple-format models must use V2 connector, not layerwise."""
+    config = LMCacheEngineConfig.from_legacy()
+    config.use_layerwise = True
+    metadata = LMCacheMetadata(
+        model_name="test-layerwise-mla",
+        world_size=1,
+        local_world_size=1,
+        worker_id=0,
+        local_worker_id=0,
+        kv_dtype=torch.bfloat16,
+        kv_shape=(32, 1, 256, 8, 128),
+        use_mla=True,
+    )
+    with pytest.raises(ValueError, match="Layerwise mode on Ascend"):
+        CreateNPUConnector(config, metadata, EngineType.VLLM)
+
+
+def test_paged_layerwise_rejects_mla_kv_at_lazy_init() -> None:
+    """Defense-in-depth: MLA tuple kvcaches fail in _lazy_initialize_buffer."""
+    connector = VLLMPagedMemLayerwiseNPUConnector(
+        hidden_dim_size=512,
+        num_layers=1,
+        use_gpu=True,
+        chunk_size=256,
+        dtype=torch.bfloat16,
+        device=torch.device("cpu"),
+    )
+    k_cache = torch.zeros(2, 4, 8)
+    v_cache = torch.zeros(2, 4, 4)
+    with pytest.raises(ValueError, match="Unsupported KV cache format"):
+        connector._lazy_initialize_buffer([(k_cache, v_cache)])
 
 
 @pytest.mark.parametrize("use_npu", [True])

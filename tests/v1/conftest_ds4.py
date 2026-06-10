@@ -180,9 +180,12 @@ def slot_mappings_for_ds4_groups(
     num_tokens: int,
     dev: torch.device,
     *,
-    num_blocks: int = 16,
+    num_blocks: int | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    block_ids = list(range(1, num_blocks + 1))
+    if num_blocks is None:
+        num_blocks = ds4_roundtrip_num_blocks(max_chunk=num_tokens)
+    # 1-based block ids with one spare physical block so max slot fits the flat buffer.
+    block_ids = list(range(1, num_blocks))
     mappings: list[torch.Tensor] = []
     for ratio, block_size in zip(
         compress_ratios_from_block_sizes(), DS4_BLOCK_SIZES_BY_GROUP
@@ -201,10 +204,10 @@ def slot_mappings_for_ds4_groups(
 def make_slot_mappings(
     num_tokens: int,
     dev: torch.device,
+    *,
+    num_blocks: int | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    return slot_mappings_for_ds4_groups(
-        num_tokens, dev, num_blocks=32
-    )
+    return slot_mappings_for_ds4_groups(num_tokens, dev, num_blocks=num_blocks)
 
 
 def make_slot_transfer_kwargs(
@@ -242,10 +245,10 @@ def make_slot_transfer_kwargs(
 def make_production_slot_mappings(
     num_tokens: int,
     dev: torch.device,
+    *,
+    num_blocks: int | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    return slot_mappings_for_ds4_groups(
-        num_tokens, dev, num_blocks=32
-    )
+    return slot_mappings_for_ds4_groups(num_tokens, dev, num_blocks=num_blocks)
 
 
 def build_connector_via_from_metadata(
@@ -304,7 +307,8 @@ def build_bundled_ds4_connector(
 ) -> tuple[VLLMPagedMemNPUConnectorV2, LMCacheMetadata, list, torch.device]:
     monkeypatch.setenv("LMCACHE_ASCEND_BUNDLE_MULTI_SPEC", "1")
     dev = device()
-    kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=32)
+    num_blocks = ds4_roundtrip_num_blocks()
+    kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=num_blocks)
     flat, sched, layer_to_groups, _ = build_flat_kv_caches(
         kv_dict,
         _make_ds4_kv_cache_config(),
@@ -439,6 +443,25 @@ dsv4_roundtrip_chunk_sizes = ds4_roundtrip_chunk_sizes
 
 def prefill_tokens_for_chunk(chunk: int) -> int:
     return max(int(chunk), 768, DS4_IE_LOGICAL_BLOCK_SIZE * 2)
+
+
+def ds4_roundtrip_num_blocks(*, max_chunk: int | None = None) -> int:
+    """Physical KV blocks for DS4 round-trip fixtures (block_idx + 1-based slots)."""
+    if max_chunk is None:
+        max_prefill = max(
+            prefill_tokens_for_chunk(chunk) for chunk in ds4_roundtrip_chunk_sizes()
+        )
+    else:
+        max_prefill = prefill_tokens_for_chunk(max_chunk)
+    if max_prefill <= 0:
+        return 32
+    need = 32
+    for ratio, block_size in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP):
+        tokens_compressed_max = (max_prefill - 1) // ratio
+        block_idx_max = tokens_compressed_max // block_size
+        # block_ids are 1..num_blocks-1; block_idx must stay <= num_blocks-2.
+        need = max(need, block_idx_max + 2)
+    return need
 
 
 def ds4_multi_plane_round_trip(
