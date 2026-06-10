@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from lmcache.v1.memory_management import PinMemoryAllocator, TensorMemoryObj
+from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
 )
@@ -238,7 +239,9 @@ def multi_plane_round_trip_via_connector(
     planes_work = [p.clone() for p in planes_src]
     planes_dst = [torch.zeros_like(p) for p in planes_template]
 
-    lmc_chunk_row_bytes = int(g_params["k_extra"])
+    lmc_chunk_row_bytes = _multi_plane_lmc_row_bytes(
+        g_params["per_plane_hidden_dim_bytes"], chunk
+    )
     pool_bytes = max(512 * 1024 * 1024, lmc_chunk_row_bytes * chunk * 2)
     ptrs_store = torch.tensor(
         [p.data_ptr() for p in planes_work], dtype=torch.int64, device=dev

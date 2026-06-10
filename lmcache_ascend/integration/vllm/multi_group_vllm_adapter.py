@@ -387,6 +387,11 @@ class ReqMeta(UpstreamReqMeta):
             block_sizes_by_group,
             tracker.num_kv_groups,
         )
+        if tracker.num_kv_groups > 1:
+            assert discard_partial_chunks, (
+                "Multi-group KV cache requires discard_partial_chunks=True; "
+                "partial-chunk store/load is not supported across KV cache groups."
+            )
         if tracker.num_kv_groups == 1:
             primary_kv_group_idx = 0
         else:
@@ -549,6 +554,12 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         else:
             self._compress_ratios_by_group = (1,)
             self._sliding_window_size_by_group = None
+
+        if self._num_kv_groups > 1:
+            assert self._discard_partial_chunks, (
+                "Multi-group KV cache requires discard_partial_chunks=True; "
+                "partial-chunk store/load is not supported for state and sliding windowgroups."
+            )
 
     def record_failed_blocks(
         self,

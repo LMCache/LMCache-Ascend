@@ -9,7 +9,7 @@ import torch
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
-    _build_dsa_c8_multi_plane_group_params,
+    _build_multi_plane_group_params,
     _derive_group_params,
     _is_kernel_compatible_entry,
     _materialize_mp_device_params,
@@ -77,9 +77,10 @@ def test_derive_group_params_dsa_c8() -> None:
     )
     assert params["kv_format"] == KVCacheFormat.DSA_C8_KV.value
     assert params["block_size"] == 128
-    assert "dsa_c8_plane_bytes" in params
-    kb, vb, db, sb = params["dsa_c8_plane_bytes"]
-    assert kb > 0 and vb > 0 and db > 0 and sb > 0
+    assert params["num_planes"] == 4
+    pb = params["per_plane_hidden_dim_bytes"]
+    assert len(pb) == 4
+    assert all(x > 0 for x in pb)
 
 
 def test_initialize_pointers_mixed_format_no_unpack_crash() -> None:
@@ -369,11 +370,11 @@ def test_initialize_pointers_skips_detect_on_warm_path() -> None:
 
 def test_materialize_mp_device_params_idempotent() -> None:
     """Repeated materialize must reuse the same mp_device tensors."""
-    params = _build_dsa_c8_multi_plane_group_params(
-        (512, 64, 128, 1),
+    params = _build_multi_plane_group_params(
+        kv_format=KVCacheFormat.DSA_C8_KV,
+        plane_hidden_bytes=(512, 64, 128, 1),
         block_size=128,
         page_buffer_size=1280,
-        num_tokens=256,
     )
     device = torch.device("cpu")
     _materialize_mp_device_params(params, device)

@@ -50,6 +50,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     ):
         logger.debug("Initializing LMCacheAscendConnectorV1Impl")
         super().__init__(vllm_config, role, parent, kv_cache_config=kv_cache_config)
+        if self._num_kv_groups > 1:
+            assert self._discard_partial_chunks, (
+                "Multi-group KV cache requires discard_partial_chunks=True; "
+                "partial-chunk store/load is not supported across KV cache groups."
+            )
         self.store_async = self.config.store_async
         self._wait_for_save_done = True
         self._finished_req_ids_waiting_for_save: set[str] = set()
