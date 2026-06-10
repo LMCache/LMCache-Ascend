@@ -59,7 +59,7 @@ python \
     --disable-log-requests \
     --block-size 128 \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_producer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}' > prefill.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_producer", "kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}' > prefill.txt 2>&1 
 ```
 
 Launch decode
@@ -80,7 +80,7 @@ python \
     --disable-log-requests \
     --block-size 128 \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_consumer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}' > decode.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_consumer", "kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}' > decode.txt 2>&1 
 ```
 
 Launch proxy server to coordinate prefill and decode

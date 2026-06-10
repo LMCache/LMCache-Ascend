@@ -64,7 +64,7 @@ python \
     --block-size 128 \
     --rope-scaling '{"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}' \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' > instance1.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' > instance1.txt 2>&1 
 ```
 
 Launch instance 2
@@ -86,7 +86,7 @@ python \
     --block-size 128 \
     --rope-scaling '{"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}' \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' > instance2.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' > instance2.txt 2>&1 
 ```
 
 Send request to engine 1
