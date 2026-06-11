@@ -56,11 +56,8 @@ struct MultiLayerKVConfig {
 
   int num_layers;
   int num_tokens;
-  int num_tokens_lmc_chunk;
   int hidden_dims;
   int kv_size;
-  int kvcache_format_raw;
-  bool is_dsa_c8{false};
 
   kvcache_ops::KVCacheFormat kvcache_format;
 
@@ -79,9 +76,6 @@ struct MultiLayerKVConfig {
   int64_t k_hidden_dims;
   int64_t v_hidden_dims;
   int64_t dsa_hidden_dims;
-  int64_t dsa_c8_scale_plane_bytes;
-  /// vLLM paged ``block_size`` (slots per block); required for DSA_C8 scale kernel path.
-  int32_t paged_kv_block_size{0};
 };
 
 MultiLayerKVConfig prepare_multi_layer_kv_config(
@@ -89,8 +83,7 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,
     int page_buffer_size, bool direction, bool use_mla, int kvcache_format_raw,
     int64_t k_hidden_dims = 0, int64_t v_hidden_dims = 0,
-    int64_t dsa_hidden_dims = 0, int64_t dsa_c8_scale_plane_bytes = 0,
-    int32_t paged_kv_block_size = 0);
+    int64_t dsa_hidden_dims = 0);
 
 void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
                                    const torch::Tensor &key_value,

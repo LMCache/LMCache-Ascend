@@ -9,10 +9,12 @@ import pytest
 import torch
 
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
+    _is_kernel_native_tuple,
     build_flat_kv_caches,
     build_layer_to_scheduler_groups,
     ordered_scheduler_groups_for_layer,
 )
+from lmcache_ascend.v1.kv_format import KVCacheFormat
 
 # Test data: spec schedules used to generate multi-spec sub-tensor fixtures.
 DSV4_CR4_SCHEDULE = (
@@ -197,24 +199,71 @@ def test_flatten_compress4_eight_subs(
     assert sched == (0, 2, 3, 3, 4, 5, 6, 7)
 
 
-def test_build_flat_kv_caches_collapses_4d_to_3d(
+def test_flatten_preserves_mla_tuple_when_bundle_disabled(
     ds4_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """4-D vllm-ascend pages collapse to 3-D MLA buffers for upstream normalize."""
+    """Kernel-native MLA tuples stay intact even when BUNDLE_MULTI_SPEC=0."""
     from .conftest_ds4 import set_bundle_multi_spec_env
 
     set_bundle_multi_spec_env(monkeypatch, enabled=False)
     k = torch.zeros(4, 128, 1, 512)
     v = torch.zeros(4, 128, 1, 64)
-    kv = {L3: (k, v)}
-    flat, sched, _, _ = build_flat_kv_caches(
+    entry = (k, v)
+    kv = {L3: entry}
+    flat, sched, _, bundled = build_flat_kv_caches(
         kv, ds4_config, ie_logical_block_size=DSV4_IE_LOGICAL_BLOCK_SIZE
     )
-    assert len(flat) == 2
-    assert sched == (8, 8)
-    assert flat[f"{L3}.sub0"].shape == (4, 128, 512)
-    assert flat[f"{L3}.sub1"].shape == (4, 128, 64)
-    assert all(t.ndim == 3 for t in flat.values())
+    assert bundled is True
+    assert flat[L3] is entry
+    assert sched == (8,)
+    assert _is_kernel_native_tuple(flat[L3])
+
+
+def _dsa_c8_entry() -> tuple[torch.Tensor, ...]:
+    return (
+        torch.zeros(4, 128, 1, 512),
+        torch.zeros(4, 128, 1, 64),
+        torch.zeros(4, 128, 1, 128, dtype=torch.int8),
+        torch.zeros(4, 128, 1, 1, dtype=torch.float16),
+    )
+
+
+@pytest.mark.parametrize("bundle_enabled", [True, False])
+def test_flatten_preserves_dsa_c8_tuple(
+    ds4_config, monkeypatch: pytest.MonkeyPatch, bundle_enabled: bool
+) -> None:
+    """DSA_C8 4-tuples stay intact for a single 4-plane kernel launch."""
+    from .conftest_ds4 import set_bundle_multi_spec_env
+
+    set_bundle_multi_spec_env(monkeypatch, enabled=bundle_enabled)
+    entry = _dsa_c8_entry()
+    kv = {L3: entry}
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(
+        kv, ds4_config, ie_logical_block_size=128
+    )
+    assert bundled is True
+    assert flat[L3] is entry
+    assert len(flat[L3]) == 4
+    assert sched == (8,)
+    assert layer_to_groups[L3] == [8, 8, 8, 8]
+    assert KVCacheFormat.detect([flat[L3]]) == KVCacheFormat.DSA_C8_KV
+
+
+def test_compress128_l3_not_kernel_native(ds4_config) -> None:
+    """DSv4 L3 compress128 tuple is MULTI_PLANE, not kernel-native MLA/DSA."""
+    from .conftest_ds4 import DS4_IE_LOGICAL_BLOCK_SIZE, make_ds4_kv_caches_dict
+
+    dev = torch.device("cpu")
+    kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
+    assert not _is_kernel_native_tuple(kv_dict[L3])
+    assert KVCacheFormat.detect([kv_dict[L3]]) == KVCacheFormat.MULTI_PLANE_KV
+    flat, _, _, _ = build_flat_kv_caches(
+        {L3: kv_dict[L3]},
+        ds4_config,
+        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
+    )
+    assert isinstance(flat[L3], tuple)
+    assert len(flat[L3]) == 4
 
 
 def test_build_layer_to_scheduler_groups(ds4_config) -> None:

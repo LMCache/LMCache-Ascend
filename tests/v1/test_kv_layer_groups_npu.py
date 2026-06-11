@@ -168,7 +168,12 @@ def test_dsa_c8_4tuple_classified_as_attention_with_mixed_dtypes():
     assert len(mgr.kv_layer_groups) == 1
     g = mgr.kv_layer_groups[0]
     assert g.shape_desc.kv_size == 1
-    assert g.dtype == torch.bfloat16
+    assert g.dtype == torch.uint8
+    assert g.multi_plane_hidden_bytes is not None
+    assert g.shape_desc.hs == _multi_plane_lmc_row_bytes(
+        g.multi_plane_hidden_bytes,
+        g.physical_chunk_size,
+    )
     assert g.shape_desc.element_size == 2  # max itemsize across tuple tensors
     assert g.compress_ratio == 1
     assert g.physical_chunk_size == 256
@@ -343,10 +348,15 @@ def test_metadata_helpers_for_dsa_c8_pool():
         KVCacheFormat.DSA_C8_KV,
         num_blocks,
     )
+    g = mgr.kv_layer_groups[0]
+    assert g.multi_plane_hidden_bytes is not None
     md = _make_metadata(mgr, use_mla=True)
     assert md.get_num_groups() == 1
-    assert md.get_dtypes() == [torch.bfloat16]
-    hidden = kv_lora_rank + qk_rope_head_dim + dsa_head_dim + 1
+    assert md.get_dtypes() == [torch.uint8]
+    hidden = _multi_plane_lmc_row_bytes(
+        g.multi_plane_hidden_bytes,
+        g.physical_chunk_size,
+    )
     assert md.get_shapes() == [torch.Size([1, 2, 256, hidden])]
 
 

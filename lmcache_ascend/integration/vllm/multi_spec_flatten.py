@@ -9,9 +9,17 @@ from typing import Any, Sequence, Union
 # Third Party
 import torch
 
-from lmcache_ascend.v1.kv_format import _is_shared_storage_blob
+from lmcache_ascend.v1.kv_format import KVCacheFormat, _is_shared_storage_blob
 
 _KVEntry = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
+
+_KERNEL_NATIVE_FORMATS = frozenset(
+    {
+        KVCacheFormat.MLA_KV,
+        KVCacheFormat.DSA_KV,
+        KVCacheFormat.DSA_C8_KV,
+    }
+)
 
 
 def flatten_multi_spec_enabled() -> bool:
@@ -32,7 +40,7 @@ def should_bundle_multi_spec(kv_cache_config: Any | None) -> bool:
 
 def _is_multi_spec_layer(entry: _KVEntry) -> bool:
     subs = _listify_entry(entry)
-    return len(subs) > 1 and not _is_mla_or_dsa_tuple(entry)
+    return len(subs) > 1
 
 
 def _should_bundle_multi_spec_layer(entry: _KVEntry) -> bool:
@@ -66,22 +74,11 @@ def _containing_groups_for_layer(
     return [g for g, grp in enumerate(groups) if layer_name in grp.layer_names]
 
 
-def _is_mla_or_dsa_tuple(entry: _KVEntry) -> bool:
-    """True for MLA (2-tuple), DSA (3-tuple), or DSA_C8 (4-tuple with int8 indexer).
-
-    Multi-spec compress-128 four-plane layers are *not* MLA/DSA: they use
-    per-plane scheduler groups and are bundled as MULTI_PLANE_KV when enabled.
-    """
+def _is_kernel_native_tuple(entry: _KVEntry) -> bool:
+    """True when the NPU connector transfers this tuple without exploding to 3-D."""
     if not isinstance(entry, tuple):
         return False
-    subs = _listify_entry(entry)
-    if len(subs) == 2 and subs[0].shape != subs[1].shape:
-        return True
-    if len(subs) == 3 and subs[0].shape != subs[1].shape:
-        return True
-    if len(subs) == 4 and any(t.dtype == torch.int8 for t in subs):
-        return True
-    return False
+    return KVCacheFormat.detect([entry]) in _KERNEL_NATIVE_FORMATS
 
 
 def _primary_scheduler_group_for_layer(
@@ -131,7 +128,7 @@ def ordered_scheduler_groups_for_layer(
     layers, each sub-tensor corresponds to a distinct scheduler group.
     """
     subs = _listify_entry(entry)
-    if _is_mla_or_dsa_tuple(entry):
+    if _is_kernel_native_tuple(entry):
         g = _primary_scheduler_group_for_layer(
             layer_name,
             kv_cache_config,
@@ -251,7 +248,8 @@ def build_flat_kv_caches(
         kv_caches,
         ie_logical_block_size=ie_logical_block_size,
     )
-    bundled = should_bundle_multi_spec(kv_cache_config)
+    bundled = False
+    bundle_multi_spec = should_bundle_multi_spec(kv_cache_config)
     for layer_name, entry in kv_caches.items():
         subs = _listify_entry(entry)
         groups = layer_to_groups[layer_name]
@@ -260,9 +258,15 @@ def build_flat_kv_caches(
                 f"layer {layer_name}: {len(subs)} sub-tensors vs "
                 f"{len(groups)} scheduler groups"
             )
-        if bundled and _should_bundle_multi_spec_layer(entry):
+        if _is_kernel_native_tuple(entry):
+            flat[layer_name] = entry
+            sched_by_layer.append(groups[0])
+            bundled = True
+            continue
+        if bundle_multi_spec and _should_bundle_multi_spec_layer(entry):
             flat[layer_name] = tuple(subs)
             sched_by_layer.append(groups[0])
+            bundled = True
             continue
         for sub_idx, (sub_tensor, sched_g) in enumerate(zip(subs, groups)):
             flat[f"{layer_name}.sub{sub_idx}"] = _collapse_to_mla_page_buffer(
