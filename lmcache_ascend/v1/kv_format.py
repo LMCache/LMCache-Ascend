@@ -45,6 +45,21 @@ def _is_multi_plane_tuple(cache_entry: Sequence[torch.Tensor]) -> bool:
     return len(block_sizes) > 1
 
 
+def _uses_packed_multi_plane_row(cache_entry: Sequence[torch.Tensor]) -> bool:
+    """True when LMCache stores the layer as a uint8 packed multi-plane row.
+
+    Includes heterogeneous-block-size tuples (``MULTI_PLANE_KV``) and
+    uniform-block DSA_C8 tuples.  Must stay narrower than ``detect()``:
+    do not fold DSA_C8 into ``_is_multi_plane_tuple`` or ``detect()`` would
+    return ``MULTI_PLANE_KV`` instead of ``DSA_C8_KV``.
+    """
+    if _is_multi_plane_tuple(cache_entry):
+        return True
+    if not isinstance(cache_entry, (tuple, list)):
+        return False
+    return KVCacheFormat.detect([cache_entry]) == KVCacheFormat.DSA_C8_KV
+
+
 # Distinguishes vLLM-Ascend multi-dtype reinterpretation views (bf16 + int8
 # over one allocation) from genuinely independent multi-plane tuples, so the
 # bundling path and format detector do not misclassify shared blobs as MULTI_PLANE_KV.

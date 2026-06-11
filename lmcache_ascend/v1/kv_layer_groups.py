@@ -16,9 +16,9 @@ import torch
 from lmcache_ascend.v1.kv_format import (
     KVCacheFormat,
     _get_primary_blob_view,
-    _is_multi_plane_tuple,
     _is_shared_storage_blob,
     _plane_block_size,
+    _uses_packed_multi_plane_row,
 )
 import lmcache_ascend.c_ops as lmc_ops
 
@@ -152,7 +152,7 @@ def _get_kv_cache_group_key_and_info(
     # Accept ``list`` too: upstream ``initialize_kvcaches_ptr`` relists every
     # per-layer tuple before grouping runs (see ``KVCacheFormat.detect``).
     if isinstance(kv_cache, (tuple, list)):
-        if _is_multi_plane_tuple(kv_cache):
+        if _uses_packed_multi_plane_row(kv_cache):
             # Grouping key: sum of per-slot plane widths (chunk-independent).
             plane_bytes = _multi_plane_plane_bytes(kv_cache)
             total_plane_bytes = sum(plane_bytes)
@@ -351,7 +351,7 @@ def build_kv_layer_groups(
                 (lmcache_logical_chunk_size + compress_ratio - 1) // compress_ratio,
             )
         multi_plane_hidden_bytes: tuple[int, ...] | None = None
-        if isinstance(rep, (tuple, list)) and _is_multi_plane_tuple(rep):
+        if isinstance(rep, (tuple, list)) and _uses_packed_multi_plane_row(rep):
             rep_dtype = torch.uint8
             plane_bytes = _multi_plane_plane_bytes(rep)
             shape_desc.hs = _multi_plane_lmc_row_bytes(

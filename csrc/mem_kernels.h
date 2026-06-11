@@ -79,8 +79,7 @@ void multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
-    const int64_t dsa_hidden_dims = 0, const int64_t dsa_c8_scale_plane_bytes = 0,
-    const int32_t paged_kv_block_size = 0);
+    const int64_t dsa_hidden_dims = 0);
 
 void fused_multi_layer_kv_transfer(
     torch::Tensor &key_value,
@@ -89,8 +88,7 @@ void fused_multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims = 0, const int64_t v_hidden_dims = 0,
-    const int64_t dsa_hidden_dims = 0, const int64_t dsa_c8_scale_plane_bytes = 0,
-    const int32_t paged_kv_block_size = 0);
+    const int64_t dsa_hidden_dims = 0);
 
 void multi_layer_kv_transfer_310p(
     torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]
