@@ -1537,7 +1537,7 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
     """DSA+C8: byte-oriented LMCache chunk (uint8) and four paged pointers per layer."""
     # Unique scope: this is the only direct c_ops multi-plane round-trip (store+load+parity).
     # Other multi-plane tests route through connector wrappers or only verify store-side layout.
-    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+    from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 
     device = "npu"
     num_blocks = max((num_tokens // block_size) * 2, 256)
@@ -1565,20 +1565,19 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
     slot_mapping = torch.arange(0, num_tokens, device=device, dtype=torch.long)
     slot_mapping_chunked = torch.split(slot_mapping, chunk_size)
 
-    # Regression guard: _multi_plane_layer_block_bytes previously asserted
-    # plane_stride % 32 == 0, which fires for the scale plane (hd=2, sb=2) when
-    # a partial last chunk has a token count not divisible by 16.  Verify every
-    # chunk size — including partial ones — is handled without error, and that
-    # the returned value matches the kernel's AlignUp32Bytes accumulation.
+    # Regression guard: partial last chunks (e.g. scale plane hd=2) must not
+    # assume plane_stride is already 32-byte aligned. Verify _lmc_chunk_hidden_bytes
+    # matches the kernel's AlignUp32Bytes accumulation for every chunk size.
     for chunk_toks in {int(c.shape[0]) for c in slot_mapping_chunked}:
-        block = _multi_plane_layer_block_bytes(list(plane_bytes), chunk_toks)
-        expected = sum((hd * chunk_toks + 31) & ~31 for hd in plane_bytes)
-        assert block == expected, (
-            f"_multi_plane_layer_block_bytes mismatch for chunk_toks={chunk_toks}: "
-            f"got {block}, expected {expected}"
+        layer_chunk = sum((hd * chunk_toks + 31) & ~31 for hd in plane_bytes)
+        row = _lmc_chunk_hidden_bytes(list(plane_bytes), chunk_toks)
+        expected_row = (layer_chunk + chunk_toks - 1) // chunk_toks
+        assert row == expected_row, (
+            f"_lmc_chunk_hidden_bytes mismatch for chunk_toks={chunk_toks}: "
+            f"got {row}, expected {expected_row}"
         )
 
-    row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
+    row_bytes = _lmc_chunk_hidden_bytes(list(plane_bytes), chunk_size)
     pinned_cpu_size = max(
         256 * 1024 * 1024,
         row_bytes * num_layers * num_tokens * 2,
@@ -1634,7 +1633,7 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
 
     memory_obj_list = []
     for slot_temp in slot_mapping_chunked:
-        chunk_row_bytes = _multi_plane_lmc_row_bytes(list(plane_bytes), chunk_size)
+        chunk_row_bytes = _lmc_chunk_hidden_bytes(list(plane_bytes), chunk_size)
         mem_obj_shape = torch.Size([1, num_layers, chunk_size, chunk_row_bytes])
         memory_obj = mem_allocator.allocate(mem_obj_shape, torch.uint8)
         _dsa_c8_multi_plane_xfer(
@@ -1699,10 +1698,7 @@ from .conftest_kvcache import (
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     _build_slot_mapping_for_group,
 )
-from lmcache_ascend.v1.kv_layer_groups import (
-    _multi_plane_layer_block_bytes,
-    _multi_plane_lmc_row_bytes,
-)
+from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
     _derive_group_params,
@@ -1784,8 +1780,8 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     plane_bytes = group_params["per_plane_hidden_dim_bytes"]
     # AlignUp32 per plane to match the kernel's AlignUp32Bytes accumulation.
     plane_block_sizes = [(b * chunk + 31) & ~31 for b in plane_bytes]
-    lmc_chunk_row_bytes = _multi_plane_lmc_row_bytes(plane_bytes, chunk)
-    layer_block_bytes = _multi_plane_layer_block_bytes(plane_bytes, chunk)
+    lmc_chunk_row_bytes = _lmc_chunk_hidden_bytes(plane_bytes, chunk)
+    layer_block_bytes = sum((b * chunk + 31) & ~31 for b in plane_bytes)
     ptrs = torch.tensor(
         [p.data_ptr() for p in planes], dtype=torch.int64, device=dev
     )
@@ -1882,7 +1878,7 @@ def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
         planes, KVCacheFormat.MULTI_PLANE_KV, shape_desc, layout_hints=layout_hints, num_tokens=chunk
     )
     hd = group_params["per_plane_hidden_dim_bytes"][0]
-    lmc_chunk_row_bytes = _multi_plane_lmc_row_bytes(
+    lmc_chunk_row_bytes = _lmc_chunk_hidden_bytes(
         group_params["per_plane_hidden_dim_bytes"], chunk
     )
     sched_g = 0

@@ -485,14 +485,6 @@ def _patch_vllm_v1_adapter():
 
     lmc_vllm_v1_adapter.RequestTracker = mg.RequestTracker
     lmc_vllm_v1_adapter.ReqMeta = mg.ReqMeta
-    lmc_vllm_v1_adapter.BlockIdsLike = mg.BlockIdsLike
-    lmc_vllm_v1_adapter._empty_block_ids_by_group = mg._empty_block_ids_by_group
-    lmc_vllm_v1_adapter._normalize_block_ids = mg._normalize_block_ids
-    lmc_vllm_v1_adapter._normalize_block_sizes = mg._normalize_block_sizes
-    lmc_vllm_v1_adapter._build_slot_mapping_for_group = mg._build_slot_mapping_for_group
-    lmc_vllm_v1_adapter._build_slot_mappings_by_group = (
-        mg._build_slot_mappings_by_group
-    )
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
     def handle_preemptions(self, preempted_req_ids):
@@ -504,16 +496,27 @@ def _patch_vllm_v1_adapter():
 
 
 def _patch_metadata_get_shapes():
-    """Chunk-dependent multi-plane row bytes for ``LMCacheMetadata.get_shapes``.
-    This patch is used to get the correct shapes for the multi-plane KV cache that
-    stores layers contiguously in the LMCache chunk."""
+    """Patch ``LMCacheMetadata.get_shapes`` for Ascend multi-group KV allocation.
+    Upstream sizes each group as ``[kv_size, nl, num_tokens, hidden_dim_size]``,
+    which is wrong for complex layouts. This patch fixes two cases:
+
+    1. Multi-plane row bytes (DSA / DSA-C8 / bundled planes): planes are packed
+       contiguously per layer with 32-byte alignment. The last dim must be
+       recomputed via ``_lmc_chunk_hidden_bytes`` at allocation time because
+       it depends on ``num_tokens`` (including partial last chunks).
+
+    2. Sliding-window / compress-ratio token dimension: single-plane groups use
+       ``physical_chunk_size`` (SW // CR) in the token dim to avoid overallocation;
+       multi-plane groups keep logical ``num_tokens`` because the NPU kernel packs
+       a full logical chunk across planes.
+    """
     # Third Party
     from typing import Optional
 
     import torch
     from lmcache.v1.metadata import LMCacheMetadata
 
-    from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+    from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 
     _orig_get_shapes = LMCacheMetadata.get_shapes
 
@@ -532,7 +535,7 @@ def _patch_metadata_get_shapes():
                     physical = max(1, num_tokens * physical // self.chunk_size)
                 if plane_bytes is not None:
                     token_dim = num_tokens
-                    hidden = _multi_plane_lmc_row_bytes(plane_bytes, token_dim)
+                    hidden = _lmc_chunk_hidden_bytes(plane_bytes, token_dim)
                 else:
                     token_dim = physical
                     hidden = group.hidden_dim_size

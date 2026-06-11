@@ -36,7 +36,6 @@ def test_ds4_multi_plane_slot_slice_bounds_768_tokens_chunk256() -> None:
     _, _, layer_to_groups, _ = build_flat_kv_caches(
         make_ds4_kv_caches_dict(torch.device("cpu"), num_blocks=4),
         _make_ds4_kv_cache_config(),
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
     )
     sched_groups = layer_to_groups[L2]
     slot_mappings = make_production_slot_mappings(768, torch.device("cpu"))

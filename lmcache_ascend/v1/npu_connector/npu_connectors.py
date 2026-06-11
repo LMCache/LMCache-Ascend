@@ -2116,9 +2116,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            from lmcache_ascend.v1.kv_layer_groups import _multi_plane_lmc_row_bytes
+            from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 
-            row_bytes = _multi_plane_lmc_row_bytes(
+            row_bytes = _lmc_chunk_hidden_bytes(
                 list(self.dsa_c8_plane_bytes), num_tokens
             )
             return torch.Size([1, self.num_layers, num_tokens, row_bytes])

@@ -5,7 +5,7 @@ vllm adapter overrides for multi-group KV cache without modificaiton to upstream
 Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Impl``.
 """
 # Standard
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 # Third Party
@@ -18,18 +18,13 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
-from lmcache.integration.vllm.utils import (
-    extract_mm_features,
-)
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     LoadSpec,
     ReqMeta as UpstreamReqMeta,
     RequestTracker as UpstreamRequestTracker,
-    extract_request_configs,
     logger,
-    tmp_disagg_tracker,
 )
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
@@ -123,7 +118,11 @@ def _sliding_window_store_mask(
     sliding_win_size: int,
     lmcache_chunk_size: int,
 ) -> torch.Tensor:
-    """Returns a boolean mask of tokens to NOT be stored in sliding-window groups."""
+    """True for token positions in the trailing sliding-window region of each chunk.
+
+    Within each LMCache chunk, only the last ``sliding_win_size`` tokens are
+    live in a sliding-window KV group.
+    """
     chunk_start = (tokens_uncompressed // lmcache_chunk_size) * lmcache_chunk_size
     chunk_end = chunk_start + lmcache_chunk_size
     chunk_window_start = chunk_end - sliding_win_size
@@ -148,12 +147,10 @@ def _build_slot_mapping_for_group(
         raise ValueError(f"block_size must be positive, got {block_size}")
     if compress_ratio < 1:
         raise ValueError(f"compress_ratio must be >= 1, got {compress_ratio}")
-    if not block_ids:
+    if not block_ids or num_tokens == 0:
         return torch.empty(0, dtype=torch.long)
 
     tokens_uncompressed = torch.arange(num_tokens, dtype=torch.long)
-    if tokens_uncompressed.numel() == 0:
-        return torch.empty(0, dtype=torch.long)
     tokens_compressed = (tokens_uncompressed // compress_ratio)[::compress_ratio]
     block_ids_tensor = torch.tensor(block_ids, dtype=torch.long)
     block_idx = tokens_compressed // block_size
@@ -188,13 +185,24 @@ def _build_slot_mappings_by_group(
             "Block ids and block sizes group count mismatch: "
             f"{len(block_ids_by_group)} vs {len(block_sizes_by_group)}"
         )
+    num_groups = len(block_ids_by_group)
+    swsbg = sliding_window_size_by_group
+    if compress_ratios is not None and len(compress_ratios) != num_groups:
+        raise ValueError(
+            "Compress ratios and block ids group count mismatch: "
+            f"{len(compress_ratios)} vs {num_groups}"
+        )
+    if swsbg is not None and len(swsbg) != num_groups:
+        raise ValueError(
+            "Sliding window sizes and block ids group count mismatch: "
+            f"{len(sliding_window_size_by_group)} vs {num_groups}"
+        )
     mappings: list[torch.Tensor] = []
     for g, (group_block_ids, block_size) in enumerate(
         zip(block_ids_by_group, block_sizes_by_group)
     ):
         ratio = compress_ratios[g] if compress_ratios else 1
-        swsbg = sliding_window_size_by_group
-        sw_size = (swsbg[g] if swsbg and g < len(swsbg) else None)
+        sw_size = swsbg[g] if swsbg is not None else None
         mappings.append(
             _build_slot_mapping_for_group(
                 list(group_block_ids),
@@ -228,9 +236,10 @@ class RequestTracker(UpstreamRequestTracker):
             self.allocated_block_ids = list(self.allocated_block_ids_by_group[0])
 
     @_lmcache_nvtx_annotate
-    @staticmethod
+    @classmethod
     def from_new_request(
-        lmcache_config: LMCacheEngineConfig,  # noqa: ARG004
+        cls,
+        lmcache_config: LMCacheEngineConfig,
         new_request: "NewRequestData",
         num_tokens_to_compute: int,
         lmcache_cached_tokens: int,
@@ -238,6 +247,9 @@ class RequestTracker(UpstreamRequestTracker):
         expected_num_groups: int = 1,
     ) -> "RequestTracker":
         """Create the request tracker from a new request.
+
+        Delegates to upstream for shared fields, then attaches per-group
+        block ids normalized for multi-group KV cache layouts.
 
         Args:
             lmcache_config (LMCacheEngineConfig): the LMCache engine config.
@@ -250,32 +262,25 @@ class RequestTracker(UpstreamRequestTracker):
             skip_save (bool): whether the request cache should be saved
             expected_num_groups (int): number of KV cache groups.
         """
+        base = super().from_new_request(
+            lmcache_config,
+            new_request,
+            num_tokens_to_compute,
+            lmcache_cached_tokens,
+            skip_save,
+        )
         allocated_block_ids_by_group = _normalize_block_ids(
             new_request.block_ids,
             expected_num_groups,
         )
-
-        # NOTE: Initialized in `update_state_after_alloc`
-        disagg_spec = tmp_disagg_tracker.pop(new_request.req_id, None)
-
-        request_configs = extract_request_configs(new_request.sampling_params)
-
-        mm_hashes, mm_positions = extract_mm_features(new_request, modify=True)
-
-        token_ids_slice = new_request.prompt_token_ids[:num_tokens_to_compute].copy()
-        return RequestTracker(
-            req_id=new_request.req_id,
-            prompt_len=len(new_request.prompt_token_ids),
-            token_ids=token_ids_slice,
+        return cls(
+            **{
+                f.name: getattr(base, f.name)
+                for f in fields(UpstreamRequestTracker)
+                if f.name != "allocated_block_ids"
+            },
             allocated_block_ids=list(allocated_block_ids_by_group[0]),
             allocated_block_ids_by_group=allocated_block_ids_by_group,
-            num_saved_tokens=lmcache_cached_tokens,
-            disagg_spec=disagg_spec,
-            mm_hashes=mm_hashes,
-            mm_positions=mm_positions,
-            skip_save=skip_save,
-            request_configs=request_configs,
-            num_lmcache_cached_tokens=lmcache_cached_tokens,
         )
 
     def update(
@@ -287,14 +292,22 @@ class RequestTracker(UpstreamRequestTracker):
         vllm_cached_tokens: int = 0,
         all_token_ids: Optional[list[int]] = None,
     ) -> None:
-        """Update the request tracker when a running request is
-        scheduled again
+        """Update the request tracker when a running request is scheduled again.
 
-        vllm_cached_tokens: the number of tokens that are cached in vLLM
-        is only used for preempted requests
-        all_token_ids: the full token list from the vLLM request, used to
-        restore token_ids for preempted requests to ensure chunk keys match
+        Delegates token/saved-state/decode logic to upstream, then applies
+        multi-group block-id normalization and per-group merging.
         """
+        if self.num_kv_groups == 1:
+            super().update(
+                new_token_ids,
+                new_block_ids,
+                preempted=preempted,
+                lmcache_cached_tokens=lmcache_cached_tokens,
+                vllm_cached_tokens=vllm_cached_tokens,
+                all_token_ids=all_token_ids,
+            )
+            self.allocated_block_ids_by_group = (list(self.allocated_block_ids),)
+            return
 
         # vLLM may pass None, a flat single-group list, or a grouped tuple/list
         # depending on scheduler version and model cache layout.
@@ -302,43 +315,28 @@ class RequestTracker(UpstreamRequestTracker):
             new_block_ids,
             self.num_kv_groups,
         )
+        old_block_ids_by_group = self.allocated_block_ids_by_group
+
+        super().update(
+            new_token_ids,
+            new_block_ids_by_group[0],
+            preempted=preempted,
+            lmcache_cached_tokens=lmcache_cached_tokens,
+            vllm_cached_tokens=vllm_cached_tokens,
+            all_token_ids=all_token_ids,
+        )
 
         if preempted:
-            assert all_token_ids is not None, (
-                f"Preempted request {self.req_id} has no all_token_ids"
-            )
-            # the block ids will change after preemption
             self.allocated_block_ids_by_group = new_block_ids_by_group
-            self._sync_primary_allocated_block_ids()
-            # reset the number of saved tokens
-            self.num_saved_tokens = lmcache_cached_tokens
-            num_computed_tokens = max(lmcache_cached_tokens, vllm_cached_tokens)
-
-            # FIX: For preempted requests, restore token_ids from the full
-            # token list to ensure chunk keys match what was used during
-            # lookup. The lookup uses request.all_token_ids, so we need the
-            # same tokens for retrieve.
-            num_tokens_needed = max(
-                num_computed_tokens + len(new_token_ids),
-                lmcache_cached_tokens,
-            )
-            self.token_ids = all_token_ids[:num_tokens_needed]
         else:
-            merged: list[list[int]] = []
-            for old_group_ids, new_group_ids in zip(
-                self.allocated_block_ids_by_group,
-                new_block_ids_by_group,
-            ):
-                merged.append(old_group_ids + new_group_ids)
-            self.allocated_block_ids_by_group = tuple(merged)
-            self._sync_primary_allocated_block_ids()
-            self.token_ids.extend(new_token_ids)
-
-        # When a request is scheduled again, and the number of new tokens
-        # is 1 (excluding chunked prefill), the request is in decode phase.
-        # TODO: Need to further exclude the case of chunked prefill with 1 token.
-        if len(new_token_ids) == 1:
-            self.is_decode_phase = True
+            self.allocated_block_ids_by_group = tuple(
+                old_group_ids + new_group_ids
+                for old_group_ids, new_group_ids in zip(
+                    old_block_ids_by_group,
+                    new_block_ids_by_group,
+                )
+            )
+        self._sync_primary_allocated_block_ids()
 
 
 @dataclass
@@ -390,7 +388,7 @@ class ReqMeta(UpstreamReqMeta):
         if tracker.num_kv_groups > 1:
             assert discard_partial_chunks, (
                 "Multi-group KV cache requires discard_partial_chunks=True; "
-                "partial-chunk store/load is not supported across KV cache groups."
+                "partial-chunk store/load is not supported for state and sliding windowgroups."
             )
         if tracker.num_kv_groups == 1:
             primary_kv_group_idx = 0

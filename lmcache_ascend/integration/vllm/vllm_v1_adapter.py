@@ -13,7 +13,7 @@ from lmcache.utils import _lmcache_nvtx_annotate
 # First Party
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     build_flat_kv_caches,
-    should_flatten_kv_caches,
+    has_multiple_scheduler_groups,
 )
 from lmcache_ascend.integration.vllm.skip_state_groups import (
     apply_skip_policy_from_env_to_flattened,
@@ -68,34 +68,17 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         *args: Any,
         **kwargs: Any,
     ) -> None:
-        """Preprocess multi-spec layers and push upstream layout hints.
-
-        The model runner passes one tuple entry per layer name, but multi-spec
-        layers pack multiple 4-D sub-tensors (one per spec/scheduler-group).
-        With bundling (default), the tuple is kept as-is and the NPU connector
-        derives per-group parameters (block size, hidden bytes, DMA stride)
-        dimensionality-agnostically via build_kv_layer_groups.
-        """
+        """Register KV caches (upstream) with Ascend multi-group preprocessing."""
         flat_kv = kv_caches
         sched_by_layer: tuple[int, ...] | None = None
         layer_to_groups: dict[str, list[int]] | None = None
-        cache_cfg = getattr(self._vllm_config, "cache_config", None)
-        block_size = int(getattr(cache_cfg, "block_size", 0) or 0) if cache_cfg else 0
-        ie_logical_block_size = block_size
-        if self._kv_cache_config is not None and getattr(
-            self._kv_cache_config, "kv_cache_groups", None
-        ):
-            ie_logical_block_size = max(
-                int(g.kv_cache_spec.block_size)
-                for g in self._kv_cache_config.kv_cache_groups
-            )
-
         bundled = False
-        if should_flatten_kv_caches(self._kv_cache_config):
+        multi_group = has_multiple_scheduler_groups(self._kv_cache_config)
+
+        if multi_group:
             flat_kv, sched_by_layer, layer_to_groups, bundled = build_flat_kv_caches(
                 kv_caches,
                 self._kv_cache_config,
-                ie_logical_block_size=ie_logical_block_size or None,
             )
             flat_kv, sched_by_layer, layer_to_groups = apply_skip_policy_from_env_to_flattened(
                 self._kv_cache_config,
@@ -112,46 +95,28 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 bundled,
             )
 
-        try:
-            # Inject extracted layout hints into the NPU connector
-            engine = getattr(self, "lmcache_engine", None)
-            connector = getattr(engine, "gpu_connector", None) if engine else None
-            if ie_logical_block_size and connector is not None and hasattr(
-                connector, "layout_hints"
-            ):
-                hints = connector.layout_hints or {}
-                if block_size:
-                    hints["vllm_block_size"] = block_size
-                if self._num_kv_groups > 1:
-                    hints["block_sizes_by_group"] = self._block_sizes_by_group
-                hints["inference_engine_logical_block_size"] = ie_logical_block_size
+        engine = getattr(self, "lmcache_engine", None)
+        connector = getattr(engine, "gpu_connector", None) if engine else None
+        if connector is not None and hasattr(connector, "layout_hints"):
+            hints = connector.layout_hints or {}
+            hints["vllm_block_size"] = self._block_size
+            if multi_group:
+                hints["block_sizes_by_group"] = self._block_sizes_by_group
                 hints["compress_ratios_by_group"] = self._compress_ratios_by_group
                 hints["sliding_window_size_by_group"] = getattr(
                     self, "_sliding_window_size_by_group", None
                 )
-                if sched_by_layer is not None:
-                    hints["scheduler_group_by_flat_layer"] = sched_by_layer
-                if layer_to_groups is not None:
-                    hints["layer_to_scheduler_groups"] = layer_to_groups
-                    hints["model_kv_caches"] = kv_caches
-                    hints["flat_layer_names"] = list(flat_kv.keys())
-                if should_flatten_kv_caches(self._kv_cache_config):
-                    hints["bundle_multi_spec"] = bundled
-                connector.layout_hints = hints
-        except Exception:
-            logger.warning(
-                "Failed to push layout hints into NPU connector",
-                exc_info=True,
-            )
+                hints["scheduler_group_by_flat_layer"] = sched_by_layer
+                hints["layer_to_scheduler_groups"] = layer_to_groups
+                hints["model_kv_caches"] = kv_caches
+                hints["flat_layer_names"] = list(flat_kv.keys())
+                hints["bundle_multi_spec"] = bundled
+            connector.layout_hints = hints
 
         # Build kv_layer_groups_manager before post_init() so
         # metadata.get_shapes() allocates one MemoryObj slot per NPU group.
-        # Pointer tables stay lazy in _initialize_pointers on first store.
-        flatten_active = should_flatten_kv_caches(self._kv_cache_config)
-        try:
-            engine = getattr(self, "lmcache_engine", None)
-            connector = getattr(engine, "gpu_connector", None) if engine else None
-            if connector is not None and hasattr(connector, "ensure_kv_layer_groups"):
+        if connector is not None and hasattr(connector, "ensure_kv_layer_groups"):
+            try:
                 connector.ensure_kv_layer_groups(list(flat_kv.values()))
                 logger.info(
                     "Registered KV layer groups during register_kv_caches "
@@ -163,21 +128,24 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                         "N/A",
                     ),
                 )
-        except Exception:
-            if flatten_active:
-                logger.error(
-                    "Failed to register KV layer groups after multi-spec "
-                    "preprocessing",
+            except Exception:
+                if multi_group:
+                    logger.error(
+                        "Failed to register KV layer groups after multi-spec "
+                        "preprocessing",
+                        exc_info=True,
+                    )
+                    raise
+                logger.warning(
+                    "Failed to register KV layer groups; "
+                    "will fall back to legacy single-group allocation",
                     exc_info=True,
                 )
-                raise
-            logger.warning(
-                "Failed to register KV layer groups; "
-                "will fall back to legacy single-group allocation",
-                exc_info=True,
-            )
 
-        super().register_kv_caches(flat_kv, *args, **kwargs)
+        logger.info("Registering KV caches")
+        assert len(self.kv_caches) == 0 and len(flat_kv) > 0
+        self.kv_caches = flat_kv
+        self._manager.post_init()
 
     # Upstream start_load_kv only transfers the primary group's slot_mapping.
     # Multi-group retrieve needs ALL per-group slot mappings on NPU so the
@@ -201,8 +169,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
 
-        if len(self.kv_caches) == 0:
-            return
+        assert len(self.kv_caches) > 0
+        kvcaches = list(self.kv_caches.values())
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -210,16 +178,16 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             return
 
         assert self.lmcache_engine is not None
-        kvcaches = list(self.kv_caches.values())
         gpu_connector = self.lmcache_engine.gpu_connector
         self.layerwise_retrievers = []
 
-        last_idx = None
         for idx, request in enumerate(metadata.requests):
-            if request.load_spec is not None and request.load_spec.can_load:
-                last_idx = idx
+            if request.load_spec is None or not request.load_spec.can_load:
+                continue
+            last_idx = idx
 
         for idx, request in enumerate(metadata.requests):
+            # Update metrics for all requests that have a load_spec
             if request.load_spec is not None:
                 self._stats_monitor.update_interval_vllm_hit_tokens(
                     request.load_spec.vllm_cached_tokens
@@ -239,6 +207,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 slot_mappings_cpu.append(group_slot_mapping.pin_memory())
 
             pg = request.primary_kv_group_idx
+            slot_mapping_cpu = slot_mappings_cpu[pg]
+            assert len(slot_mapping_cpu) <= len(tokens)
+
             lmcache_cached_tokens = request.load_spec.lmcache_cached_tokens
 
             slot_mappings_npu: list[torch.Tensor] = []
@@ -306,7 +277,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 retrieve_kwargs["mp_launch_meta"] = mp_launch_meta
 
             if self.use_layerwise:
-                sync = idx == last_idx
+                if idx == last_idx:
+                    sync = True
+                else:
+                    sync = False
+                # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
                     self.blender.blend(
                         tokens[:lmcache_cached_tokens],
@@ -419,7 +394,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 slot_mapping = slot_mappings_cpu[pg]
                 if request.num_kv_groups > 1:
                     logger.info(
-                        "Ascend wait_for_save: multi-group slot_mapping "
+                        "Multi-group wait_for_save: multi-group slot_mapping "
                         "(%d groups); primary group %d has %d slots for "
                         "%d tokens",
                         request.num_kv_groups,

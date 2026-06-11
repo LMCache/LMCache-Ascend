@@ -34,9 +34,6 @@ DSV4_CR128_SCHEDULE = (
     ("C128AttnScoreStateSpec", 64),
 )
 
-DSV4_IE_LOGICAL_BLOCK_SIZE = 1024
-
-
 class SWAAttentionSpec:
     def __init__(self, block_size: int = 128) -> None:
         self.block_size = block_size
@@ -134,7 +131,7 @@ def ds4_config():
 
 def test_dense_layer_spec_order(ds4_config) -> None:
     groups = ordered_scheduler_groups_for_layer(
-        L0, _tensor(128), ds4_config, ie_logical_block_size=128
+        L0, _tensor(128), ds4_config
     )
     assert groups == [1]
 
@@ -142,7 +139,7 @@ def test_dense_layer_spec_order(ds4_config) -> None:
 def test_compress4_layer_spec_order(ds4_config) -> None:
     subs = [_tensor(block_size) for _, block_size in DSV4_CR4_SCHEDULE]
     groups = ordered_scheduler_groups_for_layer(
-        L2, subs, ds4_config, ie_logical_block_size=128
+        L2, subs, ds4_config
     )
     assert groups == [0, 2, 3, 3, 4, 5, 6, 7]
 
@@ -153,7 +150,7 @@ def test_dsa_tuple_maps_all_subs_to_one_scheduler_group(ds4_config) -> None:
     dsa_k = torch.zeros(4, 128, 1, 128, dtype=torch.int8)
     dsa_scale = torch.zeros(4, 128, 1, 1, dtype=torch.float16)
     groups = ordered_scheduler_groups_for_layer(
-        L3, (k, v, dsa_k, dsa_scale), ds4_config, ie_logical_block_size=128
+        L3, (k, v, dsa_k, dsa_scale), ds4_config
     )
     assert groups == [8, 8, 8, 8]
 
@@ -174,14 +171,14 @@ def test_compress128_layer_spec_order() -> None:
     config = SimpleNamespace(kv_cache_groups=kv_cache_groups)
     subs = [_tensor(block_size) for _, block_size in DSV4_CR128_SCHEDULE]
     groups = ordered_scheduler_groups_for_layer(
-        layer, subs, config, ie_logical_block_size=128
+        layer, subs, config
     )
     assert groups == [0, 1, 2, 3]
 
 
 def test_flatten_single_tensor(ds4_config) -> None:
     kv = {L0: _tensor(128)}
-    flat, sched, _, _ = build_flat_kv_caches(kv, ds4_config, ie_logical_block_size=128)
+    flat, sched, _, _ = build_flat_kv_caches(kv, ds4_config)
     assert list(flat.keys()) == [f"{L0}.sub0"]
     assert sched == (1,)
 
@@ -194,7 +191,7 @@ def test_flatten_compress4_eight_subs(
     set_bundle_multi_spec_env(monkeypatch, enabled=False)
     subs = [_tensor(block_size) for _, block_size in DSV4_CR4_SCHEDULE]
     kv = {L2: subs}
-    flat, sched, _, _ = build_flat_kv_caches(kv, ds4_config, ie_logical_block_size=128)
+    flat, sched, _, _ = build_flat_kv_caches(kv, ds4_config)
     assert len(flat) == 8
     assert sched == (0, 2, 3, 3, 4, 5, 6, 7)
 
@@ -210,9 +207,7 @@ def test_flatten_preserves_mla_tuple_when_bundle_disabled(
     v = torch.zeros(4, 128, 1, 64)
     entry = (k, v)
     kv = {L3: entry}
-    flat, sched, _, bundled = build_flat_kv_caches(
-        kv, ds4_config, ie_logical_block_size=DSV4_IE_LOGICAL_BLOCK_SIZE
-    )
+    flat, sched, _, bundled = build_flat_kv_caches(kv, ds4_config)
     assert bundled is True
     assert flat[L3] is entry
     assert sched == (8,)
@@ -238,9 +233,7 @@ def test_flatten_preserves_dsa_c8_tuple(
     set_bundle_multi_spec_env(monkeypatch, enabled=bundle_enabled)
     entry = _dsa_c8_entry()
     kv = {L3: entry}
-    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(
-        kv, ds4_config, ie_logical_block_size=128
-    )
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(kv, ds4_config)
     assert bundled is True
     assert flat[L3] is entry
     assert len(flat[L3]) == 4
@@ -251,17 +244,13 @@ def test_flatten_preserves_dsa_c8_tuple(
 
 def test_compress128_l3_not_kernel_native(ds4_config) -> None:
     """DSv4 L3 compress128 tuple is MULTI_PLANE, not kernel-native MLA/DSA."""
-    from .conftest_ds4 import DS4_IE_LOGICAL_BLOCK_SIZE, make_ds4_kv_caches_dict
+    from .conftest_ds4 import make_ds4_kv_caches_dict
 
     dev = torch.device("cpu")
     kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
     assert not _is_kernel_native_tuple(kv_dict[L3])
     assert KVCacheFormat.detect([kv_dict[L3]]) == KVCacheFormat.MULTI_PLANE_KV
-    flat, _, _, _ = build_flat_kv_caches(
-        {L3: kv_dict[L3]},
-        ds4_config,
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
-    )
+    flat, _, _, _ = build_flat_kv_caches({L3: kv_dict[L3]}, ds4_config)
     assert isinstance(flat[L3], tuple)
     assert len(flat[L3]) == 4
 
@@ -271,24 +260,18 @@ def test_build_layer_to_scheduler_groups(ds4_config) -> None:
         L0: _tensor(128),
         L2: [_tensor(block_size) for _, block_size in DSV4_CR4_SCHEDULE],
     }
-    mapping = build_layer_to_scheduler_groups(
-        ds4_config, kv.keys(), kv, ie_logical_block_size=128
-    )
+    mapping = build_layer_to_scheduler_groups(ds4_config, kv.keys(), kv)
     assert mapping[L0] == [1]
     assert mapping[L2] == [0, 2, 3, 3, 4, 5, 6, 7]
 
 
 def test_bundle_flatten_preserves_multi_spec_layers(ds4_config) -> None:
     """Bundled flatten keeps L2 eight-tuple and L3 four-tuple (5 flat layers)."""
-    from .conftest_ds4 import DS4_IE_LOGICAL_BLOCK_SIZE, make_ds4_kv_caches_dict
+    from .conftest_ds4 import make_ds4_kv_caches_dict
 
     dev = torch.device("cpu")
     kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
-    flat, sched, layer_to_groups, _ = build_flat_kv_caches(
-        kv_dict,
-        ds4_config,
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
-    )
+    flat, sched, layer_to_groups, _ = build_flat_kv_caches(kv_dict, ds4_config)
     assert len(flat) == 5
     assert isinstance(flat[L2], tuple)
     assert isinstance(flat[L3], tuple)

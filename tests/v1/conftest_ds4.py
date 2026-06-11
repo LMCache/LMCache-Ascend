@@ -312,7 +312,6 @@ def build_bundled_ds4_connector(
     flat, sched, layer_to_groups, _ = build_flat_kv_caches(
         kv_dict,
         _make_ds4_kv_cache_config(),
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
     )
     kv_list = list(flat.values())
     layout_hints = {
@@ -354,7 +353,6 @@ def build_exploded_flat_connector(
     flat, sched_by_layer, _, _ = build_flat_kv_caches(
         kv_dict,
         _make_ds4_kv_cache_config(),
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
     )
     kv_list = list(flat.values())
     layout_hints = {
@@ -639,7 +637,6 @@ def make_ds4_setup():
     kv_caches, sched_by_layer, _, _ = build_flat_kv_caches(
         kv_dict,
         _make_ds4_kv_cache_config(),
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
     )
     kv_caches = list(kv_caches.values())
     connector, metadata = build_connector_and_metadata(
