@@ -27,10 +27,10 @@ The `transfer_channel` field in the LMCache YAML config selects the NPU communic
 To switch channels, update the `transfer_channel` field in your YAML configs:
 
 ```yaml
-# CANN 8.3+ (legacy)
+# CANN 8.5+ (recommended)
 transfer_channel: "hccl"
 
-# CANN 8.5+ (recommended)
+# CANN 8.5+ (Experimental)
 transfer_channel: "hixl"
 ```
 
