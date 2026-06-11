@@ -26,7 +26,7 @@ from lmcache_ascend.v1.kv_format import (
     _is_shared_storage_blob,
 )
 from lmcache_ascend.v1.kv_layer_groups import (
-    _multi_plane_lmc_row_bytes,
+    _lmc_chunk_hidden_bytes,
     _get_kv_cache_group_key_and_info,
     build_kv_layer_groups,
 )
@@ -170,7 +170,7 @@ def test_dsa_c8_4tuple_classified_as_attention_with_mixed_dtypes():
     assert g.shape_desc.kv_size == 1
     assert g.dtype == torch.uint8
     assert g.multi_plane_hidden_bytes is not None
-    assert g.shape_desc.hs == _multi_plane_lmc_row_bytes(
+    assert g.shape_desc.hs == _lmc_chunk_hidden_bytes(
         g.multi_plane_hidden_bytes,
         g.physical_chunk_size,
     )
@@ -353,7 +353,7 @@ def test_metadata_helpers_for_dsa_c8_pool():
     md = _make_metadata(mgr, use_mla=True)
     assert md.get_num_groups() == 1
     assert md.get_dtypes() == [torch.uint8]
-    hidden = _multi_plane_lmc_row_bytes(
+    hidden = _lmc_chunk_hidden_bytes(
         g.multi_plane_hidden_bytes,
         g.physical_chunk_size,
     )
@@ -439,7 +439,7 @@ def test_sliding_window_reduces_physical_chunk_size_and_multi_plane_row_width():
     assert g.compress_ratio == 8
     assert g.physical_chunk_size == 16
     assert g.multi_plane_hidden_bytes is not None
-    assert g.shape_desc.hs == _multi_plane_lmc_row_bytes(
+    assert g.shape_desc.hs == _lmc_chunk_hidden_bytes(
         g.multi_plane_hidden_bytes,
         g.physical_chunk_size,
     )

@@ -17,7 +17,6 @@ from lmcache_ascend.integration.vllm.skip_state_groups import (
 )
 
 from .conftest_ds4 import (
-    DS4_IE_LOGICAL_BLOCK_SIZE,
     make_ds4_kv_caches_dict,
     set_bundle_multi_spec_env,
     set_skip_state_groups_env,
@@ -100,11 +99,7 @@ def test_apply_skip_filter_bundled_reduces_planes(
     dev = torch.device("cpu")
     kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
     cfg = _make_ds4_kv_cache_config()
-    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(
-        kv_dict,
-        cfg,
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
-    )
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(kv_dict, cfg)
     assert bundled is True
 
     skipped = frozenset({4, 5, 6, 7})
@@ -120,9 +115,7 @@ def test_apply_skip_filter_bundled_reduces_planes(
     assert L2 in filtered_flat
     assert isinstance(filtered_flat[L2], tuple)
     assert len(filtered_flat[L2]) == 4
-    assert filtered_layer_to_groups is not None
     assert filtered_layer_to_groups[L2] == [0, 2, 3, 3]
-    assert filtered_sched is not None
     assert len(filtered_sched) == len(filtered_flat)
 
 
@@ -133,11 +126,7 @@ def test_apply_skip_filter_exploded_drops_flat_entries(
     dev = torch.device("cpu")
     kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
     cfg = _make_ds4_kv_cache_config()
-    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(
-        kv_dict,
-        cfg,
-        ie_logical_block_size=DS4_IE_LOGICAL_BLOCK_SIZE,
-    )
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(kv_dict, cfg)
     assert bundled is False
 
     skipped = frozenset({4, 5, 6, 7})
@@ -151,8 +140,6 @@ def test_apply_skip_filter_exploded_drops_flat_entries(
     filtered_flat, filtered_sched, filtered_layer_to_groups = filtered
 
     assert len(filtered_flat) == len(flat) - 4
-    assert filtered_sched is not None
     assert len(filtered_sched) == len(filtered_flat)
     assert all(int(g) not in skipped for g in filtered_sched)
-    assert filtered_layer_to_groups is not None
     assert filtered_layer_to_groups[L2] == [0, 2, 3, 3]

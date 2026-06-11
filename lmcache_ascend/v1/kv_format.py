@@ -25,9 +25,11 @@ def _plane_block_size(tensor: torch.Tensor) -> int:
     raise ValueError(f"Unexpected KV plane ndim={tensor.ndim}")
 
 
-# Detects heterogeneous-block-size tuples produced by BUNDLE_DSV4_TUPLES so
-# KVCacheFormat.detect returns MULTI_PLANE_KV and the NPU connector dispatches
-# to the multi-plane kernel path instead of the single-tensor SEPARATE_KV path.
+# Detects independent planes with heterogeneous block sizes (e.g. multi-spec
+# layers bundled by build_flat_kv_caches when LMCACHE_ASCEND_BUNDLE_MULTI_SPEC
+# is enabled).  Shared-storage dtype views are excluded so detect() does not
+# misclassify them as MULTI_PLANE_KV; genuine multi-plane tuples route the NPU
+# connector to the fused multi-plane kernel instead of SEPARATE_KV / DSA_C8.
 def _is_multi_plane_tuple(cache_entry: Sequence[torch.Tensor]) -> bool:
     """True when planes have heterogeneous block sizes (independent paging)."""
     # Shared-storage blobs are one physical allocation under one scheduler group,

@@ -27,10 +27,19 @@ logger = init_logger(__name__)
 _LayerKV = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
 
 
-# Multi-plane layers (DSA/DSA-C8) have planes with different block sizes;
-# we need per-plane byte widths to pack them into LMCache's flat chunk layout.
-def _multi_plane_plane_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
-    """Per-plane hidden bytes per paged slot for a multi-plane layer tuple."""
+def _plane_slot_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
+    """Return per-plane payload bytes per paged slot.
+
+    Used when :func:`lmcache_ascend.v1.kv_format._uses_packed_multi_plane_row`
+    is true (``MULTI_PLANE_KV`` or ``DSA_C8_KV``). In that layout LMCache stores
+    all planes of one layer as one contiguous ``uint8`` row
+    (``[plane0 | plane1 | …]``); this function supplies each plane's per-slot byte
+    width for that row. Each plane may differ in dtype and hidden width;
+    ``MULTI_PLANE_KV`` may also use heterogeneous ``block_size``. DSA-C8 keeps a
+    uniform ``block_size`` but still needs per-plane widths because dtypes differ.
+
+    Computed as ``numel * element_size // (num_blocks * block_size)`` per plane.
+    """
     out: list[int] = []
     for t in kv_cache:
         nb = int(t.shape[0])
@@ -43,56 +52,40 @@ def _multi_plane_plane_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
     return out
 
 
-# Total chunk footprint per layer: sum of AlignUp32(hd * num_tokens) per plane.
-# The NPU kernel's init() applies AlignUp32Bytes to each plane's payload so that
-# planeByteOffsets are 32B-aligned regardless of hd or num_tokens.  We mirror
-# that here so Python-side byte accounting is always consistent with the kernel,
-# including partial-chunk transfers (is_last_prefill=True, discard_partial_chunks=False).
-def _multi_plane_layer_block_bytes(
-    plane_bytes: Sequence[int], num_tokens: int
+def _lmc_chunk_hidden_bytes(
+    plane_slot_bytes: Sequence[int], num_tokens: int
 ) -> int:
-    """Bytes per layer: sum of AlignUp32(hd * num_tokens) per plane block.
+    """Return ``shape_desc.hs`` / ``MemoryObj`` last dim for a uint8 row group.
 
-    Mirrors the NPU kernel's ``AlignUp32Bytes(perPlaneHdBytes[p] * numTokensLmcChunk)``
-    accumulation so that Python byte accounting matches the device layout even when
-    ``hd * num_tokens`` is not already a multiple of 32 (e.g. scale plane with hd=2
-    and a partial last chunk whose token count is not divisible by 16).
+    Upstream allocates LMCache chunks as ``[kv_size, nl, num_tokens, hidden]``
+    with ``hidden`` in bytes. When planes share one contiguous ``uint8`` row per
+    layer, ``hidden`` is the per-logical-token amortised width:
+    ``ceil(layer_chunk_bytes / num_tokens)``, not the sum of raw per-slot widths.
+
+    ``layer_chunk_bytes`` is the sum over planes of
+    ``AlignUp32(slot_bytes[p] * num_tokens)``, matching the NPU kernel's
+    ``AlignUp32Bytes`` padding (including partial-chunk transfers).
     """
-    total = 0
-    for hd in plane_bytes:
-        plane_stride = hd * num_tokens
-        # Pad to the next 32-byte boundary, matching AlignUp32Bytes in the kernel.
-        plane_stride = (plane_stride + 31) & ~31
-        total += plane_stride
-    return total
-
-
-# The LMCache chunk physical layout per layer is [plane0|plane1|...|planeP-1] where
-# each plane block is (hd_p * num_tokens) bytes stored contiguously.
-# A "row" is the per-token amortised width of the ENTIRE layer block (all planes),
-# i.e. sum(hd_p).  Needed because upstream allocates chunks as
-# [kv_size, nl, num_tokens, hidden] and `hidden = row_bytes`.
-def _multi_plane_lmc_row_bytes(plane_bytes: Sequence[int], num_tokens: int) -> int:
-    """LMCache chunk last dim (bytes): ceil(layer_block / num_tokens)."""
     if num_tokens <= 0:
         # Empty g_end chunk: kernel is not invoked; keep last dim positive for allocation.
-        return max(1, sum(int(b) for b in plane_bytes))
-    block = _multi_plane_layer_block_bytes(plane_bytes, num_tokens)
-    return (block + num_tokens - 1) // num_tokens
+        return max(1, sum(int(b) for b in plane_slot_bytes))
+    layer_chunk_bytes = 0
+    for slot_bytes in plane_slot_bytes:
+        plane_stride = slot_bytes * num_tokens
+        plane_stride = (plane_stride + 31) & ~31  # AlignUp32Bytes in the kernel.
+        layer_chunk_bytes += plane_stride
+    return (layer_chunk_bytes + num_tokens - 1) // num_tokens
 
 
-# Upstream LMCache expects a single [num_blocks, block_size, hidden] shape per
-# group; this collapses a multi-tensor tuple into that canonical 3-D form.
 def _get_tuple_storage_shape(
     kv_cache: tuple[torch.Tensor, ...], *, is_310p: bool = False
 ) -> torch.Size:
-    """Return the flattened LMCache storage shape for tuple-based KV caches.
+    """Collapse a multi-tensor tuple to upstream's ``[num_blocks, block_size, hidden]``.
 
-    For MLA / DSA / DSA-C8, LMCache stores multiple KV tensors as a
-    single contiguous hidden dimension, so we derive the flattened
-    hidden size from the whole tuple instead of only looking at the
-    first tensor. ``is_310p`` accounts for the head-packing layout
-    where ``block_size`` lives at ``shape[-2]`` instead of ``shape[1]``.
+    For MLA / DSA / DSA-C8 (non-packed paths), LMCache stores multiple KV tensors
+    as one contiguous hidden dimension, so the flattened hidden size is derived
+    from the whole tuple rather than the first tensor alone. ``is_310p`` selects
+    the dimension that carries ``block_size`` on 310P (``shape[-2]`` vs ``shape[1]``).
     """
     first = kv_cache[0]
     num_blocks = int(first.shape[0])
@@ -117,15 +110,17 @@ def _get_tuple_storage_shape(
     return torch.Size([num_blocks, block_size, total_hidden])
 
 
-# Shared-storage blobs expose multiple views over one allocation; only the
-# primary view carries the true paging geometry, so we derive shape from it.
 def _get_blob_storage_shape(
     kv_cache: Sequence[torch.Tensor],
     vllm_block_size: int,
     *,
     is_310p: bool = False,
 ) -> torch.Size:
-    """Storage shape for a shared blob using the primary view's tensor shape."""
+    """Derive ``[num_blocks, block_size, hidden]`` from a shared-storage blob.
+
+    Multiple dtype views alias one allocation; only the primary view (largest byte
+    coverage) carries the canonical paging geometry.
+    """
     del vllm_block_size
     primary = _get_primary_blob_view(kv_cache)
     num_blocks = int(primary.shape[0])
@@ -134,19 +129,18 @@ def _get_blob_storage_shape(
     return torch.Size([num_blocks, block_size, hidden_per_token])
 
 
-# Layers sharing a grouping key can ride one kernel launch; this extracts the
-# 5-tuple identity (kv_size, hidden, block_size, dtype_key, num_tensors).
 def _get_kv_cache_group_key_and_info(
     kv_cache: _LayerKV,
     *,
     is_310p: bool = False,
     vllm_block_size: Optional[int] = None,
 ) -> tuple[int, int, int, Any, int]:
-    """Build a stable grouping key plus the LMCache storage shape/dtype.
+    """Return the kernel grouping identity for one layer entry.
 
-    The fourth tuple element is ``torch.dtype`` when all tuple tensors share
-    one dtype; otherwise it is the ``tuple`` of per-tensor dtypes (used for
-    DSA-C8 mixed dtypes). ``PageBufferShapeDesc.element_size`` is set from the
+    Layers that share ``(kv_size, hidden, block_size, dtype_key, num_tensors)``
+    ride one transfer-kernel launch. The fourth element is a single
+    ``torch.dtype`` when all tuple tensors agree, otherwise a per-tensor dtype
+    tuple (DSA-C8). ``PageBufferShapeDesc.element_size`` is filled from the
     maximum tensor itemsize in :func:`build_kv_layer_groups`.
     """
     # Accept ``list`` too: upstream ``initialize_kvcaches_ptr`` relists every
@@ -154,8 +148,8 @@ def _get_kv_cache_group_key_and_info(
     if isinstance(kv_cache, (tuple, list)):
         if _uses_packed_multi_plane_row(kv_cache):
             # Grouping key: sum of per-slot plane widths (chunk-independent).
-            plane_bytes = _multi_plane_plane_bytes(kv_cache)
-            total_plane_bytes = sum(plane_bytes)
+            plane_slot_bytes = _plane_slot_bytes(kv_cache)
+            total_plane_bytes = sum(plane_slot_bytes)
             primary_bs = _plane_block_size(kv_cache[0])
             return (1, total_plane_bytes, primary_bs, torch.uint8, len(kv_cache))
 
@@ -353,11 +347,11 @@ def build_kv_layer_groups(
         multi_plane_hidden_bytes: tuple[int, ...] | None = None
         if isinstance(rep, (tuple, list)) and _uses_packed_multi_plane_row(rep):
             rep_dtype = torch.uint8
-            plane_bytes = _multi_plane_plane_bytes(rep)
-            shape_desc.hs = _multi_plane_lmc_row_bytes(
-                plane_bytes, physical_chunk_size
+            plane_slot_bytes = _plane_slot_bytes(rep)
+            shape_desc.hs = _lmc_chunk_hidden_bytes(
+                plane_slot_bytes, physical_chunk_size
             )
-            multi_plane_hidden_bytes = tuple(plane_bytes)
+            multi_plane_hidden_bytes = tuple(plane_slot_bytes)
         elif isinstance(rep, (tuple, list)) and _is_shared_storage_blob(rep):
             rep_dtype = _get_primary_blob_view(rep).dtype
         elif isinstance(rep, (tuple, list)):

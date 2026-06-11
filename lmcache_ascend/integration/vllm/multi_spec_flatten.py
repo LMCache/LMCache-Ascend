@@ -33,34 +33,37 @@ def bundle_multi_spec_enabled() -> bool:
 
 
 def should_bundle_multi_spec(kv_cache_config: Any | None) -> bool:
-    return flatten_multi_spec_enabled() and bundle_multi_spec_enabled() and should_flatten_kv_caches(
+    return flatten_multi_spec_enabled() and bundle_multi_spec_enabled() and has_multiple_scheduler_groups(
         kv_cache_config
     )
 
 
-def _is_multi_spec_layer(entry: _KVEntry) -> bool:
-    subs = _listify_entry(entry)
-    return len(subs) > 1
+def _has_multiple_planes(entry: _KVEntry) -> bool:
+    planes = _entry_planes(entry)
+    return len(planes) > 1
 
 
-def _should_bundle_multi_spec_layer(entry: _KVEntry) -> bool:
-    """Bundle heterogeneous multi-spec planes, not shared-storage blobs."""
-    if not _is_multi_spec_layer(entry):
+def _keep_planes_bundled(entry: _KVEntry) -> bool:
+    """Keep heterogeneous independent planes as one tuple; not shared-storage blobs."""
+    if not _has_multiple_planes(entry):
         return False
-    subs = _listify_entry(entry)
-    if len(subs) >= 2 and _is_shared_storage_blob(subs):
+    planes = _entry_planes(entry)
+    # Same physical allocation exposed as multiple dtype views (e.g. bf16 + int8
+    # over one int8 blob): one scheduler group, not independent multi-plane KV.
+    # Bundling would misclassify this as MULTI_PLANE_KV and route to the wrong kernel.
+    if _is_shared_storage_blob(planes):
         return False
     return True
 
 
-def should_flatten_kv_caches(kv_cache_config: Any | None) -> bool:
-    if not flatten_multi_spec_enabled() or kv_cache_config is None:
+def has_multiple_scheduler_groups(kv_cache_config: Any | None) -> bool:
+    if kv_cache_config is None:
         return False
     groups = getattr(kv_cache_config, "kv_cache_groups", None)
     return bool(groups) and len(groups) > 1
 
 
-def _listify_entry(entry: _KVEntry) -> list[torch.Tensor]:
+def _entry_planes(entry: _KVEntry) -> list[torch.Tensor]:
     if isinstance(entry, torch.Tensor):
         return [entry]
     return [t for t in entry if isinstance(t, torch.Tensor)]
@@ -84,8 +87,6 @@ def _is_kernel_native_tuple(entry: _KVEntry) -> bool:
 def _primary_scheduler_group_for_layer(
     layer_name: str,
     kv_cache_config: Any,
-    *,
-    ie_logical_block_size: int | None = None,
 ) -> int:
     """Return the single *primary* scheduler group index for a model layer.
 
@@ -94,22 +95,14 @@ def _primary_scheduler_group_for_layer(
     the layer whenever a unique group assignment is needed — for example
     when every sub-tensor of an MLA/DSA tuple maps to the same group, or
     when a bundled multi-spec layer must record a single scheduler group.
-
-    Selection logic:
-      1. If ``ie_logical_block_size`` is given (inter-engine scenarios),
-         prefer the containing group whose ``block_size`` matches so that
-         the block geometry stays consistent across engines.
-      2. Otherwise fall back to the lowest-index containing group.
     """
     containing = _containing_groups_for_layer(layer_name, kv_cache_config)
     if not containing:
         raise ValueError(f"Layer {layer_name!r} is not in any scheduler KV group")
-    if ie_logical_block_size is not None:
-        groups = kv_cache_config.kv_cache_groups
-        for g in containing:
-            bs = int(groups[g].kv_cache_spec.block_size)
-            if bs == ie_logical_block_size:
-                return g
+    # ``ie_logical_block_size`` (global max block size) cannot pick the right
+    # per-layer group in multi-group configs; groups have heterogeneous block sizes.
+    # ``containing[0]`` is the lowest-index group listing this layer — usually the
+    # main attention spec before companion or state specs in vLLM config order.
     return containing[0]
 
 
@@ -117,8 +110,6 @@ def ordered_scheduler_groups_for_layer(
     layer_name: str,
     entry: _KVEntry,
     kv_cache_config: Any,
-    *,
-    ie_logical_block_size: int | None = None,
 ) -> list[int]:
     """Return scheduler group indices in sub-tensor order for one model layer.
 
@@ -127,25 +118,21 @@ def ordered_scheduler_groups_for_layer(
     group), all sub-tensors map to the same primary group.  For multi-spec
     layers, each sub-tensor corresponds to a distinct scheduler group.
     """
-    subs = _listify_entry(entry)
+    planes = _entry_planes(entry)
     if _is_kernel_native_tuple(entry):
-        g = _primary_scheduler_group_for_layer(
-            layer_name,
-            kv_cache_config,
-            ie_logical_block_size=ie_logical_block_size,
-        )
-        return [g] * len(subs)
+        g = _primary_scheduler_group_for_layer(layer_name, kv_cache_config)
+        return [g] * len(planes)
 
     containing = _containing_groups_for_layer(layer_name, kv_cache_config)
-    if len(containing) == len(subs):
+    if len(containing) == len(planes):
         return containing
-    # More sub-tensors than groups: some groups contribute multiple tensors
+    # More planes than groups: some groups contribute multiple tensors
     # (e.g. duplicate indexer views). Match by block_size from the tensors.
-    if len(containing) < len(subs):
+    if len(containing) < len(planes):
         groups = kv_cache_config.kv_cache_groups
         group_block_sizes = {g: int(groups[g].kv_cache_spec.block_size) for g in containing}
         result: list[int] = []
-        for t in subs:
+        for t in planes:
             t_bs = int(t.shape[1])
             # Find first unmatched group with matching block_size
             matched = None
@@ -168,7 +155,7 @@ def ordered_scheduler_groups_for_layer(
             result.append(matched)
         return result
     raise ValueError(
-        f"Layer {layer_name!r}: {len(subs)} sub-tensors vs "
+        f"Layer {layer_name!r}: {len(planes)} planes vs "
         f"{len(containing)} scheduler groups containing this layer"
     )
 
@@ -201,8 +188,6 @@ def build_layer_to_scheduler_groups(
     kv_cache_config: Any,
     layer_names: Sequence[str],
     kv_caches: dict[str, _KVEntry],
-    *,
-    ie_logical_block_size: int | None = None,
 ) -> dict[str, list[int]]:
     """Map each model layer to ordered scheduler group indices for its sub-caches."""
     return {
@@ -210,7 +195,6 @@ def build_layer_to_scheduler_groups(
             layer_name,
             kv_caches[layer_name],
             kv_cache_config,
-            ie_logical_block_size=ie_logical_block_size,
         )
         for layer_name in layer_names
     }
@@ -219,8 +203,6 @@ def build_layer_to_scheduler_groups(
 def build_flat_kv_caches(
     kv_caches: dict[str, _KVEntry],
     kv_cache_config: Any,
-    *,
-    ie_logical_block_size: int | None = None,
 ) -> tuple[dict[str, _KVEntry], tuple[int, ...], dict[str, list[int]], bool]:
     """Preprocess multi-spec KV caches for the NPU connector.
 
@@ -246,16 +228,15 @@ def build_flat_kv_caches(
         kv_cache_config,
         kv_caches.keys(),
         kv_caches,
-        ie_logical_block_size=ie_logical_block_size,
     )
     bundled = False
     bundle_multi_spec = should_bundle_multi_spec(kv_cache_config)
     for layer_name, entry in kv_caches.items():
-        subs = _listify_entry(entry)
+        planes = _entry_planes(entry)
         groups = layer_to_groups[layer_name]
-        if len(subs) != len(groups):
+        if len(planes) != len(groups):
             raise ValueError(
-                f"layer {layer_name}: {len(subs)} sub-tensors vs "
+                f"layer {layer_name}: {len(planes)} planes vs "
                 f"{len(groups)} scheduler groups"
             )
         if _is_kernel_native_tuple(entry):
@@ -263,12 +244,12 @@ def build_flat_kv_caches(
             sched_by_layer.append(groups[0])
             bundled = True
             continue
-        if bundle_multi_spec and _should_bundle_multi_spec_layer(entry):
-            flat[layer_name] = tuple(subs)
+        if bundle_multi_spec and _keep_planes_bundled(entry):
+            flat[layer_name] = tuple(planes)
             sched_by_layer.append(groups[0])
             bundled = True
             continue
-        for sub_idx, (sub_tensor, sched_g) in enumerate(zip(subs, groups)):
+        for sub_idx, (sub_tensor, sched_g) in enumerate(zip(planes, groups)):
             flat[f"{layer_name}.sub{sub_idx}"] = _collapse_to_mla_page_buffer(
                 sub_tensor
             )

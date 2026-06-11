@@ -7,7 +7,6 @@ import os
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from lmcache.logging import init_logger
 import torch
 
 _KVEntry = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]
@@ -21,8 +20,6 @@ DEFAULT_SKIP_STATE_SPEC_NAMES = (
     "C128AttnKVStateSpec",
     "C128AttnScoreStateSpec",
 )
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,83 +80,35 @@ def resolve_skipped_scheduler_groups(
     return frozenset(skipped)
 
 
-def skipped_group_spec_names(
-    kv_cache_config: Any,
-    skipped_scheduler_groups: Sequence[int],
-) -> tuple[str, ...]:
-    """Return spec class names for skipped scheduler group indices."""
-    groups = getattr(kv_cache_config, "kv_cache_groups", None) or []
-    out: list[str] = []
-    for idx in skipped_scheduler_groups:
-        if 0 <= int(idx) < len(groups):
-            out.append(_spec_name(groups[int(idx)]))
-    return tuple(out)
-
-
-def active_plane_indices(
-    layer_name: str,
-    layer_to_scheduler_groups: Mapping[str, Sequence[int]],
-    skipped: set[int] | frozenset[int],
-) -> list[int]:
-    """Return per-layer plane indices whose scheduler groups are not skipped."""
-    groups = list(layer_to_scheduler_groups.get(layer_name, ()))
-    return [i for i, sched_g in enumerate(groups) if int(sched_g) not in skipped]
-
-
-def filter_multi_plane_entry(
-    entry: _KVEntry,
+def _filter_multi_plane_entry(
+    entry: tuple[torch.Tensor, ...] | list[torch.Tensor],
     active_indices: Sequence[int],
-) -> _KVEntry:
-    """Slice tuple/list entries to active indices; tensors are returned unchanged."""
+) -> tuple[torch.Tensor, ...] | list[torch.Tensor]:
+    """Slice tuple/list entries to active plane indices."""
     if isinstance(entry, tuple):
         return tuple(entry[i] for i in active_indices)
-    if isinstance(entry, list):
-        return [entry[i] for i in active_indices]
-    return entry
+    return [entry[i] for i in active_indices]
 
 
 def apply_skip_filter_to_flattened(
     flat_kv: Mapping[str, _KVEntry],
-    sched_by_layer: Sequence[int] | None,
-    layer_to_scheduler_groups: Mapping[str, Sequence[int]] | None,
+    sched_by_layer: Sequence[int],
+    layer_to_scheduler_groups: Mapping[str, Sequence[int]],
     skipped_scheduler_groups: set[int] | frozenset[int],
     *,
     bundled: bool,
-) -> tuple[
-    dict[str, _KVEntry],
-    tuple[int, ...] | None,
-    dict[str, list[int]] | None,
-]:
+) -> tuple[dict[str, _KVEntry], tuple[int, ...], dict[str, list[int]]]:
     """Filter flattened registration artifacts so skipped groups never reach planning."""
-    # Fast path: no skipped groups means no filtering is needed.
-    # Return normalized copies so downstream types stay stable.
-    if not skipped_scheduler_groups:
-        kept_layer_to_groups = (
-            {
-                layer: [int(g) for g in groups]
-                for layer, groups in layer_to_scheduler_groups.items()
-            }
-            if layer_to_scheduler_groups is not None
-            else None
-        )
-        kept_sched = tuple(sched_by_layer) if sched_by_layer is not None else None
-        return dict(flat_kv), kept_sched, kept_layer_to_groups
+    kept_layer_to_groups = {
+        layer: [int(g) for g in groups]
+        for layer, groups in layer_to_scheduler_groups.items()
+    }
+    kept_sched = tuple(sched_by_layer)
 
-    # Defensive path: sched map unavailable, so only metadata can be pruned.
-    # Keep flat entries untouched and remove skipped IDs from layer mapping.
-    if sched_by_layer is None:
-        kept_layer_to_groups = (
-            {
-                layer: [
-                    int(g) for g in groups if int(g) not in skipped_scheduler_groups
-                ]
-                for layer, groups in (layer_to_scheduler_groups or {}).items()
-                if any(int(g) not in skipped_scheduler_groups for g in groups)
-            }
-            if layer_to_scheduler_groups is not None
-            else None
-        )
-        return dict(flat_kv), None, kept_layer_to_groups
+    # Nothing to skip: pass through flattened artifacts with normalized metadata copies.
+    # Downstream layout hints and group planning still expect concrete dict/tuple types.
+    if not skipped_scheduler_groups:
+        return dict(flat_kv), kept_sched, kept_layer_to_groups
 
     if len(flat_kv) != len(sched_by_layer):
         raise ValueError(
@@ -168,97 +117,80 @@ def apply_skip_filter_to_flattened(
         )
 
     kept_flat: dict[str, _KVEntry] = {}
-    kept_sched: list[int] = []
-    kept_layer_to_groups: dict[str, list[int]] = {}
+    kept_sched_list: list[int] = []
+    kept_layer_to_groups_out: dict[str, list[int]] = {}
 
-    # Exploded flattening: one flat entry maps to one scheduler group.
-    # Drop skipped entries directly and rebuild aligned outputs.
+    # Exploded flattening: each flat entry owns one scheduler group.
+    # Drop skipped entries outright and rebuild the parallel sched map.
     if not bundled:
         for (layer_name, entry), sched_g in zip(flat_kv.items(), sched_by_layer):
             g = int(sched_g)
             if g in skipped_scheduler_groups:
                 continue
             kept_flat[layer_name] = entry
-            kept_sched.append(g)
-        if layer_to_scheduler_groups is not None:
-            for layer_name, groups in layer_to_scheduler_groups.items():
-                filtered = [
-                    int(g) for g in groups if int(g) not in skipped_scheduler_groups
-                ]
-                if filtered:
-                    kept_layer_to_groups[layer_name] = filtered
-        return (
-            kept_flat,
-            tuple(kept_sched),
-            kept_layer_to_groups if layer_to_scheduler_groups is not None else None,
-        )
+            kept_sched_list.append(g)
 
-    # Bundled flattening: one flat entry can include multiple scheduler groups.
-    # Keep only active planes and drop entries with zero remaining planes.
-    layer_groups_map = layer_to_scheduler_groups or {}
+        for layer_name, groups in layer_to_scheduler_groups.items():
+            filtered = [
+                int(g) for g in groups if int(g) not in skipped_scheduler_groups
+            ]
+            if filtered:
+                kept_layer_to_groups_out[layer_name] = filtered
+        return kept_flat, tuple(kept_sched_list), kept_layer_to_groups_out
+
+    # Bundled flattening: one flat entry may hold multiple sub-tensor planes.
+    # Slice tuple planes to kept groups, or drop single-tensor entries whose group is skipped.
     for flat_idx, (layer_name, entry) in enumerate(flat_kv.items()):
-        layer_groups = [int(g) for g in layer_groups_map.get(layer_name, ())]
+        layer_groups = [int(g) for g in layer_to_scheduler_groups.get(layer_name, ())]
         fallback_sched = int(sched_by_layer[flat_idx])
 
-        # Tuple/list entries carry planes; filter by active plane indices.
-        # The first remaining scheduler group is the flat entry fallback group.
+        # Multi-plane layer: keep only planes whose scheduler group is not skipped.
+        # Rebuild the per-layer group list to match the shortened tuple.
         if isinstance(entry, (tuple, list)) and layer_groups:
-            keep_idx = active_plane_indices(
-                layer_name,
-                layer_groups_map,
-                skipped_scheduler_groups,
-            )
+            keep_idx = [
+                i
+                for i, sched_g in enumerate(layer_groups)
+                if int(sched_g) not in skipped_scheduler_groups
+            ]
             if not keep_idx:
                 continue
-            filtered_entry = filter_multi_plane_entry(entry, keep_idx)
+            kept_flat[layer_name] = _filter_multi_plane_entry(entry, keep_idx)
             filtered_groups = [layer_groups[i] for i in keep_idx]
-            kept_flat[layer_name] = filtered_entry
-            kept_sched.append(filtered_groups[0])
-            kept_layer_to_groups[layer_name] = filtered_groups
+            # 0 because it is the same convention for the primary group selection as in the multi_spec_flatten.py
+            kept_sched_list.append(filtered_groups[0])
+            kept_layer_to_groups_out[layer_name] = filtered_groups
             continue
 
-        # Non-tuple entries behave like single-group flat items.
-        # Keep only if their fallback scheduler group is not skipped.
+        # Single-tensor flat entry (e.g. dense layer.sub0): keep or drop by its sched group.
+        # Prune skipped group IDs from the layer mapping when any planes remain.
         if fallback_sched in skipped_scheduler_groups:
             continue
         kept_flat[layer_name] = entry
-        kept_sched.append(fallback_sched)
-        if layer_groups:
-            filtered_groups = [
-                int(g) for g in layer_groups if int(g) not in skipped_scheduler_groups
-            ]
-            if filtered_groups:
-                kept_layer_to_groups[layer_name] = filtered_groups
+        kept_sched_list.append(fallback_sched)
+        filtered_groups = [
+            int(g) for g in layer_groups if int(g) not in skipped_scheduler_groups
+        ]
+        if filtered_groups:
+            kept_layer_to_groups_out[layer_name] = filtered_groups
 
-    return (
-        kept_flat,
-        tuple(kept_sched),
-        kept_layer_to_groups if layer_to_scheduler_groups is not None else None,
-    )
+    return kept_flat, tuple(kept_sched_list), kept_layer_to_groups_out
 
 
 def apply_skip_policy_from_env_to_flattened(
     kv_cache_config: Any,
     flat_kv: Mapping[str, _KVEntry],
-    sched_by_layer: Sequence[int] | None,
-    layer_to_scheduler_groups: Mapping[str, Sequence[int]] | None,
+    sched_by_layer: Sequence[int],
+    layer_to_scheduler_groups: Mapping[str, Sequence[int]],
     *,
     bundled: bool,
-) -> tuple[
-    dict[str, _KVEntry],
-    tuple[int, ...] | None,
-    dict[str, list[int]] | None,
-]:
-    """Apply env-driven skip policy to flattened artifacts and emit optional logs."""
+) -> tuple[dict[str, _KVEntry], tuple[int, ...], dict[str, list[int]]]:
+    """Apply env-driven skip policy to flattened registration artifacts."""
     policy = parse_skip_state_policy_from_env()
     skipped_groups = resolve_skipped_scheduler_groups(kv_cache_config, policy)
-
-    filtered = apply_skip_filter_to_flattened(
+    return apply_skip_filter_to_flattened(
         flat_kv,
         sched_by_layer,
         layer_to_scheduler_groups,
         skipped_groups,
         bundled=bundled,
     )
-    filtered_flat, filtered_sched, filtered_layer_to_groups = filtered
-    return filtered

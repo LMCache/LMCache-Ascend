@@ -395,6 +395,19 @@ def test_build_slot_mappings_by_group_mismatch() -> None:
         )
 
 
+def test_build_slot_mappings_by_group_sliding_window_length_mismatch() -> None:
+    with pytest.raises(
+        ValueError, match="Sliding window sizes and block ids group count mismatch"
+    ):
+        _build_slot_mappings_by_group(
+            ([0], [1]),
+            (128, 1024),
+            64,
+            is_store=True,
+            sliding_window_size_by_group=(128,),
+        )
+
+
 @pytest.mark.parametrize(
     ("initial_groups", "new_token_ids", "new_block_ids", "preempted", "all_token_ids", "check"),
     [
@@ -558,11 +571,11 @@ def test_req_meta_from_request_tracker(tracker_kwargs, from_kwargs, check) -> No
 
 
 @patch(
-    "lmcache_ascend.integration.vllm.multi_group_vllm_adapter.extract_mm_features",
+    "lmcache.integration.vllm.utils.extract_mm_features",
     return_value=(None, None),
 )
 @patch(
-    "lmcache_ascend.integration.vllm.multi_group_vllm_adapter.extract_request_configs",
+    "lmcache.integration.vllm.vllm_v1_adapter.extract_request_configs",
     return_value=None,
 )
 @pytest.mark.parametrize(
