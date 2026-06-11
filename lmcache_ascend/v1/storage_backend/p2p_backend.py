@@ -155,12 +155,10 @@ class AscendPeerInfo(PeerInfo):
     _req_seq: int = 0
 
     def next_req_id(self) -> bytes:
-        """Return a fresh 8-byte correlation id (opaque; echoed by the peer)."""
         self._req_seq = (self._req_seq + 1) & 0xFFFFFFFFFFFFFFFF
         return self._req_seq.to_bytes(8, "big")
 
     def fail_all_pending(self, exc: BaseException) -> None:
-        """Resolve every in-flight Future with ``exc`` so callers fail fast."""
         pending, self.pending = self.pending, {}
         for fut in pending.values():
             if not fut.done():
@@ -593,7 +591,6 @@ class AscendP2PBackend(P2PBackend):
             assert isinstance(init_ret_msg, P2PInitSideRetMsg)
             peer_lookup_url = init_ret_msg.peer_lookup_url
 
-            # Tear down any prior DEALER + reader for this peer first.
             old = self.target_peer_info_mapping.pop(target_peer_init_url, None)
             if old is not None:
                 await self._teardown_peer(old)
@@ -788,13 +785,7 @@ class AscendP2PBackend(P2PBackend):
             await sock.send_multipart(frames)
 
     async def _serve_request(self, routing: list[bytes], payload: bytes) -> None:
-        """Decode one peer request, run its handler, and reply on the ROUTER.
-
-        Only the pull-mode lookup-and-get path runs ``stage()``/copy, so it is
-        the sole message type counted toward ``_max_concurrent_gets``; at the
-        cap we reply an immediate miss (``num_hit_chunks=0``) -- identical to
-        the existing arena-full path -- so the consumer recomputes locally.
-        """
+        """Decode one peer request, run its handler, and reply on the ROUTER."""
         counted = False
         try:
             msg = msgspec.msgpack.decode(payload, type=AscendP2PMsg)
