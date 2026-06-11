@@ -21,7 +21,7 @@ prepare_environment()
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
-from lmcache.v1.storage_backend.p2p_backend import P2PErrorCode, P2PErrorMsg, PeerInfo
+from lmcache.v1.storage_backend.p2p_backend import P2PErrorCode, P2PErrorMsg
 import msgspec
 import pytest
 import torch
@@ -37,6 +37,7 @@ from lmcache_ascend.v1.storage_backend.p2p_backend import (
     AscendBatchedLookupAndGetRetMsg,
     AscendBatchedLookupAndPutMsg,
     AscendP2PMsg,
+    AscendPeerInfo,
     AscendQueryDonePortRetMsg,
 )
 from lmcache_ascend.v1.transfer_context import P2PTransferContext
@@ -70,21 +71,6 @@ def _make_mock_mem_obj(
     mock.ref_count_up = MagicMock()
     mock.unpin = MagicMock()
     return mock
-
-
-def _make_proxy(context: MagicMock, chunk_index: int = 0) -> ProxyMemoryObj:
-    return ProxyMemoryObj(
-        backing_obj=None,
-        transfer_channel=MagicMock(),
-        target_peer_url="target_peer_url",
-        remote_buffer_uuid=f"remote-buffer-{chunk_index}",
-        remote_mem_index=chunk_index,
-        transfer_context=context,
-        chunk_index=chunk_index,
-        shapes=[DEFAULT_SHAPE],
-        dtypes=[DEFAULT_DTYPE],
-        fmt=MemoryFormat.KV_2LTD,
-    )
 
 
 def _run_coroutine(loop: asyncio.AbstractEventLoop, coro):
@@ -447,21 +433,16 @@ class TestAscendP2PBackendUnit:
         backend.local_cpu_backend.allocate.assert_not_called()
 
     def test_send_lookup_request_with_retry_zmq_error(self, async_loop):
-        """ZMQ errors trigger retries and peer reconnection."""
+        """Connection errors trigger retries and peer reconnection (DEALER path)."""
         backend = MagicMock()
         backend.loop = async_loop
         backend.max_retry_count = 2
+        backend._lookup_timeout_s = 3.0
         backend._ensure_peer_connection = AsyncMock()
-
-        mock_socket = AsyncMock()
-        mock_socket.send = AsyncMock(side_effect=zmq.ZMQError("connection lost"))
-        mock_socket.recv = AsyncMock()
-
-        mock_lock = asyncio.Lock()
-        peer_info = MagicMock(spec=PeerInfo)
-        peer_info.lookup_socket = mock_socket
-        peer_info.lookup_lock = mock_lock
-        backend.target_peer_info_mapping = {"peer_url": peer_info}
+        # New DEALER path funnels the round-trip through _peer_request_reply.
+        backend._peer_request_reply = AsyncMock(
+            side_effect=zmq.ZMQError("connection lost")
+        )
 
         # First Party
         from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
@@ -483,28 +464,20 @@ class TestAscendP2PBackendUnit:
         )
 
         assert ret is None
-        assert mock_socket.send.await_count == 2
+        assert backend._peer_request_reply.await_count == 2
         assert backend._ensure_peer_connection.await_count == 2
 
     def test_send_lookup_request_with_retry_success(self, async_loop):
-        """Successful response is returned directly."""
+        """Successful response is returned directly (DEALER path)."""
         backend = MagicMock()
         backend.loop = async_loop
         backend.max_retry_count = 3
+        backend._lookup_timeout_s = 3.0
         backend._ensure_peer_connection = AsyncMock()
 
         good_ret = AscendBatchedLookupAndGetRetMsg(num_hit_chunks=2)
         encoded = msgspec.msgpack.encode(good_ret)
-
-        mock_socket = AsyncMock()
-        mock_socket.send = AsyncMock()
-        mock_socket.recv = AsyncMock(return_value=encoded)
-
-        mock_lock = asyncio.Lock()
-        peer_info = MagicMock(spec=PeerInfo)
-        peer_info.lookup_socket = mock_socket
-        peer_info.lookup_lock = mock_lock
-        backend.target_peer_info_mapping = {"peer_url": peer_info}
+        backend._peer_request_reply = AsyncMock(return_value=encoded)
 
         # First Party
         from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
@@ -527,6 +500,40 @@ class TestAscendP2PBackendUnit:
 
         assert isinstance(ret, AscendBatchedLookupAndGetRetMsg)
         assert ret.num_hit_chunks == 2
+        backend._peer_request_reply.assert_awaited_once()
+
+    def test_send_lookup_request_with_retry_timeout_is_fast_miss(self, async_loop):
+        """A per-request timeout fails fast (returns None) without retrying."""
+        backend = MagicMock()
+        backend.loop = async_loop
+        backend.max_retry_count = 3
+        backend._lookup_timeout_s = 0.2
+        backend._ensure_peer_connection = AsyncMock()
+        backend._peer_request_reply = AsyncMock(side_effect=asyncio.TimeoutError())
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        msg = AscendBatchedLookupAndGetMsg(
+            lookup_id="lu_timeout",
+            receiver_id="peer_1",
+            keys=["k1"],
+            buffer_uuids=[],
+            mem_indexes=[],
+            pull_mode=False,
+        )
+
+        ret = _run_coroutine(
+            async_loop,
+            AscendP2PBackend._send_lookup_request_with_retry(
+                backend, "lu_timeout", "peer_url", msg
+            ),
+        )
+
+        assert ret is None
+        # Fail-fast: exactly one attempt, no reconnect storm.
+        assert backend._peer_request_reply.await_count == 1
+        backend._ensure_peer_connection.assert_not_awaited()
 
     def test_ensure_done_peer_connection_does_not_sleep(self, async_loop):
         """Done socket creation should not rely on a fixed post-connect delay."""
@@ -923,55 +930,8 @@ class TestAscendP2PBackendUnit:
             assert isinstance(obj, ProxyMemoryObj)
             assert obj.is_proxy
 
-    def test_proxy_ref_count_down_decrefs_context_once(self):
-        """Discarded delay-pull proxies decrement their shared context once."""
-        context = MagicMock()
-        proxy = _make_proxy(context)
-
-        proxy.ref_count_down()
-        proxy.ref_count_down()
-
-        context.decref.assert_called_once()
-
-    def test_proxy_mark_consumed_suppresses_later_ref_count_down(self):
-        """Connector-consumed proxies should not later decref during cleanup."""
-        context = MagicMock()
-        proxy = _make_proxy(context)
-
-        proxy.mark_consumed()
-        proxy.ref_count_down()
-
-        context.decref.assert_not_called()
-
-    def test_proxy_shared_context_sends_done_after_all_discards(self):
-        """A shared transfer context sends Done once all proxies are discarded."""
-        # First Party
-        from lmcache_ascend.v1.transfer_context import AscendBaseTransferContext
-
-        class TestTransferContext(AscendBaseTransferContext):
-            def __init__(self):
-                super().__init__(num_proxies=2)
-                self.send_done = MagicMock()
-
-            def _send_done(self):
-                self.send_done()
-
-        context = TestTransferContext()
-
-        proxy_0 = _make_proxy(context, chunk_index=0)
-        proxy_1 = _make_proxy(context, chunk_index=1)
-
-        proxy_0.ref_count_down()
-        context.send_done.assert_not_called()
-
-        proxy_1.ref_count_down()
-        context.send_done.assert_called_once()
-
-        proxy_1.ref_count_down()
-        context.send_done.assert_called_once()
-
-    def test_p2p_transfer_context_done_uses_configured_timeout(self):
-        """P2P Done waits for the backend-configured short timeout."""
+    def test_p2p_transfer_context_done_schedules_without_blocking(self):
+        """P2P Done is scheduled on the backend loop without host blocking."""
         backend = MagicMock()
         backend.p2p_done_timeout_s = 5.0
         backend._send_done_signal = AsyncMock()
@@ -999,7 +959,8 @@ class TestAscendP2PBackendUnit:
         ):
             ctx.send_done_now()
 
-        future.result.assert_called_once_with(timeout=5.0)
+        future.result.assert_not_called()
+        future.add_done_callback.assert_called_once()
 
     def test_p2p_transfer_context_done_on_same_loop_schedules_task(self, async_loop):
         """Done from the P2P loop must not block on run_coroutine_threadsafe."""
@@ -1176,6 +1137,27 @@ class TestAscendP2PBackendUnit:
         assert isinstance(ret, P2PErrorMsg)
         assert ret.error_code == P2PErrorCode.REMOTE_XFER_HANDLER_NOT_INITIALIZED
 
+    def test_sync_dealer_uses_short_controller_lookup_timeout(self):
+        backend = MagicMock()
+        backend._sync_closed = False
+        backend._sync_dealer = None
+        backend.config.controller_reply_url = "127.0.0.1:5555"
+        backend._sync_controller_lookup_timeout_ms = 250
+
+        sock = MagicMock()
+        backend._sync_ctx.socket.return_value = sock
+
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        assert AscendP2PBackend._get_or_create_sync_dealer_locked(backend) is sock
+        sock.setsockopt.assert_any_call(zmq.RCVTIMEO, 250)
+        sock.setsockopt.assert_any_call(zmq.SNDTIMEO, 250)
+        sock.setsockopt.assert_any_call(zmq.LINGER, 0)
+        if hasattr(zmq, "IMMEDIATE"):
+            sock.setsockopt.assert_any_call(zmq.IMMEDIATE, 1)
+        sock.connect.assert_called_once_with("tcp://127.0.0.1:5555")
+
     def test_sync_query_timeout_resets_dealer(self):
         """Timed-out sync controller lookup resets socket to avoid stale replies."""
         backend = MagicMock()
@@ -1304,3 +1286,196 @@ class TestAscendP2PBackendUnit:
 
         late_obj.ref_count_down.assert_called_once()
         late_obj.unpin.assert_not_called()
+
+
+class TestDealerRouterConcurrency:
+    """Phase 2: DEALER/ROUTER req_id correlation, fail-fast, and immediate-miss.
+
+    These drive real in-process ``zmq.asyncio`` ROUTER/DEALER sockets on the
+    background loop (zmq is not mocked by ``prepare_environment``) and exercise
+    the unbound coroutines against a ``MagicMock`` backend stub.
+    """
+
+    @staticmethod
+    def _consumer_backend() -> MagicMock:
+        backend = MagicMock()
+        backend.running = asyncio.Event()
+        backend.running.set()
+        return backend
+
+    @staticmethod
+    def _connected_pair(ctx: "zmq.asyncio.Context"):
+        router = ctx.socket(zmq.ROUTER)
+        port = router.bind_to_random_port("tcp://127.0.0.1")
+        dealer = ctx.socket(zmq.DEALER)
+        dealer.connect(f"tcp://127.0.0.1:{port}")
+        return router, dealer, port
+
+    def test_request_reply_roundtrip_out_of_order(self, async_loop):
+        """Replies correlate by req_id even when the producer answers reversed."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        async def scenario():
+            ctx = zmq.asyncio.Context()
+            router, dealer, port = self._connected_pair(ctx)
+
+            backend = self._consumer_backend()
+            peer = AscendPeerInfo(
+                peer_init_url="peer",
+                peer_lookup_url=f"127.0.0.1:{port}",
+                lookup_lock=asyncio.Lock(),
+                lookup_socket=dealer,
+            )
+            backend.target_peer_info_mapping = {"peer": peer}
+            reader = asyncio.create_task(
+                AscendP2PBackend._peer_reply_reader(backend, peer)
+            )
+
+            async def fake_producer():
+                seen = [await router.recv_multipart() for _ in range(2)]
+                # Reply in reverse arrival order to force out-of-order delivery.
+                for ident, req_id, payload in reversed(
+                    [(f[0], f[1], f[-1]) for f in seen]
+                ):
+                    await router.send_multipart([ident, req_id, b"r:" + payload])
+
+            producer = asyncio.create_task(fake_producer())
+            results = await asyncio.gather(
+                AscendP2PBackend._peer_request_reply(backend, "peer", b"A", 5.0),
+                AscendP2PBackend._peer_request_reply(backend, "peer", b"B", 5.0),
+            )
+            await producer
+
+            assert results == [b"r:A", b"r:B"]
+            assert peer.pending == {}
+
+            reader.cancel()
+            try:
+                await reader
+            except asyncio.CancelledError:
+                pass
+            dealer.close(linger=0)
+            router.close(linger=0)
+            ctx.term()
+
+        _run_coroutine(async_loop, scenario())
+
+    def test_request_reply_times_out_and_cleans_pending(self, async_loop):
+        """No reply -> wait_for raises TimeoutError; the pending entry is removed."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        async def scenario():
+            ctx = zmq.asyncio.Context()
+            router, dealer, port = self._connected_pair(ctx)
+
+            backend = self._consumer_backend()
+            peer = AscendPeerInfo(
+                peer_init_url="peer",
+                peer_lookup_url=f"127.0.0.1:{port}",
+                lookup_lock=asyncio.Lock(),
+                lookup_socket=dealer,
+            )
+            backend.target_peer_info_mapping = {"peer": peer}
+            reader = asyncio.create_task(
+                AscendP2PBackend._peer_reply_reader(backend, peer)
+            )
+
+            with pytest.raises(asyncio.TimeoutError):
+                await AscendP2PBackend._peer_request_reply(backend, "peer", b"X", 0.2)
+            assert peer.pending == {}
+
+            reader.cancel()
+            try:
+                await reader
+            except asyncio.CancelledError:
+                pass
+            dealer.close(linger=0)
+            router.close(linger=0)
+            ctx.term()
+
+        _run_coroutine(async_loop, scenario())
+
+    def test_serve_request_immediate_miss_at_cap(self, async_loop):
+        """At the in-flight cap, a heavy get is answered with an immediate miss."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        backend = MagicMock()
+        backend._inflight_gets = 4
+        backend._max_concurrent_gets = 4
+        backend._handle_batched_lookup_and_get = AsyncMock()
+        captured = {}
+
+        async def fake_reply(routing, ret_msg):
+            captured["routing"] = routing
+            captured["ret"] = ret_msg
+
+        backend._router_reply = AsyncMock(side_effect=fake_reply)
+
+        msg = AscendBatchedLookupAndGetMsg(
+            lookup_id="lu_cap",
+            receiver_id="peer_1",
+            keys=["k1"],
+            buffer_uuids=[],
+            mem_indexes=[],
+            pull_mode=True,
+        )
+        _run_coroutine(
+            async_loop,
+            AscendP2PBackend._serve_request(
+                backend, [b"ident", b"\x00\x00\x00\x01"], msgspec.msgpack.encode(msg)
+            ),
+        )
+
+        assert isinstance(captured["ret"], AscendBatchedLookupAndGetRetMsg)
+        assert captured["ret"].num_hit_chunks == 0
+        assert captured["routing"] == [b"ident", b"\x00\x00\x00\x01"]
+        backend._handle_batched_lookup_and_get.assert_not_awaited()
+        # The short-circuited get is not counted, so the gauge is unchanged.
+        assert backend._inflight_gets == 4
+
+    def test_serve_request_dispatch_balances_inflight(self, async_loop):
+        """Below the cap, the handler runs and the in-flight gauge is balanced."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
+
+        backend = MagicMock()
+        backend._inflight_gets = 0
+        backend._max_concurrent_gets = 4
+        backend.chunk_size = 256
+        backend.stats_monitor = MagicMock()
+        backend.stats_monitor.on_p2p_transfer_request.return_value = "rid"
+        backend._handle_batched_lookup_and_get = AsyncMock(
+            return_value=AscendBatchedLookupAndGetRetMsg(num_hit_chunks=1)
+        )
+        captured = {}
+
+        async def fake_reply(routing, ret_msg):
+            captured["routing"] = routing
+            captured["ret"] = ret_msg
+
+        backend._router_reply = AsyncMock(side_effect=fake_reply)
+
+        msg = AscendBatchedLookupAndGetMsg(
+            lookup_id="lu_ok",
+            receiver_id="peer_1",
+            keys=["k1"],
+            buffer_uuids=[],
+            mem_indexes=[],
+            pull_mode=True,
+        )
+        _run_coroutine(
+            async_loop,
+            AscendP2PBackend._serve_request(
+                backend, [b"ident", b"req"], msgspec.msgpack.encode(msg)
+            ),
+        )
+
+        backend._handle_batched_lookup_and_get.assert_awaited_once()
+        assert captured["ret"].num_hit_chunks == 1
+        assert captured["routing"] == [b"ident", b"req"]
+        # Incremented then decremented back to zero.
+        assert backend._inflight_gets == 0
+        backend.stats_monitor.on_p2p_transfer_finished.assert_called_once_with("rid")

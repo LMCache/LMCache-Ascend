@@ -4,7 +4,6 @@ This example demonstrates how to run LMCache with P2P KV Cache Sharing on a sing
 
 ### Prerequisites
 
-- CANN 8.3+ (for `hccl` channel) or CANN 8.5+ (for `hcomm_onesided` / `hixl` channels)
 - Ascend HDK 25.5.0+ drivers and firmware. Previous drivers only support registering up to ~20GB of host memory to the NPU NIC.
 - RoCE connected NPU server (HCCS will be supported later)
 - At least 2 NPUs
@@ -21,24 +20,19 @@ The `transfer_channel` field in the LMCache YAML config selects the NPU communic
 
 | Channel | CANN Requirement | Status |
 | :--- | :--- | :--- |
-| `hccl` | CANN 8.3+ | Legacy |
-| `hcomm_onesided` | CANN 8.5+ | **Recommended** |
+| `hccl` | CANN 8.5+ | **Recommended** |
 | `hixl` | CANN 8.5+ | Experimental |
 
 To switch channels, update the `transfer_channel` field in your YAML configs:
 
 ```yaml
-# CANN 8.3+ (legacy)
+# CANN 8.5+ (recommended)
 transfer_channel: "hccl"
 
-# CANN 8.5+ (recommended)
-transfer_channel: "hcomm_onesided"
-
-# CANN 8.5+ (experimental)
+# CANN 8.5+ (Experimental)
 transfer_channel: "hixl"
 ```
 
-The build system auto-detects the installed CANN version and compiles the correct backend. The provided example configs default to `hcomm_onesided`.
 
 ### Usage
 
@@ -70,7 +64,7 @@ python \
     --block-size 128 \
     --rope-scaling '{"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}' \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' > instance1.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' > instance1.txt 2>&1 
 ```
 
 Launch instance 2
@@ -92,7 +86,7 @@ python \
     --block-size 128 \
     --rope-scaling '{"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32768}' \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}' > instance2.txt 2>&1 
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' > instance2.txt 2>&1 
 ```
 
 Send request to engine 1
