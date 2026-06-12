@@ -16,6 +16,9 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     RequestTracker,
     _build_slot_mapping_for_group,
     _build_slot_mappings_by_group,
+    _group_compress_ratio,
+    _group_sliding_window,
+    _iter_layer_specs,
     _normalize_block_ids,
     _normalize_block_sizes,
 )
@@ -725,3 +728,38 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
             assert counts_npu.device.type != "cpu"
             assert starts_npu.cpu().tolist() == exp_starts.tolist()
             assert counts_npu.cpu().tolist() == exp_counts.tolist()
+
+
+def test_group_compress_ratio_from_uniform_type_bundle() -> None:
+    class MLAAttentionSpec:
+        def __init__(self, compress_ratio: int) -> None:
+            self.compress_ratio = compress_ratio
+
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, specs: dict) -> None:
+            self.kv_cache_specs = specs
+
+    bundle = UniformTypeKVCacheSpecs(
+        {
+            "a": MLAAttentionSpec(compress_ratio=4),
+            "b": MLAAttentionSpec(compress_ratio=1),
+        }
+    )
+    assert len(list(_iter_layer_specs(bundle))) == 2
+    assert _group_compress_ratio(bundle) == 4
+
+
+class _SlidingSpec:
+    def __init__(self, sliding_window: int | None = None) -> None:
+        self.sliding_window = sliding_window
+
+
+def test_group_sliding_window_from_uniform_type_bundle() -> None:
+    class UniformTypeKVCacheSpecs:
+        def __init__(self, specs: dict) -> None:
+            self.kv_cache_specs = specs
+
+    bundle = UniformTypeKVCacheSpecs(
+        {"a": _SlidingSpec(None), "b": _SlidingSpec(128)}
+    )
+    assert _group_sliding_window(bundle) == 128

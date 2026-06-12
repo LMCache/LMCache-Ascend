@@ -39,6 +39,30 @@ if TYPE_CHECKING:
 BlockIdsLike = Optional[Union[list[int], list[list[int]], "tuple[list[int], ...]"]]
 
 
+def _iter_layer_specs(group_spec: Any):
+    """Yield per-layer specs, unwrapping v0.20 UniformTypeKVCacheSpecs bundles."""
+    if type(group_spec).__name__ == "UniformTypeKVCacheSpecs":
+        yield from group_spec.kv_cache_specs.values()
+    else:
+        yield group_spec
+
+
+def _group_compress_ratio(group_spec: Any) -> int:
+    ratios = [
+        int(getattr(spec, "compress_ratio", 1) or 1)
+        for spec in _iter_layer_specs(group_spec)
+    ]
+    return max(ratios) if ratios else 1
+
+
+def _group_sliding_window(group_spec: Any) -> int | None:
+    for spec in _iter_layer_specs(group_spec):
+        sw = getattr(spec, "sliding_window", None)
+        if sw is not None:
+            return int(sw)
+    return None
+
+
 def _empty_block_ids_by_group(num_groups: int) -> "tuple[list[int], ...]":
     if num_groups < 1:
         raise ValueError(f"num_groups must be >= 1, got {num_groups}")
@@ -542,12 +566,10 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                         f"group {g_idx} block size {bs}"
                     )
             self._compress_ratios_by_group = tuple(
-                int(getattr(g.kv_cache_spec, "compress_ratio", 1)) for g in groups
+                _group_compress_ratio(g.kv_cache_spec) for g in groups
             )
             self._sliding_window_size_by_group = tuple(
-                int(sw) if (sw := getattr(g.kv_cache_spec, "sliding_window", None))
-                is not None else None
-                for g in groups
+                _group_sliding_window(g.kv_cache_spec) for g in groups
             )
         else:
             self._compress_ratios_by_group = (1,)

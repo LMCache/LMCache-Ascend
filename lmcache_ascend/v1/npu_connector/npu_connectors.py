@@ -317,6 +317,21 @@ def _derive_group_params(
             block_size=block_size,
             page_buffer_size=page_buffer_size,
         )
+    elif entry_format == KVCacheFormat.MLA_KV:
+        sched_groups = (layout_hints or {}).get("layer_to_scheduler_groups", {})
+        layer_name = (layout_hints or {}).get("_current_layer_name")
+        sched_per_plane: list[int] = []
+        if layer_name and layer_name in sched_groups:
+            sched_per_plane = list(sched_groups[layer_name])
+            if len(sched_per_plane) == 1:
+                sched_per_plane = sched_per_plane * 2
+        build_kw: dict[str, Any] = {
+            "kv_format": entry_format,
+            "planes": list(entry),
+        }
+        if sched_per_plane:
+            build_kw["scheduler_groups_per_plane"] = sched_per_plane
+        params = _build_multi_plane_group_params(**build_kw)
     else:
         raise ValueError(
             f"Cannot derive multi-plane params for {entry_format.name} in mixed-format path"
@@ -766,6 +781,16 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self.head_size = kwargs["head_size"]
             self.dtype = kwargs["dtype"]
             self.device = kwargs["device"]
+
+    def initialize_kvcaches_ptr(self, **kwargs) -> None:
+        """Initialize KV cache pointers using Ascend-safe permute for pool slices."""
+        if "kvcaches" in kwargs:
+            self.kvcaches = kwargs["kvcaches"]
+            from lmcache_ascend.v1.npu_connector.utils import (
+                permute_kv_caches_to_contiguous,
+            )
+
+            self.kvcaches = permute_kv_caches_to_contiguous(self.kvcaches)
 
     @classmethod
     def from_metadata(

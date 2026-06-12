@@ -104,6 +104,7 @@ def set_skip_state_groups_env(
     *,
     enabled: bool,
     allowlist: str | None = ...,
+    layer_suffix: str | None = ...,
 ) -> None:
     """Configure skip-state env vars for tests.
 
@@ -112,15 +113,25 @@ def set_skip_state_groups_env(
         enabled: When False, disables skip-state filtering entirely.
         allowlist: Explicit allowlist string, ``None`` to unset the env var
             (use built-in defaults), or omit to leave the env var unchanged.
+        layer_suffix: Explicit layer-name suffix string, ``None`` to unset the
+            env var (use built-in default), or omit to leave unchanged.
     """
     monkeypatch.setenv("LMCACHE_ASCEND_SKIP_STATE_GROUPS", "1" if enabled else "0")
     if allowlist is ...:
+        pass
+    else:
+        env_key = "LMCACHE_ASCEND_SKIP_STATE_SPEC_ALLOWLIST"
+        if allowlist is None:
+            monkeypatch.delenv(env_key, raising=False)
+        else:
+            monkeypatch.setenv(env_key, allowlist)
+    if layer_suffix is ...:
         return
-    env_key = "LMCACHE_ASCEND_SKIP_STATE_SPEC_ALLOWLIST"
-    if allowlist is None:
-        monkeypatch.delenv(env_key, raising=False)
+    suffix_key = "LMCACHE_ASCEND_SKIP_STATE_LAYER_SUFFIX"
+    if layer_suffix is None:
+        monkeypatch.delenv(suffix_key, raising=False)
         return
-    monkeypatch.setenv(env_key, allowlist)
+    monkeypatch.setenv(suffix_key, layer_suffix)
 
 
 def _make_4d_page(
