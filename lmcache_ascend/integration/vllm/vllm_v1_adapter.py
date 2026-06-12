@@ -18,11 +18,6 @@ from lmcache_ascend.integration.vllm.multi_spec_flatten import (
 from lmcache_ascend.integration.vllm.skip_state_groups import (
     apply_skip_policy_from_env_to_flattened,
 )
-from lmcache_ascend.v1.npu_connector.npu_connectors import build_mp_launch_meta
-from lmcache_ascend.v1.slot_mapping_utils import (
-    iter_lmcache_chunk_ranges,
-    iter_store_chunk_ranges,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -214,7 +209,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
             slot_mappings_npu: list[torch.Tensor] = []
             filtered_slot_mappings_npu: tuple[torch.Tensor, ...] | None = None
-            mp_launch_meta = None
             with torch.npu.stream(gpu_connector.load_stream):
                 for sm_cpu in slot_mappings_cpu:
                     slot_mappings_npu.append(
@@ -226,26 +220,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                         sm_cpu.to(device="npu", dtype=torch.long, non_blocking=True)
                         for sm_cpu in request.filtered_slot_by_group
                     )
-                if (
-                    filtered_slot_mappings_npu is not None
-                    and request.slot_valid_prefix_by_group is not None
-                ):
-                    gpu_connector._initialize_pointers(kvcaches)
-                    chunk_ranges = iter_lmcache_chunk_ranges(
-                        lmcache_cached_tokens,
-                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
-                        lmcache_chunk_size=self._lmcache_chunk_size,
-                    )
-                    if chunk_ranges:
-                        mp_launch_meta = build_mp_launch_meta(
-                            gpu_connector,
-                            chunk_ranges=chunk_ranges,
-                            slot_mappings_by_group=tuple(slot_mappings_cpu),
-                            prefixes_by_group=request.slot_valid_prefix_by_group,
-                            filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                            compress_ratios=tuple(self._compress_ratios_by_group),
-                            stream=gpu_connector.load_stream,
-                        )
 
             token_mask = torch.ones(len(tokens), dtype=torch.bool)
             masked_token_count = (
@@ -273,8 +247,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 retrieve_kwargs["slot_valid_prefix_by_group"] = (
                     request.slot_valid_prefix_by_group
                 )
-            if mp_launch_meta is not None:
-                retrieve_kwargs["mp_launch_meta"] = mp_launch_meta
 
             if self.use_layerwise:
                 if idx == last_idx:
@@ -496,28 +468,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     store_kwargs["slot_valid_prefix_by_group"] = (
                         request.slot_valid_prefix_by_group
                     )
-
-                if (
-                    filtered_slot_mappings_npu is not None
-                    and request.slot_valid_prefix_by_group is not None
-                ):
-                    gpu_connector = self.lmcache_engine.gpu_connector
-                    gpu_connector._initialize_pointers(kvcaches)
-                    chunk_ranges = iter_store_chunk_ranges(
-                        len(token_ids),
-                        skip_leading_tokens,
-                        self._lmcache_chunk_size,
-                    )
-                    if chunk_ranges:
-                        store_kwargs["mp_launch_meta"] = build_mp_launch_meta(
-                            gpu_connector,
-                            chunk_ranges=chunk_ranges,
-                            slot_mappings_by_group=tuple(slot_mappings_cpu),
-                            prefixes_by_group=request.slot_valid_prefix_by_group,
-                            filtered_slot_mappings_npu=filtered_slot_mappings_npu,
-                            compress_ratios=tuple(self._compress_ratios_by_group),
-                            stream=gpu_connector.store_stream,
-                        )
 
                 self.lmcache_engine.store(
                     token_ids,

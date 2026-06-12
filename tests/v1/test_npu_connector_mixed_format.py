@@ -385,8 +385,8 @@ def test_materialize_mp_device_params_idempotent() -> None:
     assert params["mp_device"]["pbs"] is pbs_first
 
 
-def test_mp_device_lazy_materialized_on_first_transfer() -> None:
-    """mp_device tensors are created on first transfer, not at pointer init."""
+def test_mp_device_materialized_at_pointer_init() -> None:
+    """mp_device tensors are created at per-group pointer init, not on first transfer."""
     connector, metadata, kv_caches, dev = make_ds4_setup()
     num_tokens = 64
     mem_obj = allocate_multi_group_memory_obj(metadata, num_tokens)
@@ -398,8 +398,12 @@ def test_mp_device_lazy_materialized_on_first_transfer() -> None:
     ):
         connector._initialize_pointers(kv_caches)
 
-    for params in connector.per_group_params:
-        assert params.get("mp_device") is None
+    materialized = [
+        p
+        for p in connector.per_group_params
+        if p.get("mp_device") is not None
+    ]
+    assert materialized
 
     with patch(
         "lmcache_ascend.v1.npu_connector.npu_connectors.lmc_ops."
@@ -419,7 +423,4 @@ def test_mp_device_lazy_materialized_on_first_transfer() -> None:
             ),
         )
 
-    materialized = [
-        p for p in connector.per_group_params if p.get("mp_device") is not None
-    ]
-    assert materialized
+    assert all(p.get("mp_device") is not None for p in materialized)

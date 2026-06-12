@@ -30,10 +30,7 @@ from lmcache_ascend.v1.kv_layer_groups import (
     _get_kv_cache_group_key_and_info,
     build_kv_layer_groups,
 )
-from lmcache_ascend.v1.npu_connector.npu_connectors import (
-    _derive_group_params,
-    _split_kv_layer_groups_by_scheduler_slot,
-)
+from lmcache_ascend.v1.npu_connector.npu_connectors import _derive_group_params
 
 
 def _make_ascend_format_manager(
@@ -495,7 +492,7 @@ def test_get_shapes_multi_plane_keeps_logical_token_dim():
 
 
 def test_split_sw_physical_chunk_size():
-    """Post-split groups inherit SW-aware ``physical_chunk_size`` (sw // ratio)."""
+    """Scheduler-heterogeneous shape peers get SW-aware ``physical_chunk_size``."""
     num_blocks, block_size, hidden = 8, 128, 1024
     layer_a = torch.empty(num_blocks, block_size, hidden, dtype=torch.uint8)
     layer_b = torch.empty(num_blocks, block_size, hidden, dtype=torch.uint8)
@@ -511,13 +508,7 @@ def test_split_sw_physical_chunk_size():
         layout_hints=layout_hints,
         lmcache_logical_chunk_size=256,
     )
-    assert len(mgr.kv_layer_groups) == 1
-    _split_kv_layer_groups_by_scheduler_slot(
-        mgr,
-        (0, 1),
-        layout_hints=layout_hints,
-        lmcache_logical_chunk_size=256,
-    )
+    assert len(mgr.kv_layer_groups) == 2
     by_ratio = {g.compress_ratio: g for g in mgr.kv_layer_groups}
     assert by_ratio[1].physical_chunk_size == 256
     assert by_ratio[128].physical_chunk_size == 1

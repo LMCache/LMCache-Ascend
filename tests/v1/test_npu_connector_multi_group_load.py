@@ -44,6 +44,7 @@ def test_start_load_kv_multi_group() -> None:
     primary_npu = kwargs["slot_mappings_npu_by_group"][pg]
     assert len(primary) == len(primary_cpu)
     assert primary.data_ptr() == primary_npu.data_ptr()
+    assert "mp_launch_meta" not in kwargs
 
 
 def test_start_load_kv_single_group_delegates_to_super() -> None:

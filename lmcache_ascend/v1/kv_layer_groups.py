@@ -242,6 +242,10 @@ def build_kv_layer_groups(
     quantised layers vs. fp16 layers (different dtypes/element sizes).
     Each group gets its own kernel launch with its own shape descriptor.
 
+    When ``layout_hints`` contains ``scheduler_group_by_flat_layer``, layers
+    with the same shape but different vLLM scheduler slot groups are placed in
+    separate groups (one slot stream per NPU group).
+
     ``dtype_key`` is either a single ``torch.dtype`` or a tuple of
     per-tensor dtypes for DSA+C8 mixed-type tuples.
 
@@ -277,8 +281,13 @@ def build_kv_layer_groups(
     groups_dict: dict[tuple, list[int]] = defaultdict(list)
     vllm_bs = self._vllm_block_size
     for idx, layer in enumerate(kv_caches):
-        key = _get_kv_cache_group_key_and_info(
+        shape_key = _get_kv_cache_group_key_and_info(
             layer, is_310p=is_310p, vllm_block_size=vllm_bs
+        )
+        key: tuple = (
+            (shape_key, int(sched_map[idx]))
+            if sched_map is not None
+            else shape_key
         )
         groups_dict[key].append(idx)
 
@@ -290,7 +299,8 @@ def build_kv_layer_groups(
 
     kv_layer_groups: list[KVLayerGroupInfo] = []
     for group_idx, key in enumerate(sorted_keys):
-        kv_size, hidden, bs, dtype_key, _ = key
+        shape_key = key[0] if sched_map is not None else key
+        kv_size, hidden, bs, dtype_key, _ = shape_key
         indices = groups_dict[key]
         rep = kv_caches[indices[0]]
 

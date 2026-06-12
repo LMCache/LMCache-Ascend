@@ -1705,7 +1705,6 @@ from lmcache_ascend.v1.npu_connector.npu_connectors import (
 )
 from lmcache_ascend.v1.slot_mapping_utils import (
     build_filtered_slot_mappings,
-    compact_slot_mapping_chunk,
     multi_plane_slot_slice_bounds,
 )
 
@@ -1718,10 +1717,10 @@ def _generic_compress_ratios_12() -> tuple[int, ...]:
     return tuple(1024 // bs for bs in _GENERIC_BLOCK_SIZES)
 
 
-def test_compact_slot_mapping_chunk_filters_dead_rows_preserving_order() -> None:
+def test_build_filtered_slot_mappings_strips_dead_rows_preserving_order() -> None:
     sm = torch.tensor([-1, -1, 10, 11, -1, 12], dtype=torch.long)
-    compact = compact_slot_mapping_chunk(sm, 0, 6, 0, (1,))
-    assert compact.tolist() == [10, 11, 12]
+    filtered, _ = build_filtered_slot_mappings((sm,), compress_ratios=(1,))
+    assert filtered[0].tolist() == [10, 11, 12]
 
 
 def _generic_slot_mappings(
@@ -1819,15 +1818,11 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
         sm_parts: list[torch.Tensor] = []
         for sched_g in sched_groups:
             sm = slot_mappings[sched_g]
-            sm_parts.append(
-                compact_slot_mapping_chunk(
-                    sm,
-                    0,
-                    chunk,
-                    sched_g,
-                    ratios,
-                )
+            s0, s1 = multi_plane_slot_slice_bounds(
+                0, chunk, sched_g, ratios, int(sm.shape[0])
             )
+            part = sm[s0:s1]
+            sm_parts.append(part[part != -1] if part.numel() else part)
         n_toks_per_plane = [int(p.shape[0]) for p in sm_parts]
 
         layer_base = 0

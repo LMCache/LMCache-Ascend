@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 import contextlib
-import copy
-import dataclasses
-from collections import defaultdict
 from types import SimpleNamespace
 from typing import Any, List, Optional, Sequence, Set, Tuple, Union
 
@@ -47,9 +44,7 @@ def _uses_multi_plane_kv_transfer(group_params: dict[str, Any]) -> bool:
     """True when group params describe a multi-plane (plane-block LMCache) transfer."""
     if group_params.get("kv_format") == KVCacheFormat.MULTI_PLANE_KV.value:
         return True
-    if group_params.get("kv_format") == KVCacheFormat.DSA_C8_KV.value:
-        return int(group_params.get("num_planes", 0)) > 0
-    return int(group_params.get("num_planes", 0)) > 0
+    return group_params.get("num_planes", 0) > 0
 
 
 def build_mp_launch_meta(
@@ -71,7 +66,7 @@ def build_mp_launch_meta(
         for npu_g, group_params in enumerate(connector.per_group_params):
             if not _uses_multi_plane_kv_transfer(group_params):
                 continue
-            num_planes = int(group_params["num_planes"])
+            num_planes = group_params["num_planes"]
             sched_groups = group_params.get("scheduler_groups_per_plane") or []
             if len(sched_groups) != num_planes:
                 raise ValueError(
@@ -83,7 +78,7 @@ def build_mp_launch_meta(
             )
             bufs["ptrs"].copy_(ptrs, non_blocking=True)
             for g_start, g_end in chunk_ranges:
-                starts, counts = compute_mp_plane_launch_row(
+                starts, counts, has_work = compute_mp_plane_launch_row(
                     g_start,
                     g_end,
                     sched_groups,
@@ -91,13 +86,14 @@ def build_mp_launch_meta(
                     prefixes_by_group=prefixes_by_group,
                     compress_ratios=compress_ratios,
                 )
-                if counts.sum().item() == 0:
-                    # No valid slots in this chunk, skip
+                # Skip empty plane rows; invoke treats a missing meta key the same way.
+                if not has_work:
                     continue
-                meta[(g_start, g_end, npu_g)] = (
-                    starts.to(device, non_blocking=True),
-                    counts.to(device, non_blocking=True),
-                )
+                starts_npu = torch.empty(num_planes, dtype=torch.int32, device=device)
+                counts_npu = torch.empty(num_planes, dtype=torch.int32, device=device)
+                starts_npu.copy_(starts, non_blocking=True)
+                counts_npu.copy_(counts, non_blocking=True)
+                meta[(g_start, g_end, npu_g)] = (starts_npu, counts_npu)
     return meta
 
 
@@ -154,76 +150,6 @@ def _build_multi_plane_group_params(
     return params
 
 
-# Stage-2 NPU grouping after upstream KVLayerGroupsManager (or build_kv_layer_groups):
-# shape-only buckets can mix flat layers from different vLLM scheduler groups (DSv4:
-# ~3 shape groups -> 6 NPU groups). Split so each group has one scheduler_slot_group.
-# multi_layer_kv_transfer uses one slot_mapping for every pointer in group_ptrs; without
-# split, _scheduler_slot_group_for_npu_group raises when layer_indices span sched groups.
-# _invoke_multi_plane_kv_transfer per-plane slot ptrs/starts/counts do not replace this:
-# slots are keyed by planeIdx within one logical layer (bundled tuple), not by flat layer
-# index across SEPARATE_KV entries; num_layers>1 with num_planes=1 reuses one slot stream
-# for all layerIdx values.
-def _split_kv_layer_groups_by_scheduler_slot(
-    manager: Any,
-    sched_map: Sequence[int],
-    *,
-    layout_hints: dict | None = None,
-    lmcache_logical_chunk_size: int = 256,
-) -> None:
-    """Subdivide upstream groups when flattened layers share a shape but not a slot group."""
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo
-
-    split_groups: list[KVLayerGroupInfo] = []
-    for group in manager.kv_layer_groups:
-        buckets: dict[int, list[int]] = defaultdict(list)
-        for layer_idx in group.layer_indices:
-            buckets[int(sched_map[layer_idx])].append(layer_idx)
-        if len(buckets) == 1:
-            split_groups.append(group)
-            continue
-        for sched_g in sorted(buckets):
-            indices = buckets[sched_g]
-            new_sd = copy.copy(group.shape_desc)
-            new_sd.nl = len(indices)
-            split_groups.append(
-                dataclasses.replace(
-                    group,
-                    layer_indices=indices,
-                    shape_desc=new_sd,
-                )
-            )
-            logger.debug(
-                "Split KV layer group by scheduler_slot_group=%d -> layers=%s",
-                sched_g, indices,
-            )
-    ratios = (layout_hints or {}).get("compress_ratios_by_group")
-    if ratios is not None:
-        chunk = max(1, int(lmcache_logical_chunk_size))
-        sw_by_g = (layout_hints or {}).get("sliding_window_size_by_group")
-        patched: list[KVLayerGroupInfo] = []
-        for group in split_groups:
-            sched_g = int(sched_map[group.layer_indices[0]])
-            ratio = max(1, int(ratios[sched_g]))
-            sw = (
-                sw_by_g[sched_g]
-                if sw_by_g is not None and sched_g < len(sw_by_g)
-                else None
-            )
-            if sw is not None:
-                physical = max(1, int(sw) // ratio)
-            else:
-                physical = max(1, chunk // ratio)
-            patched.append(
-                dataclasses.replace(
-                    group,
-                    compress_ratio=ratio,
-                    physical_chunk_size=physical,
-                )
-            )
-        split_groups = patched
-    manager.kv_layer_groups = split_groups
-
-
 def _materialize_mp_device_params(
     group_params: dict[str, Any], device: torch.device
 ) -> None:
@@ -232,7 +158,7 @@ def _materialize_mp_device_params(
         return
     if not _uses_multi_plane_kv_transfer(group_params):
         return
-    num_planes = int(group_params["num_planes"])
+    num_planes = group_params["num_planes"]
     group_params["mp_device"] = {
         "pbs": torch.tensor(
             group_params["per_plane_page_buffer_sizes"],
@@ -943,9 +869,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         hints = self.layout_hints or {}
         # Bundled multi-spec layers keep 4-D sub-tensors that upstream
         # normalize_kv_and_discover_format cannot detect (it only handles
-        # tensor_dim 3 or 5). Use the Ascend-local build_kv_layer_groups
-        # which derives sizes dimensionality-agnostically instead.
-        if hints.get("bundle_multi_spec"):
+        # tensor_dim 3 or 5). Multi-group runs also use Ascend-local grouping
+        # so scheduler slot group is part of the bucket key in one pass.
+        if hints.get("bundle_multi_spec") or hints.get(
+            "scheduler_group_by_flat_layer"
+        ) is not None:
             mgr = KVLayerGroupsManager.__new__(KVLayerGroupsManager)
             build_kv_layer_groups(
                 mgr,
@@ -967,14 +895,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 normalized,
                 gpu_kv_format=gpu_kv_format,
                 num_blocks=num_blocks,
-                layout_hints=hints,
-                lmcache_logical_chunk_size=self.metadata.chunk_size,
-            )
-        sched_map = hints.get("scheduler_group_by_flat_layer")
-        if sched_map is not None:
-            _split_kv_layer_groups_by_scheduler_slot(
-                self.metadata.kv_layer_groups_manager,
-                sched_map,
                 layout_hints=hints,
                 lmcache_logical_chunk_size=self.metadata.chunk_size,
             )
@@ -1037,25 +957,25 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         | None = None,
     ) -> None:
         """One logical kernel op per bundled multi-spec layer (per-plane transfers)."""
-        if (
-            mem_tensor.dtype != torch.uint8
-            and int(group_params.get("num_planes", 0)) > 0
-        ):
+        if mem_tensor.dtype != torch.uint8:
             mem_tensor = mem_tensor.view(torch.uint8)
-        num_planes = int(group_params["num_planes"])
-        sched_groups = group_params.get("scheduler_groups_per_plane") or []
-        if len(sched_groups) != num_planes:
-            raise ValueError(
-                f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
-            )
+        num_planes = group_params["num_planes"]
 
         device = filtered_slot_mappings_npu[0].device
         bufs = self._ensure_mp_launch_bufs(npu_group_idx, num_planes, device)
         key = (g_start, g_end, npu_group_idx)
-        if mp_launch_meta is not None and key in mp_launch_meta:
-            starts_npu, counts_npu = mp_launch_meta[key]
+        if mp_launch_meta is not None:
+            cached = mp_launch_meta.get(key)
+            if cached is None:
+                return
+            starts_npu, counts_npu = cached
         else:
-            starts, counts = compute_mp_plane_launch_row(
+            sched_groups = group_params.get("scheduler_groups_per_plane") or []
+            if len(sched_groups) != num_planes:
+                raise ValueError(
+                    f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
+                )
+            starts_cpu, counts_cpu, has_work = compute_mp_plane_launch_row(
                 g_start,
                 g_end,
                 sched_groups,
@@ -1063,24 +983,20 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 prefixes_by_group=slot_valid_prefix_by_group,
                 compress_ratios=compress_ratios,
             )
-            if counts.sum().item() == 0:
+            if not has_work:
                 return
             ptrs = compute_mp_plane_launch_ptrs(
-                    sched_groups, filtered_slot_mappings_npu
+                sched_groups, filtered_slot_mappings_npu
             )
             bufs["ptrs"].copy_(ptrs, non_blocking=True)
-            bufs["starts"].copy_(starts, non_blocking=True)
-            bufs["counts"].copy_(counts, non_blocking=True)
+            bufs["starts"].copy_(starts_cpu, non_blocking=True)
+            bufs["counts"].copy_(counts_cpu, non_blocking=True)
             starts_npu, counts_npu = bufs["starts"], bufs["counts"]
 
         plane_hidden_bytes = group_params["per_plane_hidden_dim_bytes"]
         max_hidden_dim_bytes = max(plane_hidden_bytes)
         _materialize_mp_device_params(group_params, self.kvcaches_device)
-        mp_device = group_params.get("mp_device")
-        if mp_device is None:
-            raise RuntimeError(
-                "multi-plane KV transfer requires materialized mp_device params"
-            )
+        mp_device = group_params["mp_device"]
         pbs = mp_device["pbs"]
         bss = mp_device["bss"]
         hds = mp_device["hds"]
@@ -1170,18 +1086,20 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             )
             if (
                 not params.get("scheduler_groups_per_plane")
-                and int(params.get("num_planes", 0)) > 0
+                and params.get("num_planes", 0) > 0
             ):
                 params["scheduler_groups_per_plane"] = [
                     params["scheduler_slot_group"]
-                ] * int(params["num_planes"])
-            if self._is_mixed_format and not int(params.get("num_planes", 0)):
+                ] * params["num_planes"]
+            if self._is_mixed_format and not params.get("num_planes", 0):
                 raise ValueError(
                     f"Group {group_idx}: cannot derive multi-plane params for "
                     f"{entry_format.name}"
                 )
             params["layer_indices"] = list(indices)
             group_params.append(params)
+            if _uses_multi_plane_kv_transfer(params):
+                _materialize_mp_device_params(params, self.kvcaches_device)
 
         self.group_kv_cache_pointers = group_pointers
         self.per_group_params = group_params
@@ -1630,6 +1548,42 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             and len(self.group_kv_cache_pointers) > 0
         )
 
+    def _ensure_mp_launch_meta_for_batch(
+        self,
+        starts: Sequence[int],
+        ends: Sequence[int],
+        kwargs: dict[str, Any],
+        *,
+        stream: Any,
+    ) -> None:
+        """Precompute multi-plane launch rows from engine chunk ``starts``/``ends``."""
+        filtered = kwargs.get("filtered_slot_mappings_npu")
+        prefixes = kwargs.get("slot_valid_prefix_by_group")
+        slot_mappings_by_group = kwargs.get("slot_mappings_by_group")
+        if (
+            filtered is None
+            or prefixes is None
+            or slot_mappings_by_group is None
+            or not starts
+        ):
+            return
+        kvcaches = kwargs.get("kvcaches")
+        if kvcaches is None:
+            return
+        self._initialize_pointers(kvcaches)
+        if not self._has_per_group_transfer_infra():
+            return
+        chunk_ranges = list(dict.fromkeys(zip(starts, ends)))
+        kwargs["mp_launch_meta"] = build_mp_launch_meta(
+            self,
+            chunk_ranges=chunk_ranges,
+            slot_mappings_by_group=slot_mappings_by_group,
+            prefixes_by_group=prefixes,
+            filtered_slot_mappings_npu=filtered,
+            compress_ratios=self._compress_ratios_by_group(),
+            stream=stream,
+        )
+
     def _try_multi_plane_dispatch(
         self,
         memory_obj: MemoryObj,
@@ -1694,7 +1648,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             raise ValueError(
                 "DSA-C8 memory objects must use uint8 LMCache chunks."
             )
-        sm_len = int(slot_mapping.shape[0])
         with torch.npu.stream(stream):
             self._invoke_multi_plane_kv_transfer(
                 mem_tensor=memory_obj.tensor,
@@ -1703,7 +1656,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 slot_mappings_by_group=(slot_mapping,),
                 filtered_slot_mappings_npu=(slot_mapping,),
                 slot_valid_prefix_by_group=(
-                    torch.arange(sm_len + 1, dtype=torch.int32),
+                    torch.arange(
+                        slot_mapping.shape[0] + 1, dtype=torch.int32
+                    ),
                 ),
                 compress_ratios=(1,),
                 g_start=start,
@@ -1755,7 +1710,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     )
                     continue
 
-                if not int(group_params.get("num_planes", 0)):
+                if not _uses_multi_plane_kv_transfer(group_params):
                     raise RuntimeError(
                         f"NPU group {i}: mixed-format requires multi-plane "
                         "params (num_planes > 0)"
@@ -1903,6 +1858,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
     def batched_to_gpu(self, memory_objs, starts, ends, **kwargs):
+        self._ensure_mp_launch_meta_for_batch(
+            starts, ends, kwargs, stream=self.load_stream
+        )
         # Check if any memory objects are ProxyMemoryObjs (deferred P2P fetch)
         has_proxy = any(isinstance(m, ProxyMemoryObj) for m in memory_objs)
 
@@ -2094,6 +2052,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                     self.to_gpu(memory_obj, start, end, **kwargs)
 
     def batched_from_gpu(self, memory_objs, starts, ends, **kwargs):
+        self._ensure_mp_launch_meta_for_batch(
+            starts, ends, kwargs, stream=self.store_stream
+        )
         # NOTE (gingfung):
         # Since no_sync is only consumed by us, for now we modify the kwargs directly.
         # We avoid per-object synchronization during batch transfers.

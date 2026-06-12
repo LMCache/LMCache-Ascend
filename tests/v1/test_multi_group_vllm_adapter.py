@@ -25,11 +25,8 @@ from lmcache_ascend.v1.npu_connector.npu_connectors import (
 )
 from lmcache_ascend.v1.slot_mapping_utils import (
     build_filtered_slot_mappings,
-    compact_slot_mapping_chunk,
     compute_mp_plane_launch_row,
     dense_bounds_from_prefix,
-    iter_lmcache_chunk_ranges,
-    iter_store_chunk_ranges,
     multi_plane_slot_slice_bounds,
 )
 
@@ -283,38 +280,33 @@ def test_multi_plane_slot_slice_bounds_global_sm() -> None:
     assert multi_plane_slot_slice_bounds(256, 512, 0, ratios, sm_len) == (32, 64)
 
 
-def test_compact_slot_mapping_chunk_per_lmcache_chunk() -> None:
-    sm = torch.full((128,), -1, dtype=torch.long)
-    sm[32:64] = torch.arange(32, 64, dtype=torch.long)
-    sm[96:128] = torch.arange(96, 128, dtype=torch.long)
-    chunk0 = compact_slot_mapping_chunk(sm, 0, 256, 0, (4,))
-    chunk1 = compact_slot_mapping_chunk(sm, 256, 512, 0, (4,))
-    assert chunk0.tolist() == list(range(32, 64))
-    assert chunk1.tolist() == list(range(96, 128))
+def test_multi_plane_slot_slice_bounds_rejects_out_of_range() -> None:
+    with pytest.raises(ValueError, match="out of range"):
+        multi_plane_slot_slice_bounds(256, 520, 0, (8,), 64)
 
 
-def test_filtered_slot_mappings_match_runtime_compact() -> None:
+def test_multi_plane_slot_slice_bounds_rejects_missing_compress_ratio() -> None:
+    with pytest.raises(ValueError, match="compress_ratios"):
+        multi_plane_slot_slice_bounds(0, 256, 1, (8,), 64)
+
+
+def test_filtered_slot_mappings_chunk_slices() -> None:
     sm = torch.full((128,), -1, dtype=torch.long)
     sm[32:64] = torch.arange(32, 64, dtype=torch.long)
     sm[96:128] = torch.arange(96, 128, dtype=torch.long)
     mappings = (sm,)
     ratios = (4,)
-    lmcache_cached_tokens = 512
-    lmcache_chunk_size = 256
 
     filtered, prefixes = build_filtered_slot_mappings(
         mappings,
         compress_ratios=ratios,
     )
-    for token_start, token_end in iter_lmcache_chunk_ranges(
-        lmcache_cached_tokens,
-        vllm_cached_tokens=0,
-        lmcache_chunk_size=lmcache_chunk_size,
-    ):
+    expected_by_chunk = {
+        (0, 256): list(range(32, 64)),
+        (256, 512): list(range(96, 128)),
+    }
+    for token_start, token_end in expected_by_chunk:
         for sched_g, sm_g in enumerate(mappings):
-            expected = compact_slot_mapping_chunk(
-                sm_g, token_start, token_end, sched_g, ratios
-            )
             s0, s1 = multi_plane_slot_slice_bounds(
                 token_start, token_end, sched_g, ratios, int(sm_g.shape[0])
             )
@@ -322,7 +314,7 @@ def test_filtered_slot_mappings_match_runtime_compact() -> None:
                 prefixes[sched_g], s0, s1
             )
             actual = filtered[sched_g][dense_start : dense_start + dense_count]
-            assert actual.equal(expected)
+            assert actual.tolist() == expected_by_chunk[(token_start, token_end)]
 
 
 def test_req_meta_populates_filtered_slot_mappings_on_load() -> None:
@@ -696,13 +688,7 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
     ):
         connector._initialize_pointers(kv_caches)
 
-    load_ranges = iter_lmcache_chunk_ranges(
-        num_tokens,
-        vllm_cached_tokens=0,
-        lmcache_chunk_size=DS4_CHUNK_SIZE,
-    )
-    store_ranges = iter_store_chunk_ranges(num_tokens, 0, DS4_CHUNK_SIZE)
-    chunk_ranges = list(dict.fromkeys(load_ranges + store_ranges))
+    chunk_ranges = [(0, DS4_CHUNK_SIZE), (DS4_CHUNK_SIZE, num_tokens)]
 
     meta = build_mp_launch_meta(
         connector,
@@ -723,7 +709,7 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
                 int(group_params.get("scheduler_slot_group", 0))
             ] * num_planes
         for g_start, g_end in chunk_ranges:
-            exp_starts, exp_counts = compute_mp_plane_launch_row(
+            exp_starts, exp_counts, has_work = compute_mp_plane_launch_row(
                 g_start,
                 g_end,
                 sched_groups,
@@ -731,9 +717,11 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
                 prefixes_by_group=prefixes,
                 compress_ratios=ratios,
             )
-            if exp_counts.sum().item() == 0:
+            if not has_work:
                 assert (g_start, g_end, npu_g) not in meta
                 continue
             starts_npu, counts_npu = meta[(g_start, g_end, npu_g)]
+            assert starts_npu.device.type != "cpu"
+            assert counts_npu.device.type != "cpu"
             assert starts_npu.cpu().tolist() == exp_starts.tolist()
             assert counts_npu.cpu().tolist() == exp_counts.tolist()
