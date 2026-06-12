@@ -15,65 +15,41 @@ def multi_plane_slot_slice_bounds(
     compress_ratios: Sequence[int],
     sm_len: int,
 ) -> tuple[int, int]:
-    """Map token range ``[token_start, token_end)`` to ``sm`` slice bounds."""
+    """Map a global token span to compressed slot bounds in the full slot-mapping tensor.
+
+    Each scheduler group ``sched_g`` has its own compression ratio. Given logical token
+    indices ``[token_start, token_end)`` returns ``(s0, s1)`` such that
+    ``sm[s0:s1]`` covers exactly those tokens for that group. ``sm_len`` is the
+    length of that group's full slot-mapping tensor (``len(sm)``).
+
+    Raises:
+        ValueError: If ``sched_g`` is out of range for ``compress_ratios``, if
+            ``ratio < 1``, or if the computed slice ``[s0, s1)`` falls outside
+            ``[0, sm_len)``.
+
+    Returns ``(0, 0)`` when the token span is empty.
+    """
     if token_end <= token_start:
         return 0, 0
-    ratio = int(compress_ratios[sched_g]) if sched_g < len(compress_ratios) else 1
+    if sched_g < 0 or sched_g >= len(compress_ratios):
+        raise ValueError(
+            f"scheduler group {sched_g} out of range for compress_ratios "
+            f"(len={len(compress_ratios)})"
+        )
+    ratio = int(compress_ratios[sched_g])
+    if ratio < 1:
+        raise ValueError(f"compress_ratios[{sched_g}] must be >= 1, got {ratio}")
     if ratio <= 1:
-        s0, s1 = int(token_start), min(int(token_end), sm_len)
+        s0, s1 = token_start, token_end
     else:
-        s0 = int(token_start) // ratio
-        s1 = min((int(token_end) + ratio - 1) // ratio, sm_len)
-    return s0, max(s0, s1)
-
-
-def compact_slot_mapping_chunk(
-    sm: torch.Tensor,
-    g_start: int,
-    g_end: int,
-    sched_g: int,
-    compress_ratios: Sequence[int],
-) -> torch.Tensor:
-    """Slice one logical chunk from global ``sm`` and drop dead rows (``-1``)."""
-    slot_start, slot_end = multi_plane_slot_slice_bounds(
-        g_start,
-        g_end,
-        sched_g,
-        compress_ratios,
-        int(sm.shape[0]),
-    )
-    slot_slice = sm[slot_start:slot_end]
-    if slot_slice.numel() == 0:
-        return slot_slice
-    return slot_slice[slot_slice != -1]
-
-
-def iter_lmcache_chunk_ranges(
-    lmcache_cached_tokens: int,
-    *,
-    vllm_cached_tokens: int,
-    lmcache_chunk_size: int,
-) -> list[tuple[int, int]]:
-    """Chunk-aligned ``[start, end)`` token ranges in the LMCache load window."""
-    if lmcache_chunk_size <= 0:
-        raise ValueError(f"lmcache_chunk_size must be positive, got {lmcache_chunk_size}")
-    if lmcache_cached_tokens <= 0:
-        return []
-
-    load_start = (
-        int(vllm_cached_tokens) // lmcache_chunk_size * lmcache_chunk_size
-    )
-    load_end = int(lmcache_cached_tokens)
-    if load_end <= load_start:
-        return []
-
-    ranges: list[tuple[int, int]] = []
-    chunk_start = load_start
-    while chunk_start < load_end:
-        chunk_end = min(chunk_start + lmcache_chunk_size, load_end)
-        ranges.append((chunk_start, chunk_end))
-        chunk_start = chunk_end
-    return ranges
+        s0 = token_start // ratio
+        s1 = (token_end + ratio - 1) // ratio
+    if s0 < 0 or s1 > sm_len:
+        raise ValueError(
+            f"slot slice [{s0}, {s1}) out of range for sm length {sm_len} "
+            f"(range [{token_start}, {token_end}), sched_g={sched_g}, ratio={ratio})"
+        )
+    return s0, s1
 
 
 def dense_bounds_from_prefix(
@@ -81,7 +57,14 @@ def dense_bounds_from_prefix(
     s0: int,
     s1: int,
 ) -> tuple[int, int]:
-    """Map full-``sm`` row bounds ``[s0, s1)`` to dense filtered offsets via prefix."""
+    """Map full-``sm`` row bounds ``[s0, s1)`` to a dense filtered slice.
+
+    ``prefix`` comes from :func:`build_filtered_slot_mappings`; ``prefix[k]`` is
+    the count of non-``-1`` rows in ``sm[0:k)``. Returns
+    ``(dense_start, dense_count)`` so that
+    ``filtered[dense_start : dense_start + dense_count]`` equals the valid
+    entries in ``sm[s0:s1]``.
+    """
     if s1 <= s0:
         return 0, 0
     dense_start = int(prefix[s0])
@@ -89,31 +72,16 @@ def dense_bounds_from_prefix(
     return dense_start, dense_count
 
 
-def iter_store_chunk_ranges(
-    token_len: int,
-    skip_leading: int,
-    chunk_size: int,
-) -> list[tuple[int, int]]:
-    """Chunk-aligned ``[start, end)`` token ranges in the LMCache store window."""
-    if chunk_size <= 0:
-        raise ValueError(f"chunk_size must be positive, got {chunk_size}")
-    skip = int(skip_leading) // chunk_size * chunk_size
-    if skip >= token_len:
-        return []
-    ranges: list[tuple[int, int]] = []
-    chunk_start = skip
-    while chunk_start < token_len:
-        chunk_end = min(chunk_start + chunk_size, token_len)
-        ranges.append((chunk_start, chunk_end))
-        chunk_start = chunk_end
-    return ranges
-
-
 def compute_mp_plane_launch_ptrs(
     sched_groups: Sequence[int],
     filtered_slot_mappings_npu: Sequence[torch.Tensor],
 ) -> torch.Tensor:
-    """Per-plane device pointers into dense filtered slot mappings."""
+    """Per-plane NPU pointers into dense filtered slot-mapping tensors.
+
+    One int64 pointer per entry in ``sched_groups``, indexing
+    ``filtered_slot_mappings_npu[g]``. Passed to the multi-plane KV transfer
+    kernel so each plane reads its own compacted slot list.
+    """
     return torch.tensor(
         [int(filtered_slot_mappings_npu[g].data_ptr()) for g in sched_groups],
         dtype=torch.int64,
@@ -129,16 +97,21 @@ def compute_mp_plane_launch_row(
     slot_mappings_by_group: Sequence[torch.Tensor],
     prefixes_by_group: Sequence[torch.Tensor],
     compress_ratios: Sequence[int],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-plane dense ``starts`` / ``counts`` for one multi-plane chunk."""
+) -> tuple[torch.Tensor, torch.Tensor, bool]:
+    """Per-plane dense offsets for one token chunk in a multi-plane transfer.
+
+    For each plane's scheduler group, maps a logical range to physical slot range 
+    and produces pinned CPU tensors ``starts`` and ``counts`` that are used by
+    transfer kernel to index into each plane's filtered slot-mapping buffer.
+
+    Returns:
+        ``starts``, ``counts``, and ``has_work`` — the last is ``True`` when at
+        least one plane has a non-zero dense slot count for this chunk.
+    """
     starts: list[int] = []
     counts: list[int] = []
+    has_work = False
     for sched_g in sched_groups:
-        if sched_g >= len(slot_mappings_by_group):
-            raise IndexError(
-                f"scheduler group {sched_g} out of range "
-                f"(num={len(slot_mappings_by_group)})"
-            )
         sm_len = int(slot_mappings_by_group[sched_g].shape[0])
         s0, s1 = multi_plane_slot_slice_bounds(
             g_start, g_end, sched_g, compress_ratios, sm_len
@@ -148,9 +121,12 @@ def compute_mp_plane_launch_row(
         )
         starts.append(dense_start)
         counts.append(dense_count)
+        if dense_count > 0:
+            has_work = True
     return (
         torch.tensor(starts, dtype=torch.int32, pin_memory=True),
         torch.tensor(counts, dtype=torch.int32, pin_memory=True),
+        has_work,
     )
 
 
@@ -159,9 +135,13 @@ def build_filtered_slot_mappings(
     *,
     compress_ratios: tuple[int, ...] | Sequence[int],
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
-    """Build per-sched-group dense filtered mappings and valid-slot prefix arrays.
+    """Precompute per-group compacted slot mappings and prefix lookup tables.
 
-    ``prefix[g][k]`` counts valid (non ``-1``) slots in ``sm[g][0:k)``.
+    For each scheduler group, strips ``-1`` (invalid) rows from ``sm`` and
+    builds a prefix array where ``prefix[g][k]`` counts valid slots in
+    ``sm[g][0:k)``. Enables O(1) per-chunk dense slicing via
+    :func:`dense_bounds_from_prefix` instead of scanning ``-1`` on every
+    transfer.
     """
     ratios = tuple(int(r) for r in compress_ratios)
     if not ratios:
