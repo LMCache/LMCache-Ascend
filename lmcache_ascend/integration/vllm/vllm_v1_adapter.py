@@ -75,12 +75,14 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 kv_caches,
                 self._kv_cache_config,
             )
-            flat_kv, sched_by_layer, layer_to_groups = apply_skip_policy_from_env_to_flattened(
-                self._kv_cache_config,
-                flat_kv,
-                sched_by_layer,
-                layer_to_groups,
-                bundled=bundled,
+            flat_kv, sched_by_layer, layer_to_groups = (
+                apply_skip_policy_from_env_to_flattened(
+                    self._kv_cache_config,
+                    flat_kv,
+                    sched_by_layer,
+                    layer_to_groups,
+                    bundled=bundled,
+                )
             )
             logger.info(
                 "Preprocessed multi-spec KV caches: %d model layers -> "

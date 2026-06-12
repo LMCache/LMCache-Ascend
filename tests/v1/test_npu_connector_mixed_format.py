@@ -83,6 +83,28 @@ def test_derive_group_params_dsa_c8() -> None:
     assert all(x > 0 for x in pb)
 
 
+def test_derive_group_params_mla_kv() -> None:
+    blob = torch.zeros(5000, dtype=torch.int8)
+    k = blob[512 : 512 + 4096].view(4, 8, 1, 128)
+    v = blob[768 : 768 + 32].view(4, 8, 1, 1)
+    entry = (k, v)
+    params = _derive_group_params(
+        entry,
+        KVCacheFormat.MLA_KV,
+        _FakeShapeDesc(nb=4, bs=8, block_stride_elems=int(k.stride(0))),
+        layout_hints={
+            "_current_layer_name": "model.layers.0.self_attn.indexer.k_cache",
+            "layer_to_scheduler_groups": {
+                "model.layers.0.self_attn.indexer.k_cache": [0],
+            },
+        },
+    )
+    assert params["num_planes"] == 2
+    assert params["kv_format"] == KVCacheFormat.MLA_KV.value
+    assert params["scheduler_groups_per_plane"] == [0, 0]
+    assert len(params["per_plane_hidden_dim_bytes"]) == 2
+
+
 def test_initialize_pointers_mixed_format_no_unpack_crash() -> None:
     """Mixed 1- vs 4-element entries use per-group pointers (no flat DSA_C8 table)."""
     num_blocks = 4
