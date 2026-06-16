@@ -3,6 +3,10 @@
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
+from lmcache.integration.vllm.utils import (
+    apply_mm_hashes_to_token_ids,
+    extract_mm_features,
+)
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
@@ -25,7 +29,75 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.request import Request
 
+# First Party
+from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
+
 logger = init_logger(__name__)
+
+
+def _merge_request_output_params(
+    base_params: Optional[dict[str, Any]],
+    extra_params: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    if not base_params and not extra_params:
+        return None
+    merged: dict[str, Any] = {}
+    if base_params:
+        merged.update(base_params)
+    if extra_params:
+        merged.update(extra_params)
+    return merged
+
+
+def _set_request_output_metrics(
+    request,
+    *,
+    prompt_tokens: int,
+    hit_tokens: int,
+    mode: str,
+    covered_tokens: Optional[int] = None,
+    prefix_miss_tokens: Optional[int] = None,
+) -> None:
+    prompt_tokens = max(int(prompt_tokens), 0)
+    hit_tokens = max(int(hit_tokens), 0)
+    req_hit_rate = float(hit_tokens) / float(prompt_tokens) if prompt_tokens > 0 else 0.0
+    setattr(request, "_lmcache_prompt_tokens", prompt_tokens)
+    setattr(request, "_lmcache_hit_tokens", hit_tokens)
+    setattr(request, "_lmcache_req_hit_rate", req_hit_rate)
+    setattr(request, "_lmcache_mode", str(mode))
+    if covered_tokens is not None:
+        setattr(request, "_lmcache_covered_tokens", max(int(covered_tokens), 0))
+    if prefix_miss_tokens is not None:
+        setattr(
+            request,
+            "_lmcache_prefix_miss_tokens",
+            max(int(prefix_miss_tokens), 0),
+        )
+
+
+def _collect_request_output_metrics(request) -> Optional[dict[str, Any]]:
+    prompt_tokens = getattr(request, "_lmcache_prompt_tokens", None)
+    hit_tokens = getattr(request, "_lmcache_hit_tokens", None)
+    req_hit_rate = getattr(request, "_lmcache_req_hit_rate", None)
+    mode = getattr(request, "_lmcache_mode", None)
+    if prompt_tokens is None or hit_tokens is None or req_hit_rate is None:
+        return None
+
+    params: dict[str, Any] = {
+        "req_hit_rate": float(req_hit_rate),
+        "lmcache_req_hit_rate": float(req_hit_rate),
+        "lmcache_hit_tokens": int(hit_tokens),
+        "lmcache_prompt_tokens": int(prompt_tokens),
+    }
+    if mode is not None:
+        params["lmcache_mode"] = str(mode)
+    covered_tokens = getattr(request, "_lmcache_covered_tokens", None)
+    if covered_tokens is not None:
+        params["lmcache_covered_tokens"] = int(covered_tokens)
+    prefix_miss_tokens = getattr(request, "_lmcache_prefix_miss_tokens", None)
+    if prefix_miss_tokens is not None:
+        params["lmcache_prefix_miss_tokens"] = int(prefix_miss_tokens)
+    return params
 
 
 class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
@@ -41,7 +113,63 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         self._wait_for_save_done = True
         self._finished_req_ids_waiting_for_save: set[str] = set()
         self._late_finished_sending: set[str] = set()
+        self._req_metric_segment_helper: Optional[HoleSegmentHelper] = None
+        metadata = getattr(self, "lmcache_engine_metadata", None)
+        if metadata is None and getattr(self, "lmcache_engine", None) is not None:
+            metadata = self.lmcache_engine.metadata
+        if (
+            metadata is not None
+            and (self.kv_role == "kv_producer" or self.kv_role == "kv_both")
+        ):
+            self._req_metric_segment_helper = HoleSegmentHelper(
+                self.config,
+                metadata,
+            )
         logger.debug("store_async: %s", self.store_async)
+
+    def _get_lookup_token_ids(self, request) -> list[int]:
+        token_ids = list(request.all_token_ids)
+        mm_hashes, mm_positions = extract_mm_features(request)
+        if mm_hashes and mm_positions:
+            token_tensor = torch.tensor(request.prompt_token_ids)
+            apply_mm_hashes_to_token_ids(token_tensor, mm_hashes, mm_positions)
+            token_ids = token_tensor.tolist()
+        if self.skip_last_n_tokens > 0:
+            token_ids = token_ids[: -self.skip_last_n_tokens]
+        return token_ids
+
+    def _compute_exact_hit_tokens(
+        self,
+        token_ids: list[int],
+        cached_prefix_end: int,
+    ) -> int:
+        if cached_prefix_end <= 0:
+            return 0
+        if self._req_metric_segment_helper is None:
+            return max(int(cached_prefix_end), 0)
+        hit_tokens = 0
+        for start, end in self._req_metric_segment_helper.split_ranges(token_ids):
+            if end > cached_prefix_end:
+                break
+            hit_tokens += end - start
+        return hit_tokens
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens: int):
+        num_new_tokens = super().get_num_new_matched_tokens(
+            request,
+            num_computed_tokens,
+        )
+        token_ids = self._get_lookup_token_ids(request)
+        load_spec = self.load_specs.get(request.request_id)
+        cached_prefix_end = 0 if load_spec is None else load_spec.lmcache_cached_tokens
+        hit_tokens = self._compute_exact_hit_tokens(token_ids, cached_prefix_end)
+        _set_request_output_metrics(
+            request,
+            prompt_tokens=len(token_ids),
+            hit_tokens=hit_tokens,
+            mode="nohole",
+        )
+        return num_new_tokens
 
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -374,5 +502,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                         exc_info=True,
                     )
 
+        metric_params = _collect_request_output_metrics(request)
+        return_params = _merge_request_output_params(return_params, metric_params)
         delay_free = self.store_async and self.kv_role != "kv_consumer"
         return delay_free, return_params
+
+
+LMCacheConnectorV1ImplAscend = LMCacheAscendConnectorV1Impl

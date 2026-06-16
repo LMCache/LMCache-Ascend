@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import time
 from typing import Optional
 
 # Third Party
@@ -11,11 +12,13 @@ from lmcache_ascend.v1.blend.models.models import LMCModel
 
 
 class LMCLlamaModel(LMCModel):
-    @torch.compile
     def compute_layer(
-        self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None
+        self,
+        input_ids: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
+        req_id: Optional[str | int] = None,
     ):
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
+        hidden_states = self.embed_input_ids(input_ids.npu())
         residual = None
 
         # TODO (Jiayi): reduce the number of calls
@@ -34,11 +37,16 @@ class LMCLlamaModel(LMCModel):
             max_seq_len=input_ids.shape[0],
         )
 
+        no_more_queries = False
+
         for idx, layer in enumerate(
             self.vllm_model.model.layers[
                 self.vllm_model.model.start_layer : self.vllm_model.model.end_layer
             ]
         ):
+            if no_more_queries:
+                yield
+                continue
             # TODO(Jiayi) The last layer doesn't have to be computed
             # hidden_states, residual = layer(positions, hidden_states, residual)
 
@@ -61,19 +69,36 @@ class LMCLlamaModel(LMCModel):
                 dim=-1,
             )
 
+            blend_stage_start = time.perf_counter()
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
                 q, k, v, residual, idx, attn_output, attn_metadata, mask
             )
+            if q.numel() == 0:
+                self.blender.emit_blend_timer(
+                    idx,
+                    (time.perf_counter() - blend_stage_start) * 1000.0,
+                )
+                no_more_queries = True
+                yield
+                continue
 
             num_heads = self.vllm_attn_layers[idx].num_heads
             num_kv_heads = self.vllm_attn_layers[idx].num_kv_heads
             head_size = self.vllm_attn_layers[idx].head_size
 
+            qkv_view_start = time.perf_counter()
             q = q.view(-1, num_heads, head_size)
             k = k.view(-1, num_kv_heads, head_size)
             v = v.view(-1, num_kv_heads, head_size)
             attn_output = attn_output.view(-1, num_heads, head_size)
+            if hasattr(self.blender, "emit_blend_component"):
+                self.blender.emit_blend_component(
+                    "blend_qkv_view",
+                    idx,
+                    (time.perf_counter() - qkv_view_start) * 1000.0,
+                )
 
+            attn_start = time.perf_counter()
             attn_output = self.lmc_attn_layers[idx].forward_contiguous(
                 q,
                 k,
@@ -81,6 +106,19 @@ class LMCLlamaModel(LMCModel):
                 attn_output,
                 attn_metadata,
                 blend_metadata=self.blender.metadata,
+                req_id=req_id,
+            )
+            # Record that the scatter is done after attention finishes reading the buffer
+            self.blender.gpu_connector.record_scatter_done(idx)
+            if hasattr(self.blender, "emit_blend_component"):
+                self.blender.emit_blend_component(
+                    "blend_attention",
+                    idx,
+                    (time.perf_counter() - attn_start) * 1000.0,
+                )
+            self.blender.emit_blend_timer(
+                idx,
+                (time.perf_counter() - blend_stage_start) * 1000.0,
             )
 
             attn_output = attn_output.view(-1, num_heads * head_size)
@@ -88,7 +126,6 @@ class LMCLlamaModel(LMCModel):
             v = v.view(-1, num_kv_heads * head_size)
 
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
-
             # Fully Connected
             hidden_states, residual = layer.post_attention_layernorm(
                 hidden_states, residual
