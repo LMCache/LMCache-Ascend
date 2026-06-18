@@ -264,6 +264,19 @@ class AscendLMCacheEngine(LMCacheEngine):
         ``to_gpu`` on ``load_stream``, reusing the NPU-resident broadcast
         buffer to avoid a redundant CPU→NPU PCIe transfer.
         """
+        valid_chunks = [c for c in reordered_chunks if c[1].is_valid()]
+        skipped = len(reordered_chunks) - len(valid_chunks)
+        if skipped > 0:
+            logger.warning(
+                "rank=0 _pipeline_sender: filtered %d invalid chunks "
+                "(total=%d -> %d). These chunks may have been freed "
+                "by eviction or a previous request's cleanup.",
+                skipped,
+                len(reordered_chunks),
+                len(valid_chunks),
+            )
+        reordered_chunks = valid_chunks
+
         total = len(reordered_chunks)
         self.broadcast_object_fn(total, first_rank)
         if total == 0:
@@ -566,6 +579,22 @@ class AscendLMCacheEngine(LMCacheEngine):
         # and non-rank-0's runs on the broadcast receive buffers, avoiding
         # a second CPU->NPU PCIe transfer.
         if self.save_only_first_rank:
+            if self.metadata.is_first_rank() and reordered_chunks:
+                valid_chunks = []
+                for c in reordered_chunks:
+                    if c[1].is_valid():
+                        valid_chunks.append(c)
+                    else:
+                        _, mem_obj, start, end = c
+                        ret_mask[start:end] = False
+                        mem_obj.ref_count_down()
+                        logger.warning(
+                            "rank=0 retrieve: chunk [%d:%d] is invalid, "
+                            "marking as cache miss",
+                            start,
+                            end,
+                        )
+                reordered_chunks = valid_chunks
             with retrieve_stats.profile_broadcast():
                 self._pipelined_sharded_broadcast_and_load(
                     reordered_chunks, ret_mask, **kwargs
