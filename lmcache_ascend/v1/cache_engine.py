@@ -235,7 +235,6 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.metadata.is_first_rank():
             self._pipeline_sender(
                 reordered_chunks,
-                ret_mask,
                 shard_size,
                 first_rank,
                 load_stream,
@@ -254,7 +253,6 @@ class AscendLMCacheEngine(LMCacheEngine):
     def _pipeline_sender(
         self,
         reordered_chunks: list,
-        ret_mask: torch.Tensor,
         shard_size: int,
         first_rank: int,
         load_stream: "torch.npu.Stream",
@@ -266,32 +264,6 @@ class AscendLMCacheEngine(LMCacheEngine):
         ``to_gpu`` on ``load_stream``, reusing the NPU-resident broadcast
         buffer to avoid a redundant CPU→NPU PCIe transfer.
         """
-        valid_chunks = []
-        for c in reordered_chunks:
-            if c[1].is_valid():
-                valid_chunks.append(c)
-            else:
-                _, mem_obj, start, end = c
-                ret_mask[start:end] = False
-                mem_obj.ref_count_down()
-                logger.warning(
-                    "rank=0 _pipeline_sender: chunk [%d:%d] is invalid, "
-                    "marking as cache miss",
-                    start,
-                    end,
-                )
-        skipped = len(reordered_chunks) - len(valid_chunks)
-        if skipped > 0:
-            logger.warning(
-                "rank=0 _pipeline_sender: filtered %d invalid chunks "
-                "(total=%d -> %d). These chunks may have been freed "
-                "by eviction or a previous request's cleanup.",
-                skipped,
-                len(reordered_chunks),
-                len(valid_chunks),
-            )
-        reordered_chunks[:] = valid_chunks
-
         total = len(reordered_chunks)
         self.broadcast_object_fn(total, first_rank)
         if total == 0:
@@ -324,17 +296,36 @@ class AscendLMCacheEngine(LMCacheEngine):
                         raw = mem_obj.raw_tensor
                         if raw is None:
                             raise ValueError(
-                                "memory_obj.raw_tensor is None during broadcast"
+                                "rank=0 _pipeline_sender: chunk [%d:%d] "
+                                "raw_tensor is None "
+                                "(is_valid=%s, ref_count=%d)." %
+                                (
+                                    start,
+                                    end_pos,
+                                    mem_obj.is_valid(),
+                                    mem_obj.get_ref_count(),
+                                )
                             )
                         gpu_tensor = raw.to(
                             f"npu:{self.metadata.worker_id}"
                         )
                         self.broadcast_fn(gpu_tensor, first_rank)
 
+                        meta = mem_obj.metadata
+                        meta_copy = MemoryObjMetadata(
+                            shape=meta.shape,
+                            dtype=meta.dtype,
+                            address=meta.address,
+                            phy_size=meta.phy_size,
+                            ref_count=1,
+                            fmt=meta.fmt,
+                            shapes=meta.shapes,
+                            dtypes=meta.dtypes,
+                        )
                         sub_objs.append(
                             TensorMemoryObj(
                                 raw_data=gpu_tensor,
-                                metadata=mem_obj.metadata,
+                                metadata=meta_copy,
                                 parent_allocator=None,
                             )
                         )
@@ -371,18 +362,18 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._try_release_pending(pending)
                 idx = end
 
-            finally:
-                for objs, ev in pending:
+        finally:
+            for objs, ev in pending:
+                try:
+                    ev.synchronize()
+                except Exception:
+                    pass
+                for obj in objs:
                     try:
-                        ev.synchronize()
+                        obj.ref_count_down()
                     except Exception:
                         pass
-                    for obj in objs:
-                        try:
-                            obj.ref_count_down()
-                        except Exception:
-                            pass
-                pending.clear()
+            pending.clear()
 
     def _pipeline_receiver(
         self,
@@ -405,6 +396,7 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         try:
             while received < total:
+                shard_start = received
                 shard_count = self.broadcast_object_fn(None, first_rank)
                 if shard_count is None:
                     logger.warning(
@@ -485,7 +477,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 logger.debug(
                     "rank=%d shard[%d] cnt=%d bc=%.2fms enqueue=%.2fms",
                     self.metadata.worker_id,
-                    received // shard_size,
+                    shard_start // shard_size,
                     len(shard_objs),
                     (t_bc_end - t_bc_start) * 1000,
                     (t_togpu_submit - t_bc_end) * 1000,
@@ -534,13 +526,16 @@ class AscendLMCacheEngine(LMCacheEngine):
         :raises ValueError: If the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping retrieve operation")
             return torch.zeros(len(tokens), dtype=torch.bool)
 
-        if self.gpu_connector is None:
-            raise ValueError("gpu_connector is required for retrieve operation")
+        assert self.gpu_connector is not None, (
+            "gpu_connector is required for retrieve operation"
+        )
 
+        # Get req_id for logging
         req_id = self._get_req_id(kwargs)
 
         tot_kv_size = 0
@@ -550,6 +545,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         else:
             num_required_tokens = len(tokens)
 
+        # KVCache Check logging
         self._log_kvcache_for_check(
             operation="retrieve",
             kwargs=kwargs,
@@ -557,51 +553,35 @@ class AscendLMCacheEngine(LMCacheEngine):
             require_req_id=True,
         )
 
-        retrieve_stats = self.stats_monitor.on_retrieve_request(
-            num_required_tokens
-        )
+        retrieve_stats = self.stats_monitor.on_retrieve_request(num_required_tokens)
 
         ret_mask = torch.zeros(len(tokens), dtype=torch.bool, device="cpu")
 
-        reordered_chunks: list = []
+        reordered_chunks: List[ProcessedChunk] = []
         if not self._is_passive():
             with retrieve_stats.profile_process_tokens():
                 if self.async_loading:
-                    reordered_chunks, tot_kv_size = (
-                        self._async_process_tokens_internal(
-                            tokens, mask, ret_mask, **kwargs
-                        )
+                    reordered_chunks, tot_kv_size = self._async_process_tokens_internal(  # noqa: E501
+                        tokens,
+                        mask,
+                        ret_mask,
+                        **kwargs,
                     )
                 else:
-                    reordered_chunks, tot_kv_size = (
-                        self._process_tokens_internal(
-                            tokens, mask, ret_mask, **kwargs
-                        )
+                    reordered_chunks, tot_kv_size = self._process_tokens_internal(
+                        tokens,
+                        mask,
+                        ret_mask,
+                        **kwargs,
                     )
 
-        # --- Sharded broadcast (Ascend override) ---
+        # NOTE(niming) --- Sharded broadcast ---
         # The sharded pipeline handles both broadcast and to_gpu internally,
         # so we do not invoke batched_to_gpu below for either rank.
         # Rank 0's to_gpu reuses the NPU tensors produced by the broadcast
         # and non-rank-0's runs on the broadcast receive buffers, avoiding
         # a second CPU->NPU PCIe transfer.
         if self.save_only_first_rank:
-            if self.metadata.is_first_rank() and reordered_chunks:
-                valid_chunks = []
-                for c in reordered_chunks:
-                    if c[1].is_valid():
-                        valid_chunks.append(c)
-                    else:
-                        _, mem_obj, start, end = c
-                        ret_mask[start:end] = False
-                        mem_obj.ref_count_down()
-                        logger.warning(
-                            "rank=0 retrieve: chunk [%d:%d] is invalid, "
-                            "marking as cache miss",
-                            start,
-                            end,
-                        )
-                reordered_chunks = valid_chunks
             with retrieve_stats.profile_broadcast():
                 self._pipelined_sharded_broadcast_and_load(
                     reordered_chunks, ret_mask, **kwargs
@@ -615,10 +595,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self.storage_manager.remove(key, self.retrieve_locations)
                 if self._is_sync_pd_backend():
                     memory_obj.ref_count_down()
-            elif not self.async_loading and self._is_passive():
-                # NPU tensors for non-rank-0 are released inside the
-                # _pipelined_sharded_broadcast_and_load path.
-                pass
             elif not self.async_loading:
                 memory_obj.ref_count_down()
 
