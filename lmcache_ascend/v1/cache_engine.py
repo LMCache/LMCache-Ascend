@@ -235,6 +235,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.metadata.is_first_rank():
             self._pipeline_sender(
                 reordered_chunks,
+                ret_mask,
                 shard_size,
                 first_rank,
                 load_stream,
@@ -253,6 +254,7 @@ class AscendLMCacheEngine(LMCacheEngine):
     def _pipeline_sender(
         self,
         reordered_chunks: list,
+        ret_mask: torch.Tensor,
         shard_size: int,
         first_rank: int,
         load_stream: "torch.npu.Stream",
@@ -264,7 +266,20 @@ class AscendLMCacheEngine(LMCacheEngine):
         ``to_gpu`` on ``load_stream``, reusing the NPU-resident broadcast
         buffer to avoid a redundant CPU→NPU PCIe transfer.
         """
-        valid_chunks = [c for c in reordered_chunks if c[1].is_valid()]
+        valid_chunks = []
+        for c in reordered_chunks:
+            if c[1].is_valid():
+                valid_chunks.append(c)
+            else:
+                _, mem_obj, start, end = c
+                ret_mask[start:end] = False
+                mem_obj.ref_count_down()
+                logger.warning(
+                    "rank=0 _pipeline_sender: chunk [%d:%d] is invalid, "
+                    "marking as cache miss",
+                    start,
+                    end,
+                )
         skipped = len(reordered_chunks) - len(valid_chunks)
         if skipped > 0:
             logger.warning(
@@ -275,7 +290,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 len(reordered_chunks),
                 len(valid_chunks),
             )
-        reordered_chunks = valid_chunks
+        reordered_chunks[:] = valid_chunks
 
         total = len(reordered_chunks)
         self.broadcast_object_fn(total, first_rank)
@@ -356,22 +371,18 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._try_release_pending(pending)
                 idx = end
 
-            for objs, ev in pending:
-                ev.synchronize()
-                for obj in objs:
-                    obj.ref_count_down()
-        finally:
-            for objs, ev in pending:
-                try:
-                    ev.synchronize()
-                except Exception:
-                    pass
-                for obj in objs:
+            finally:
+                for objs, ev in pending:
                     try:
-                        obj.ref_count_down()
+                        ev.synchronize()
                     except Exception:
                         pass
-            pending.clear()
+                    for obj in objs:
+                        try:
+                            obj.ref_count_down()
+                        except Exception:
+                            pass
+                pending.clear()
 
     def _pipeline_receiver(
         self,
@@ -483,10 +494,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                 pending.append((shard_objs, ev_togpu))
                 self._try_release_pending(pending)
 
-            for objs, ev in pending:
-                ev.synchronize()
-                for obj in objs:
-                    obj.ref_count_down()
         finally:
             for objs, ev in pending:
                 try:
