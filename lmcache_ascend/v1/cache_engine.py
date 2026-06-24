@@ -108,7 +108,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         self._device_id: Optional[int] = None
 
         self._broadcast_shard_size = self.config.get_extra_config_value(
-            "broadcast_shard_size", 4
+            "broadcast_shard_size", 16
         )
 
         if self.kv_events_enabled and self.is_store_async:
@@ -145,6 +145,30 @@ class AscendLMCacheEngine(LMCacheEngine):
                 "Ascend broadcast stream initialized: shard_size=%d",
                 self._broadcast_shard_size,
             )
+
+    def _build_shard_plan(
+        self,
+        total: int,
+        shard_size: int,
+    ) -> List[Tuple[int, int]]:
+        """Split ``range(total)`` into contiguous shards.
+
+        Returns a list of ``(offset, count)`` tuples such that
+        ``offset + count <= total`` and the shards tile the full range
+        with at most ``shard_size`` elements each.  The last shard may
+        be smaller than ``shard_size`` when ``total`` is not evenly
+        divisible.
+
+        :param total: Number of chunks to tile.
+        :param shard_size: Maximum width of each shard.
+        :return: List of ``(offset, count)`` pairs in increasing offset.
+        """
+        if total <= 0:
+            return []
+        step = max(1, shard_size)
+        return [
+            (i, min(step, total - i)) for i in range(0, total, step)
+        ]
 
     def _alloc_broadcast_buffer(
         self,
@@ -203,6 +227,56 @@ class AscendLMCacheEngine(LMCacheEngine):
                 remaining.append((objs, ev))
         pending[:] = remaining
 
+    def _broadcast_metadata_table(
+        self,
+        reordered_chunks: list,
+        shard_size: int,
+        first_rank: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Exchange the full chunk metadata table in a single collective.
+
+        Builds (on rank 0) or receives (on other ranks) a dict containing:
+
+        * ``total``: number of chunks to broadcast.
+        * ``shard_plan``: list of ``(offset, count)`` tuples tiling the
+          range ``[0, total)`` with at most ``shard_size`` chunks each.
+        * ``meta``: list of ``(start, end, meta_dict)`` tuples, one per
+          chunk, where ``meta_dict`` is the serialized
+          :class:`MemoryObjMetadata`.
+
+        This collapses what used to be ``(1 + N)`` per-shard collective
+        barriers into a single barrier, so the Phase 3 pipeline loop can
+        run with no further ``broadcast_object_fn`` calls and the CPU
+        dispatcher stays ahead of NPU execution.
+
+        :param reordered_chunks: Sender-side chunks (ignored on
+            non-first-rank workers, where ``reordered_chunks`` is empty).
+        :param shard_size: Maximum width of each shard.
+        :param first_rank: Source rank for the broadcast.
+        :return: The exchanged plan dict. ``None`` if the broadcast
+            itself returned ``None`` (defensive — should not happen in
+            normal operation).
+        """
+        if self.metadata.is_first_rank():
+            total = len(reordered_chunks)
+            meta_table: List[Tuple[int, int, Dict[str, Any]]] = [
+                (
+                    start,
+                    end_pos,
+                    mem_obj.metadata.to_dict(),
+                )
+                for (_, mem_obj, start, end_pos) in reordered_chunks
+            ]
+            shard_plan = self._build_shard_plan(total, shard_size)
+            plan: Optional[Dict[str, Any]] = {
+                "total": total,
+                "shard_plan": shard_plan,
+                "meta": meta_table,
+            }
+        else:
+            plan = None
+        return self.broadcast_object_fn(plan, first_rank)
+
     def _pipelined_sharded_broadcast_and_load(
         self,
         reordered_chunks: list,
@@ -211,87 +285,94 @@ class AscendLMCacheEngine(LMCacheEngine):
     ) -> None:
         """Shard-level pipelined broadcast + ``to_gpu`` on two NPU streams.
 
-        Each shard runs on a separate slice of work:
+        Phase 1 (``_broadcast_metadata_table``): rank 0 broadcasts the
+        full chunk metadata table + shard plan in a single collective.
+        All ranks now hold the same plan with no further object-level
+        barriers needed.
 
-        * ``self.broadcast_stream`` performs the HCCL
-          ``broadcast_object_fn`` / ``broadcast_fn`` calls (and the
-          CPU→NPU copy on rank 0).
-        * ``self.gpu_connector.load_stream`` performs ``to_gpu`` for the
-          same shard, but only after a recorded ``Event`` signals that
-          broadcast has finished writing into the NPU buffer.
+        Phase 3 (``_pipeline_sender`` / ``_pipeline_receiver``): the
+        per-shard loop submits broadcast work to ``broadcast_stream``
+        and ``to_gpu`` work to ``load_stream`` with a single recorded
+        ``Event`` per shard providing the cross-stream dependency.
+        Receiver-side NPU receive buffers are allocated per shard
+        (rather than up front for the whole plan) so that
+        ``_try_release_pending`` can reclaim each shard's buffers as
+        soon as its ``to_gpu`` event fires, keeping peak NPU memory
+        bounded at roughly ``2 * shard_size * chunk_size``.
 
-        Between shards the CPU dispatcher does not block: it launches the
-        next shard's broadcast and ``to_gpu`` immediately after recording
-        the corresponding ``Event``, and registers a release task to
-        reclaim the previous shard's NPU tensors as soon as their
-        ``to_gpu`` completes.  This keeps the in-flight NPU buffer count
-        bounded by roughly ``2 * shard_size`` (one shard's tensors
-        mid-``to_gpu`` plus the next shard's tensors mid-broadcast).
+        The CPU dispatcher returns to the next shard immediately after
+        recording the event, so broadcast and to_gpu overlap on the NPU.
+
+        :param reordered_chunks: Sender-side chunk list (empty on
+            non-first-rank workers).
+        :param ret_mask: Boolean mask updated by the receiver to mark
+            retrieved token positions.
+        :param kwargs: Forwarded to ``gpu_connector.to_gpu``.
         """
         shard_size = self._broadcast_shard_size
         first_rank = self.metadata.first_rank
         load_stream = self.gpu_connector.load_stream
 
+        plan = self._broadcast_metadata_table(
+            reordered_chunks, shard_size, first_rank
+        )
+        if plan is None or plan.get("total", 0) == 0:
+            return
+
         if self.metadata.is_first_rank():
             self._pipeline_sender(
+                plan,
                 reordered_chunks,
-                shard_size,
-                first_rank,
                 load_stream,
                 **kwargs,
             )
         else:
             self._pipeline_receiver(
-                reordered_chunks,
+                plan,
                 ret_mask,
-                shard_size,
-                first_rank,
                 load_stream,
                 **kwargs,
             )
 
     def _pipeline_sender(
         self,
+        plan: Dict[str, Any],
         reordered_chunks: list,
-        shard_size: int,
-        first_rank: int,
         load_stream: "torch.npu.Stream",
         **kwargs,
     ) -> None:
-        """Rank 0 side of the sharded broadcast pipeline.
+        """Rank 0 side of the sharded broadcast pipeline (Phase 3).
 
-        Broadcasts each chunk on ``broadcast_stream`` and then runs
-        ``to_gpu`` on ``load_stream``, reusing the NPU-resident broadcast
-        buffer to avoid a redundant CPU→NPU PCIe transfer.
+        Iterates ``plan["shard_plan"]`` and for each shard submits:
+
+        * On ``broadcast_stream``: pinned CPU→NPU H2D via
+          :meth:`to` with ``non_blocking=True``, then ``broadcast_fn`` (HCCL).  One
+          ``Event`` is recorded after the shard's last broadcast.
+        * On ``load_stream``: ``gpu_connector.to_gpu`` per chunk, gated
+          on the broadcast ``Event`` via ``wait_event``.
+
+        The loop body contains no collective barriers — the only
+        barrier happened in :meth:`_broadcast_metadata_table`.  CPU
+        returns to the next shard immediately after submitting to_gpu.
         """
-        total = len(reordered_chunks)
-        self.broadcast_object_fn(total, first_rank)
-        if total == 0:
-            return
+        meta_table: List[Tuple[int, int, Dict[str, Any]]] = plan["meta"]
+        shard_plan: List[Tuple[int, int]] = plan["shard_plan"]
 
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
 
-        idx = 0
         try:
-            while idx < total:
-                end = min(idx + shard_size, total)
-                shard_count = end - idx
-
-                self.broadcast_object_fn(shard_count, first_rank)
-
+            for shard_idx, (offset, count) in enumerate(shard_plan):
                 t_bc_start = time.perf_counter()
 
                 sub_objs: List[TensorMemoryObj] = []
                 sub_starts: List[int] = []
                 sub_ends: List[int] = []
+                t_h2d_total = 0.0
 
                 with torch.npu.stream(self.broadcast_stream):
-                    for i in range(idx, end):
-                        _, mem_obj, start, end_pos = reordered_chunks[i]
-                        meta_dict = mem_obj.metadata.to_dict()
-                        self.broadcast_object_fn(
-                            (start, end_pos, meta_dict), first_rank
-                        )
+                    for i in range(offset, offset + count):
+                        _, mem_obj, _, _ = reordered_chunks[i]
+                        start, end_pos, _ = meta_table[i]
 
                         raw = mem_obj.raw_tensor
                         if raw is None:
@@ -306,10 +387,13 @@ class AscendLMCacheEngine(LMCacheEngine):
                                     mem_obj.get_ref_count(),
                                 )
                             )
+                        t_h2d = time.perf_counter()
                         gpu_tensor = raw.to(
-                            f"npu:{self.metadata.worker_id}"
+                            f"npu:{self.metadata.worker_id}",
+                            non_blocking=True,
                         )
-                        self.broadcast_fn(gpu_tensor, first_rank)
+                        t_h2d_total += time.perf_counter() - t_h2d
+                        self.broadcast_fn(gpu_tensor, self.metadata.first_rank)
 
                         meta = mem_obj.metadata
                         meta_copy = MemoryObjMetadata(
@@ -351,16 +435,16 @@ class AscendLMCacheEngine(LMCacheEngine):
                 t_togpu_submit = time.perf_counter()
 
                 logger.debug(
-                    "rank=0 shard[%d] cnt=%d bc=%.2fms enqueue=%.2fms",
-                    idx // shard_size,
-                    shard_count,
+                    "rank=0 shard[%d] cnt=%d bc=%.2fms h2d=%.2fms enqueue=%.2fms",
+                    shard_idx,
+                    count,
                     (t_bc_end - t_bc_start) * 1000,
+                    t_h2d_total * 1000,
                     (t_togpu_submit - t_bc_end) * 1000,
                 )
 
                 pending.append((sub_objs, ev_togpu))
                 self._try_release_pending(pending)
-                idx = end
 
         finally:
             for objs, ev in pending:
@@ -377,34 +461,36 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def _pipeline_receiver(
         self,
-        reordered_chunks: list,
+        plan: Dict[str, Any],
         ret_mask: torch.Tensor,
-        shard_size: int,
-        first_rank: int,
         load_stream: "torch.npu.Stream",
         **kwargs,
     ) -> None:
-        """Non-rank-0 side of the sharded broadcast pipeline."""
+        """Non-rank-0 side of the sharded broadcast pipeline (Phase 3).
+
+        Iterates ``plan["shard_plan"]`` and for each shard submits:
+
+        * On ``broadcast_stream``: ``broadcast_fn`` (HCCL) into
+          per-shard receive buffers.  One ``Event`` recorded after the
+          last receive of the shard.
+        * On ``load_stream``: ``gpu_connector.to_gpu`` per chunk, gated
+          on the broadcast ``Event`` via ``wait_event``.
+
+        The loop body contains no collective barriers — the only
+        barrier happened in :meth:`_broadcast_metadata_table`.  CPU
+        returns to the next shard immediately after submitting to_gpu.
+        Chunks that fell back to CPU buffers (NPU OOM during
+        allocation) are skipped on ``to_gpu`` and logged once per
+        occurrence.
+        """
+        meta_table: List[Tuple[int, int, Dict[str, Any]]] = plan["meta"]
+        shard_plan: List[Tuple[int, int]] = plan["shard_plan"]
         local_rank = self.metadata.worker_id % torch.npu.device_count()
 
-        total = self.broadcast_object_fn(None, first_rank)
-        if total is None or total == 0:
-            return
-
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
-        received = 0
 
         try:
-            while received < total:
-                shard_start = received
-                shard_count = self.broadcast_object_fn(None, first_rank)
-                if shard_count is None:
-                    logger.warning(
-                        "rank=%d received None shard_count, aborting broadcast",
-                        self.metadata.worker_id,
-                    )
-                    return
-
+            for shard_idx, (offset, count) in enumerate(shard_plan):
                 t_bc_start = time.perf_counter()
 
                 shard_objs: List[TensorMemoryObj] = []
@@ -412,23 +498,14 @@ class AscendLMCacheEngine(LMCacheEngine):
                 shard_ends: List[int] = []
 
                 with torch.npu.stream(self.broadcast_stream):
-                    for _ in range(shard_count):
-                        combined = self.broadcast_object_fn(None, first_rank)
-                        if combined is None:
-                            logger.warning(
-                                "rank=%d received None metadata, "
-                                "aborting broadcast",
-                                self.metadata.worker_id,
-                            )
-                            return
-                        start, end_pos, meta_dict = combined
+                    for j in range(count):
+                        start, end_pos, meta_dict = meta_table[offset + j]
                         metadata = MemoryObjMetadata.from_dict(meta_dict)
-
                         raw = self._alloc_broadcast_buffer(
-                            metadata, local_rank, first_rank, start, end_pos
+                            metadata, local_rank, self.metadata.first_rank,
+                            start, end_pos,
                         )
-
-                        self.broadcast_fn(raw, first_rank)
+                        self.broadcast_fn(raw, self.metadata.first_rank)
 
                         if raw.device.type == "cpu":
                             logger.warning(
@@ -438,7 +515,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                                 start,
                                 end_pos,
                             )
-                            received += 1
                             continue
 
                         shard_objs.append(
@@ -451,7 +527,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                         shard_starts.append(start)
                         shard_ends.append(end_pos)
                         ret_mask[start:end_pos] = True
-                        received += 1
 
                     ev_bc = torch.npu.Event()
                     ev_bc.record()
@@ -477,7 +552,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 logger.debug(
                     "rank=%d shard[%d] cnt=%d bc=%.2fms enqueue=%.2fms",
                     self.metadata.worker_id,
-                    shard_start // shard_size,
+                    shard_idx,
                     len(shard_objs),
                     (t_bc_end - t_bc_start) * 1000,
                     (t_togpu_submit - t_bc_end) * 1000,
