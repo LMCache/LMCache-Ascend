@@ -228,9 +228,83 @@ def _patch_config():
         "When exceeded, the oldest entry is evicted to prevent unbounded "
         "memory growth. Default is 0 (unlimited).",
     }
+    def _ascend_validate_config(self):
+        if not (self.enable_pd and self.enable_p2p):
+            return lmcache.v1.config._validate_config(self)
+
+        if self.pd_role != "sender":
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_pd=true` and "
+                "`enable_p2p=true` are only supported for `pd_role=\"sender\"` "
+                f"in Phase 1, got pd_role={self.pd_role!r}."
+            )
+
+        if self.enable_async_loading:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_async_loading=true` is "
+                "not supported when `enable_pd=true` and `enable_p2p=true` in "
+                "Phase 1. Use blocking retrieve with enable_async_loading=false."
+            )
+
+        if not self.enable_controller:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_controller=true` is "
+                "required when `enable_p2p=true`."
+            )
+        if self.controller_pull_url is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `controller_pull_url` is "
+                "required when `enable_p2p=true`."
+            )
+        if self.controller_reply_url is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `controller_reply_url` is "
+                "required when `enable_p2p=true`."
+            )
+        if not self.lmcache_worker_ports:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `lmcache_worker_ports` is "
+                "required and cannot be empty when `enable_p2p=true`."
+            )
+        if self.p2p_host is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `p2p_host` is required when "
+                "`enable_p2p=true`."
+            )
+        if self.p2p_init_ports is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `p2p_init_ports` is required "
+                "when `enable_p2p=true`."
+            )
+        if self.p2p_lookup_ports is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `p2p_lookup_ports` is required "
+                "when `enable_p2p=true`."
+            )
+        if self.transfer_channel is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `transfer_channel` is required "
+                "when `enable_p2p=true`."
+            )
+
+        original_enable_p2p = self.enable_p2p
+        # Temporarily disable p2p to bypass upstream's
+        # `assert self.enable_p2p is False` (config.py:599) while still running
+        # upstream's PD field validation (pd_role/pd_buffer_size/save_unfull_chunk
+        # auto-fix, etc.). The 8 p2p field checks above replicate upstream's p2p
+        # validation block (config.py:582-590), which is otherwise skipped when
+        # enable_p2p is flipped to False.
+        # Safe as long as upstream's PD validation block has no side-effect that
+        # branches on enable_p2p (currently true: save_unfull_chunk assignment at
+        # config.py:611 only depends on enable_pd).
+        try:
+            self.enable_p2p = False
+            return lmcache.v1.config._validate_config(self)
+        finally:
+            self.enable_p2p = original_enable_p2p
 
     namespace_extras = {
-        "validate": lmcache.v1.config._validate_config,
+        "validate": _ascend_validate_config,
         "log_config": lmcache.v1.config._log_config,
         "get_extra_config_value": lmcache.v1.config._get_extra_config_value,
         "get_lmcache_worker_ids": lmcache.v1.config._get_lmcache_worker_ids,
