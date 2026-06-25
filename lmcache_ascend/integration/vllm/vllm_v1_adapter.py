@@ -195,6 +195,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                     skip_leading_tokens = save_spec.skip_leading_tokens
                 else:
                     skip_leading_tokens = 0
+                
+                skip_leading_tokens = self._pd_producer_skip_leading_tokens(
+                    skip_leading_tokens, request
+                )
 
                 if skip_leading_tokens == len(token_ids):
                     continue
@@ -259,6 +263,21 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
 
         self._wait_for_save_done = True
         self._replay_finished_stores_after_save()
+
+    def _pd_producer_skip_leading_tokens(self, skip_leading_tokens: int, request) -> int:
+        """Clamp producer store skip to tokens already transferred to D.
+
+        ``skip_leading_tokens`` may come from local/P2P cache hits, but PD
+        handoff can only skip tokens that the paired decoder has already
+        received for this request. This preserves the upstream LMCache producer
+        guard while keeping Ascend's LocalCPU backfill skip calculation.
+        """
+        if self.kv_role == "kv_producer" and request.disagg_spec:
+            return min(
+                skip_leading_tokens,
+                request.disagg_spec.num_transferred_tokens,
+            )
+        return skip_leading_tokens
 
     def _local_persist_skip(self, request, token_ids) -> Optional[int]:
         """Decide whether a remote-loaded prefix must be persisted locally.
