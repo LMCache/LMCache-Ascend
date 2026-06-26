@@ -192,7 +192,7 @@ case "$MODE" in
     "both")
         echo "Sequentially running all benchmarks..." >&2
         
-        KV_TRANSFER_CONFIG='{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+        KV_TRANSFER_CONFIG='{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
         
         current_port=$BASE_PORT
         

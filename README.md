@@ -130,16 +130,15 @@ vllm serve /data/models/Qwen/Qwen3-32B \
 --max-num-batched-tokens 32768 \
 --host 0.0.0.0 \
 --port 8100 \
---kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+--kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
 
 ```
 
 ##### Offline
 ```python
 ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
+        kv_connector="LMCacheAscendConnector",
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
 ```
 
@@ -235,7 +234,7 @@ USE_MINDSPORE=1 pip install -r requirement_ms.txt --no-build-isolation -v -e .
 
 #### Usage
 
-We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
+We use the in-process ``LMCacheAscendConnector`` from vllm-ascend (patched at ``import lmcache_ascend``). Configure KV transfer as follows.
 
 ##### Online serving
 ```bash
@@ -246,15 +245,14 @@ python \
     --trust-remote-code \
     --disable-log-requests \
     --block-size 128 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'
 ```
 
 ##### Offline
 ```python
 ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
+        kv_connector="LMCacheAscendConnector",
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
     )
 ```
 

@@ -41,9 +41,8 @@ def setup_environment_variables(use_disk: bool = False):
 @contextlib.contextmanager
 def build_llm_with_lmcache_ascend(model: str):
     ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
+        kv_connector="LMCacheAscendConnector",
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
     )
     # Set NPU memory utilization to 0.8 for an Ascend NPU with 40GB
     # memory. Reduce the value if your NPU has less memory.

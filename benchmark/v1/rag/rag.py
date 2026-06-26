@@ -58,13 +58,11 @@ QUERY_PROMPT_SET = {
 def build_llm_with_lmcache(model: str, max_model_len: int = 32000, blend: bool = True):
     """Build LLM with LMCache for offline serving"""
 
-    LMCACHE_CONNECTOR = "LMCacheAscendConnectorV1Dynamic"
-    CONNECTOR_PATH = "lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
+    LMCACHE_CONNECTOR = "LMCacheAscendConnector"
 
     ktc = KVTransferConfig(
         kv_connector=LMCACHE_CONNECTOR,
         kv_role="kv_both",
-        kv_connector_module_path=CONNECTOR_PATH,
     )
 
     llm_args = EngineArgs(

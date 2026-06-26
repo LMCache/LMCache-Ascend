@@ -250,6 +250,35 @@ def _patch_config():
         "memory growth. Default is 0 (unlimited).",
     }
 
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_flatten_multi_spec"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend flattens multi-spec per-layer KV entries "
+            "before NPU connector registration."
+        ),
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_bundle_multi_spec"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend keeps multi-spec KV planes bundled for "
+            "multi-plane NPU transfer. If False, multi-spec planes are exploded "
+            "into synthetic .subN layers for legacy/fallback handling."
+        ),
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_skip_state_groups"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend skips vLLM scheduler state-cache groups "
+            "at KV registration time."
+        ),
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
@@ -529,6 +558,50 @@ def _patch_vllm_v1_adapter():
     vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
 
 
+def _patch_vllm_ascend_connector():
+    """Use LMCache-Ascend's SupportsHMA connector for the vllm-ascend registry name.
+
+    vllm-ascend registers ``LMCacheAscendConnector`` against a stub module that
+    re-exports upstream ``LMCacheConnectorV1``. Wrap only
+    ``vllm_ascend.distributed.kv_transfer.register_connector`` so the factory
+    loader is swapped immediately after vllm-ascend registers connectors.
+    """
+    from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
+        LMCacheAscendConnector,
+    )
+
+    try:
+        import vllm_ascend.distributed.kv_transfer as vt
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+    except ImportError:
+        return
+
+    _CONNECTOR_NAME = "LMCacheAscendConnector"
+
+    def _point_factory_at_ascend_connector() -> None:
+        if _CONNECTOR_NAME not in KVConnectorFactory._registry:
+            return
+        KVConnectorFactory._registry[_CONNECTOR_NAME] = (
+            lambda: LMCacheAscendConnector
+        )
+
+    if getattr(vt.register_connector, "_lmcache_ascend_patched", False):
+        _point_factory_at_ascend_connector()
+        return
+
+    _orig_register = vt.register_connector
+
+    def register_connector() -> None:
+        _orig_register()
+        _point_factory_at_ascend_connector()
+
+    register_connector._lmcache_ascend_patched = True
+    vt.register_connector = register_connector
+    _point_factory_at_ascend_connector()
+
+
 def _patch_metadata_get_shapes():
     """Patch ``LMCacheMetadata.get_shapes`` for Ascend multi-group KV allocation.
     Upstream sizes each group as ``[kv_size, nl, num_tokens, hidden_dim_size]``,
@@ -803,5 +876,8 @@ if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "mindspore":
         # First Party
         import lmcache_ascend.mindspore  # noqa: F401
+
+    # vllm-ascend connector registration (no-op if vllm/vllm-ascend not installed).
+    _patch_vllm_ascend_connector()
 
     LMCACHE_ASCEND_PATCHED = True
