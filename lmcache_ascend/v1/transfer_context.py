@@ -354,6 +354,8 @@ class PDTransferContext(AscendBaseTransferContext):
         self._sender_id = sender_id
         self._done_callback = done_callback
         self._loop = None
+        self._active_request_counts: dict[str, int] = {}
+        self._active_lease_count = 0
 
         logger.debug(
             "PDTransferContext: sender_id=%s, num_proxies=%d, "
@@ -364,6 +366,64 @@ class PDTransferContext(AscendBaseTransferContext):
             dtypes,
             fmt,
         )
+
+    def acquire_request(self, request_id: str) -> None:
+        """Register one request-level lease on this PD pull context."""
+        with self._lock:
+            if self._done_sent:
+                raise RuntimeError(
+                    "Cannot acquire PD request lease after Done was sent "
+                    f"for sender {self._sender_id}, request {request_id}"
+                )
+            self._active_request_counts[request_id] = (
+                self._active_request_counts.get(request_id, 0) + 1
+            )
+            self._active_lease_count += 1
+
+    def release_request(self, request_id: str) -> None:
+        """Release one request-level lease and send Done after the last lease."""
+        send_done = False
+        with self._lock:
+            count = self._active_request_counts.get(request_id, 0)
+            if count <= 0:
+                return
+
+            if count == 1:
+                self._active_request_counts.pop(request_id, None)
+            else:
+                self._active_request_counts[request_id] = count - 1
+
+            self._active_lease_count -= 1
+            if self._active_lease_count <= 0 and not self._done_sent:
+                self._done_sent = True
+                send_done = True
+
+        if send_done:
+            self._send_done()
+
+    def decref(self) -> None:
+        """Ignore generic proxy refcounting for PD delay-pull.
+
+        PD receiver proxies are shared prototypes in the backend store plus
+        per-request clones handed to the connector.  The sender-side resources
+        must be released by request leases, not by incidental pins from
+        receiver control-plane deduplication.
+        """
+        return None
+
+    def send_done_now(self) -> None:
+        """Send Done only when no request-level leases are active."""
+        send_done = False
+        with self._lock:
+            if self._done_sent:
+                return
+            if self._active_lease_count > 0:
+                return
+            self._done_sent = True
+            send_done = True
+
+        if send_done:
+            self._send_done()
 
     def _send_done(self) -> None:
         """Invoke the done callback to signal the sender."""
