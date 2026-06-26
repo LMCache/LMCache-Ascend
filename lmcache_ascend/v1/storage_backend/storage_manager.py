@@ -62,6 +62,7 @@ no-op for missing keys instead of aborting the lookup.
 
 # Standard
 from typing import List, Optional, Sequence, cast
+import contextvars
 
 # Third Party
 import torch
@@ -73,6 +74,29 @@ from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterfac
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 logger = init_logger(__name__)
+
+_current_pd_lookup_id: contextvars.ContextVar[Optional[str]] = (
+    contextvars.ContextVar("current_pd_lookup_id", default=None)
+)
+_current_pd_retrieve_id: contextvars.ContextVar[Optional[str]] = (
+    contextvars.ContextVar("current_pd_retrieve_id", default=None)
+)
+
+
+def set_current_pd_lookup_id(request_id: str) -> contextvars.Token:
+    return _current_pd_lookup_id.set(request_id)
+
+
+def reset_current_pd_lookup_id(token: contextvars.Token) -> None:
+    _current_pd_lookup_id.reset(token)
+
+
+def set_current_pd_retrieve_id(request_id: str) -> contextvars.Token:
+    return _current_pd_retrieve_id.set(request_id)
+
+
+def reset_current_pd_retrieve_id(token: contextvars.Token) -> None:
+    _current_pd_retrieve_id.reset(token)
 
 
 def allocate_and_copy_objects(
@@ -157,7 +181,19 @@ def batched_get(
     """Blocking batched get with a delay-pull proxy guard on local write-back."""
     # TODO (ApostaC): remove the nested optional here
     for backend_name, storage_backend in self.get_active_storage_backends(location):
-        memory_objs = storage_backend.batched_get_blocking(keys)
+        request_id = _current_pd_retrieve_id.get()
+        if (
+            backend_name == "PDBackend"
+            and request_id is not None
+            and hasattr(storage_backend, "batched_get_blocking_for_request")
+        ):
+            memory_objs = storage_backend.batched_get_blocking_for_request(
+                keys,
+                request_id,
+            )
+        else:
+            memory_objs = storage_backend.batched_get_blocking(keys)
+            
         if memory_objs and any(m is not None for m in memory_objs):
             # Align with single-key `get()` logic:
             # auto-write remote data to local CPU cache, but skip deferred-fetch
@@ -181,6 +217,44 @@ def batched_get(
                 local_cpu_backend.batched_submit_put_task(keys, memory_objs_no_none)
             return memory_objs
     return [None] * len(keys)
+
+
+def batched_contains(
+    self,
+    keys: List[CacheEngineKey],
+    search_range: Optional[List[str]] = None,
+    pin: bool = False,
+) -> tuple[int, dict]:
+    """Prefix lookup with PD receiver request-lease registration."""
+    total_keys = len(keys)
+    total_hit_chunks = 0
+    block_mapping = {}
+    for backend_name, backend in self.get_active_storage_backends(
+        search_range=search_range
+    ):
+        request_id = _current_pd_lookup_id.get()
+        if (
+            backend_name == "PDBackend"
+            and pin
+            and request_id is not None
+            and hasattr(backend, "batched_contains_and_lease")
+        ):
+            hit_chunks = backend.batched_contains_and_lease(keys, request_id)
+        else:
+            # Preserve upstream semantics: PDBackend is not pinned by the
+            # generic pin path. Ascend PD leases are handled above.
+            pin_in_backend = pin if backend_name != "PDBackend" else False
+            hit_chunks = backend.batched_contains(keys, pin_in_backend)
+
+        if hit_chunks == 0:
+            continue
+        block_mapping[backend_name] = keys[:hit_chunks]
+        total_hit_chunks += hit_chunks
+        if total_hit_chunks == total_keys:
+            break
+        keys = keys[hit_chunks:]
+
+    return total_hit_chunks, block_mapping
 
 
 def _best_effort_touch_cache(self, cache_dict) -> None:

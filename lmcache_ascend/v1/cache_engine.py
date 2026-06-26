@@ -118,6 +118,20 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
 
+    def _is_pd_receiver(self) -> bool:
+        return self.config.enable_pd and self.config.pd_role == "receiver"
+
+    def _release_pd_request_lease(self, request_id: Optional[str]) -> None:
+        if not request_id or request_id == "unspecified":
+            return
+        if not self._is_pd_receiver() or self.storage_manager is None:
+            return
+
+        pd_backend = self.storage_manager.storage_backends.get("PDBackend")
+        release_request_lease = getattr(pd_backend, "release_request_lease", None)
+        if callable(release_request_lease):
+            release_request_lease(request_id)
+
     def _ensure_store_worker(self) -> None:
         if self._store_queue is not None:
             return
@@ -1038,19 +1052,64 @@ class AscendLMCacheEngine(LMCacheEngine):
     ) -> int:
         # Serialize against the store-worker thread's
         with self._engine_state_lock:
-            return super().lookup(
-                tokens=tokens,
-                hashes=hashes,
-                offsets=offsets,
-                search_range=search_range,
-                lookup_id=lookup_id,
-                pin=pin,
-                request_configs=request_configs,
-            )
+            token = None
+            if self._is_pd_receiver() and pin and lookup_id is not None:
+                from lmcache_ascend.v1.storage_backend.storage_manager import (
+                    set_current_pd_lookup_id,
+                )
+
+                token = set_current_pd_lookup_id(lookup_id)
+            try:
+                return super().lookup(
+                    tokens=tokens,
+                    hashes=hashes,
+                    offsets=offsets,
+                    search_range=search_range,
+                    lookup_id=lookup_id,
+                    pin=pin,
+                    request_configs=request_configs,
+                )
+            finally:
+                if token is not None:
+                    from lmcache_ascend.v1.storage_backend.storage_manager import (
+                        reset_current_pd_lookup_id,
+                    )
+
+                    reset_current_pd_lookup_id(token)
 
     def lookup_unpin(self, lookup_id: str) -> None:
         with self._engine_state_lock:
-            super().lookup_unpin(lookup_id)
+            try:
+                super().lookup_unpin(lookup_id)
+            finally:
+                self._release_pd_request_lease(lookup_id)
+
+    @torch.inference_mode()
+    def retrieve(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        req_id = self._get_req_id(kwargs)
+        token = None
+        if self._is_pd_receiver():
+            from lmcache_ascend.v1.storage_backend.storage_manager import (
+                set_current_pd_retrieve_id,
+            )
+
+            token = set_current_pd_retrieve_id(req_id)
+
+        try:
+            return super().retrieve(tokens, mask=mask, **kwargs)
+        finally:
+            if token is not None:
+                from lmcache_ascend.v1.storage_backend.storage_manager import (
+                    reset_current_pd_retrieve_id,
+                )
+
+                reset_current_pd_retrieve_id(token)
+            self._release_pd_request_lease(req_id)
 
     @torch.inference_mode()
     def store(
