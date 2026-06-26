@@ -328,10 +328,17 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         tot_time = store_stats.time_to_store()
 
+        # NOTE(#233): `from_gpu_time` includes a `wait_for_forward` stall since
+        # PR #221 (slot_mapping/ordering async copy), so it is NOT pure device
+        # copy time. Report the breakdown explicitly to avoid misleading
+        # "offload_time" semantics; a dedicated device-copy metric should be
+        # added at the connector layer (see Issue #233 fix plan).
         logger.info(
             "[req_id=%s] Stored %d out of total %d tokens. "
             "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
+            "offload_total_time: %.4f ms "
+            "(process_tokens: %.4f ms, from_gpu: %.4f ms), "
+            "put_time: %.4f ms",
             req_id,
             tot_token_num,
             num_to_store_tokens,
@@ -339,6 +346,8 @@ class AscendLMCacheEngine(LMCacheEngine):
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
+            store_stats.process_tokens_time * 1000,
+            store_stats.from_gpu_time * 1000,
             store_stats.put_time * 1000,
         )
 

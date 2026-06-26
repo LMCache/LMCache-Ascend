@@ -212,9 +212,6 @@ class AscendP2PBackend(P2PBackend):
 
         self.lmcache_instance_id = config.lmcache_instance_id
 
-        # A CacheEngineKey (in int form) -> a list of
-        # (peer_init_url, peer_lookup_url, location)
-        self.local_lookup_cache: dict[int, tuple[str, str, str]] = {}
         # the target peer info mapping
         self.target_peer_info_mapping: dict[str, PeerInfo] = {}
         # the lock for updating target peer info mapping
