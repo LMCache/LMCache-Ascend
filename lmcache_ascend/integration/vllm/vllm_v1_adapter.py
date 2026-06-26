@@ -4,11 +4,12 @@ from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
+from lmcache.logging import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate
+
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     LMCacheConnectorV1ImplMultiGroup,
 )
-from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
 
 # First Party
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
@@ -255,25 +256,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     sync = True
                 else:
                     sync = False
-                # NOTE(Jiayi): Perform blending before layerwise prefix caching
                 if self.enable_blending:
-                    self.blender.blend(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
-                        kvcaches=kvcaches,
-                        slot_mapping=slot_mapping_npu[:lmcache_cached_tokens],
-                        vllm_cached_tokens=request.load_spec.vllm_cached_tokens,
+                    logger.warning(
+                        "enable_blending is unsupported with multi-group KV; "
+                        "using layerwise retrieve instead"
                     )
-                else:
-                    layerwise_retriever = self.lmcache_engine.retrieve_layer(
-                        tokens[:lmcache_cached_tokens],
-                        token_mask[:lmcache_cached_tokens],
-                        **retrieve_kwargs,
-                        sync=sync,
-                    )
-                    next(layerwise_retriever)
-                    next(layerwise_retriever)
-                    self.layerwise_retrievers.append(layerwise_retriever)
+                layerwise_retriever = self.lmcache_engine.retrieve_layer(
+                    tokens[:lmcache_cached_tokens],
+                    token_mask[:lmcache_cached_tokens],
+                    **retrieve_kwargs,
+                    sync=sync,
+                )
+                next(layerwise_retriever)
+                next(layerwise_retriever)
+                self.layerwise_retrievers.append(layerwise_retriever)
             else:
                 ret_token_mask = self.lmcache_engine.retrieve(
                     tokens[:lmcache_cached_tokens],
@@ -697,7 +693,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """vLLM HMA hook; delegates to :meth:`request_finished` (see upstream LMCache)."""
+        """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache).
+        """
         if not block_ids:
             return False, None
         if len(block_ids) > 1:

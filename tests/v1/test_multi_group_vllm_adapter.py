@@ -6,10 +6,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
 import pytest
 import torch
 
-from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     LMCacheConnectorV1ImplMultiGroup,
     ReqMeta,
@@ -33,7 +33,12 @@ from lmcache_ascend.v1.slot_mapping_utils import (
     multi_plane_slot_slice_bounds,
 )
 
-from .conftest_ds4 import DS4_CHUNK_SIZE, DS4_COMPRESS_RATIOS, make_ds4_setup, make_slot_mappings
+from .conftest_ds4 import (
+    DS4_CHUNK_SIZE,
+    DS4_COMPRESS_RATIOS,
+    make_ds4_setup,
+    make_slot_mappings,
+)
 
 
 def _make_tracker(
@@ -84,7 +89,9 @@ def test_normalize_block_ids(block_ids, expected_num_groups, expected) -> None:
     [
         pytest.param([1], 0, "expected_num_groups must be >= 1", id="zero_groups"),
         pytest.param([1, 2], 2, "single-group", id="flat_multi_group"),
-        pytest.param([[1], [2]], 3, "Block group count mismatch", id="group_len_mismatch"),
+        pytest.param(
+            [[1], [2]], 3, "Block group count mismatch", id="group_len_mismatch"
+        ),
         pytest.param("bad", 1, "Unsupported block_ids", id="unsupported_type"),
     ],
 )
@@ -131,7 +138,13 @@ def test_build_slot_mapping_for_group(
 
 
 @pytest.mark.parametrize(
-    ("block_ids_by_group", "block_sizes_by_group", "num_tokens", "compress_ratios", "expected_lens"),
+    (
+        "block_ids_by_group",
+        "block_sizes_by_group",
+        "num_tokens",
+        "compress_ratios",
+        "expected_lens",
+    ),
     [
         pytest.param(
             ([1, 2, 3, 4, 5, 6, 7, 8], [1, 2, 3, 4, 5, 6, 7, 8]),
@@ -165,7 +178,7 @@ def test_build_slot_mappings_by_group(
 
 
 def test_build_slot_mappings_global_index_for_chunk_slice() -> None:
-    """Global sm: token 384 is row 48; connector slices sm[32:64] for chunk [256,512)."""
+    """Global sm: token 384 is row 48; connector slices sm[32:64] for [256,512)."""
     mappings = _build_slot_mappings_by_group(
         ([5],),
         (128,),
@@ -250,7 +263,7 @@ def test_build_slot_mapping_load_uses_block_id_zeros() -> None:
 
 
 def test_build_slot_mapping_two_block_ids_first_covers_full_prefill() -> None:
-    """Second block id is reserved past 512 tokens; prefill rows all use block_ids[0]."""
+    """Second block id is reserved past 512 tokens; prefill uses block_ids[0]."""
     sm = _build_slot_mapping_for_group(
         [1, 2],
         128,
@@ -300,10 +313,7 @@ def test_filtered_slot_mappings_chunk_slices() -> None:
     mappings = (sm,)
     ratios = (4,)
 
-    filtered, prefixes = build_filtered_slot_mappings(
-        mappings,
-        compress_ratios=ratios,
-    )
+    filtered, prefixes = build_filtered_slot_mappings(mappings)
     expected_by_chunk = {
         (0, 256): list(range(32, 64)),
         (256, 512): list(range(96, 128)),
@@ -384,10 +394,10 @@ def test_req_meta_skips_filtered_slot_mappings_without_load_or_save() -> None:
 
 
 def test_build_slot_mappings_by_group_mismatch() -> None:
-    with pytest.raises(ValueError, match="Block ids and block sizes group count mismatch"):
-        _build_slot_mappings_by_group(
-            ([0],), (128, 1024), 64, is_store=False
-        )
+    with pytest.raises(
+        ValueError, match="Block ids and block sizes group count mismatch"
+    ):
+        _build_slot_mappings_by_group(([0],), (128, 1024), 64, is_store=False)
 
 
 def test_build_slot_mappings_by_group_sliding_window_length_mismatch() -> None:
@@ -404,7 +414,14 @@ def test_build_slot_mappings_by_group_sliding_window_length_mismatch() -> None:
 
 
 @pytest.mark.parametrize(
-    ("initial_groups", "new_token_ids", "new_block_ids", "preempted", "all_token_ids", "check"),
+    (
+        "initial_groups",
+        "new_token_ids",
+        "new_block_ids",
+        "preempted",
+        "all_token_ids",
+        "check",
+    ),
     [
         pytest.param(
             ([1],),
@@ -412,7 +429,9 @@ def test_build_slot_mappings_by_group_sliding_window_length_mismatch() -> None:
             [3],
             False,
             None,
-            lambda t: (t.allocated_block_ids_by_group == ([1, 3],) and t.token_ids == [0, 1, 2]),
+            lambda t: (
+                t.allocated_block_ids_by_group == ([1, 3],) and t.token_ids == [0, 1, 2]
+            ),
             id="merge_flat",
         ),
         pytest.param(
@@ -527,7 +546,9 @@ def test_request_tracker_update_preempted_requires_all_token_ids() -> None:
                     can_load=True,
                 ),
             },
-            lambda m: m is not None and m.load_spec is not None and m.load_spec.can_load,
+            lambda m: (
+                m is not None and m.load_spec is not None and m.load_spec.can_load
+            ),
             id="load_only",
         ),
         pytest.param(
@@ -678,10 +699,7 @@ def test_mp_launch_meta_matches_runtime_row() -> None:
     num_tokens = DS4_CHUNK_SIZE * 2
     slot_mappings = make_slot_mappings(num_tokens, dev)
     cpu_mappings = tuple(sm.cpu() for sm in slot_mappings)
-    filtered_cpu, prefixes = build_filtered_slot_mappings(
-        cpu_mappings,
-        compress_ratios=DS4_COMPRESS_RATIOS[: len(slot_mappings)],
-    )
+    filtered_cpu, prefixes = build_filtered_slot_mappings(cpu_mappings)
     filtered_npu = tuple(f.to(dev) for f in filtered_cpu)
     ratios = DS4_COMPRESS_RATIOS[: len(slot_mappings)]
 
@@ -759,7 +777,5 @@ def test_group_sliding_window_from_uniform_type_bundle() -> None:
         def __init__(self, specs: dict) -> None:
             self.kv_cache_specs = specs
 
-    bundle = UniformTypeKVCacheSpecs(
-        {"a": _SlidingSpec(None), "b": _SlidingSpec(128)}
-    )
+    bundle = UniformTypeKVCacheSpecs({"a": _SlidingSpec(None), "b": _SlidingSpec(128)})
     assert _group_sliding_window(bundle) == 128

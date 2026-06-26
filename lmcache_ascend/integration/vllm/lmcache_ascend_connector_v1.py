@@ -58,6 +58,4 @@ class LMCacheAscendConnectorV1Dynamic(LMCacheConnectorV1Dynamic, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        return self._lmcache_engine.request_finished_all_groups(
-            request, block_ids
-        )
+        return self._lmcache_engine.request_finished_all_groups(request, block_ids)

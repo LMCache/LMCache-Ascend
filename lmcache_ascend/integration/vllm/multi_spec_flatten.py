@@ -3,8 +3,9 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any, Sequence, Union
+
+from lmcache.v1.config import LMCacheEngineConfig
 
 # Third Party
 import torch
@@ -23,18 +24,18 @@ _KERNEL_NATIVE_FORMATS = frozenset(
 
 
 def flatten_multi_spec_enabled() -> bool:
-    val = os.environ.get("LMCACHE_ASCEND_FLATTEN_MULTI_SPEC", "1")
-    return val != "0"
+    return LMCacheEngineConfig.from_env().ascend_flatten_multi_spec
 
 
 def bundle_multi_spec_enabled() -> bool:
-    val = os.environ.get("LMCACHE_ASCEND_BUNDLE_MULTI_SPEC", "1")
-    return val != "0"
+    return LMCacheEngineConfig.from_env().ascend_bundle_multi_spec
 
 
 def should_bundle_multi_spec(kv_cache_config: Any | None) -> bool:
-    return flatten_multi_spec_enabled() and bundle_multi_spec_enabled() and has_multiple_scheduler_groups(
-        kv_cache_config
+    return (
+        flatten_multi_spec_enabled()
+        and bundle_multi_spec_enabled()
+        and has_multiple_scheduler_groups(kv_cache_config)
     )
 
 
@@ -69,9 +70,7 @@ def _entry_planes(entry: _KVEntry) -> list[torch.Tensor]:
     return [t for t in entry if isinstance(t, torch.Tensor)]
 
 
-def _containing_groups_for_layer(
-    layer_name: str, kv_cache_config: Any
-) -> list[int]:
+def _containing_groups_for_layer(layer_name: str, kv_cache_config: Any) -> list[int]:
     """Return scheduler group indices that contain layer_name, in index order."""
     groups = kv_cache_config.kv_cache_groups
     return [g for g, grp in enumerate(groups) if layer_name in grp.layer_names]
@@ -130,14 +129,18 @@ def ordered_scheduler_groups_for_layer(
     # (e.g. duplicate indexer views). Match by block_size from the tensors.
     if len(containing) < len(planes):
         groups = kv_cache_config.kv_cache_groups
-        group_block_sizes = {g: int(groups[g].kv_cache_spec.block_size) for g in containing}
+        group_block_sizes = {
+            g: int(groups[g].kv_cache_spec.block_size) for g in containing
+        }
         result: list[int] = []
         for t in planes:
             t_bs = int(t.shape[1])
             # Find first unmatched group with matching block_size
             matched = None
             for g in containing:
-                if group_block_sizes.get(g) == t_bs and result.count(g) < containing.count(g):
+                if group_block_sizes.get(g) == t_bs and result.count(
+                    g
+                ) < containing.count(g):
                     matched = g
                     break
             if matched is None:
@@ -168,9 +171,9 @@ def _collapse_to_mla_page_buffer(tensor: torch.Tensor) -> torch.Tensor:
     requires 3-D).  The bundled path keeps 4-D tensors as-is since the NPU
     kernel and _derive_group_params compute hidden_bytes dimensionality-
     agnostically via numel * elem_size // (nb * bs).
-    
-    Note: vllm-ascend page buffers were already 4-D (nb, bs, nh, hs); pre-flatten 
-    Ascend saw them inside tuples. Flatten exposes standalone planes; upstream 
+
+    Note: vllm-ascend page buffers were already 4-D (nb, bs, nh, hs); pre-flatten
+    Ascend saw them inside tuples. Flatten exposes standalone planes; upstream
     normalize_kv_and_discover_format only accepts 3-D MLA or 5-D MHA.
     """
     if tensor.ndim == 3:

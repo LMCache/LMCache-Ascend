@@ -25,7 +25,6 @@ from .utils import (
 )
 
 
-
 def _npu_available() -> bool:
     return hasattr(torch, "npu") and torch.npu.is_available()
 
@@ -1498,6 +1497,7 @@ def test_multi_layer_kv_transfer_dsa_format(
 
     mem_allocator.close()
 
+
 @pytest.mark.parametrize(
     "num_tokens,chunk_size",
     [
@@ -1719,7 +1719,7 @@ def _generic_compress_ratios_12() -> tuple[int, ...]:
 
 def test_build_filtered_slot_mappings_strips_dead_rows_preserving_order() -> None:
     sm = torch.tensor([-1, -1, 10, 11, -1, 12], dtype=torch.long)
-    filtered, _ = build_filtered_slot_mappings((sm,), compress_ratios=(1,))
+    filtered, _ = build_filtered_slot_mappings((sm,))
     assert filtered[0].tolist() == [10, 11, 12]
 
 
@@ -1781,9 +1781,7 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     plane_block_sizes = [(b * chunk + 31) & ~31 for b in plane_bytes]
     lmc_chunk_row_bytes = _lmc_chunk_hidden_bytes(plane_bytes, chunk)
     layer_block_bytes = sum((b * chunk + 31) & ~31 for b in plane_bytes)
-    ptrs = torch.tensor(
-        [p.data_ptr() for p in planes], dtype=torch.int64, device=dev
-    )
+    ptrs = torch.tensor([p.data_ptr() for p in planes], dtype=torch.int64, device=dev)
     slot_mappings = _generic_slot_mappings(max(chunk, 128), dev)
     connector = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)
     connector.kvcaches_device = dev
@@ -1793,7 +1791,6 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     fill_multi_plane_pattern(list(planes), sched_groups, slot_mappings, chunk, ratios)
     filtered, prefixes = build_filtered_slot_mappings(
         tuple(sm.cpu() for sm in slot_mappings),
-        compress_ratios=ratios,
     )
     filtered_npu = tuple(f.to(dev) for f in filtered)
     with pinned_lmc_chunk((1, 1, chunk, lmc_chunk_row_bytes), torch.uint8) as (
@@ -1870,7 +1867,11 @@ def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
     shape_desc.nb = num_blocks
     shape_desc.bs = 128
     group_params = _derive_group_params(
-        planes, KVCacheFormat.MULTI_PLANE_KV, shape_desc, layout_hints=layout_hints, num_tokens=chunk
+        planes,
+        KVCacheFormat.MULTI_PLANE_KV,
+        shape_desc,
+        layout_hints=layout_hints,
+        num_tokens=chunk,
     )
     hd = group_params["per_plane_hidden_dim_bytes"][0]
     lmc_chunk_row_bytes = _lmc_chunk_hidden_bytes(
@@ -1881,20 +1882,19 @@ def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
     s0, s1 = multi_plane_slot_slice_bounds(0, chunk, sched_g, ratios, chunk)
     n_plane = s1 - s0
     block_ids = list(range(1, num_blocks + 1))
-    sm = _build_slot_mapping_for_group(
-        block_ids, block_size, 132, is_store=False
-    )[124:132].to(dev)
+    sm = _build_slot_mapping_for_group(block_ids, block_size, 132, is_store=False)[
+        124:132
+    ].to(dev)
     assert int(sm.shape[0]) == n_plane
     slot_mappings = list(_generic_slot_mappings(max(chunk, 128), dev))
     slot_mappings[sched_g] = sm
-    ptrs = torch.tensor(
-        [p.data_ptr() for p in planes], dtype=torch.int64, device=dev
-    )
+    ptrs = torch.tensor([p.data_ptr() for p in planes], dtype=torch.int64, device=dev)
 
-    fill_multi_plane_pattern(list(planes), sched_groups, tuple(slot_mappings), chunk, ratios)
+    fill_multi_plane_pattern(
+        list(planes), sched_groups, tuple(slot_mappings), chunk, ratios
+    )
     filtered, prefixes = build_filtered_slot_mappings(
         tuple(sm.cpu() for sm in slot_mappings),
-        compress_ratios=ratios,
     )
     filtered_npu = tuple(f.to(dev) for f in filtered)
     connector = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)

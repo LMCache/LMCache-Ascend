@@ -5,7 +5,7 @@ npu_connectors early init; ``_patch_kv_layer_group`` removed in __init__.py)."""
 
 # Standard
 from collections import defaultdict
-from typing import Any, Optional, Sequence, Union
+from typing import Any, NamedTuple, Optional, Sequence, Union
 
 # Third Party
 from lmcache.logging import init_logger
@@ -27,7 +27,17 @@ logger = init_logger(__name__)
 _LayerKV = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
 
 
-def _plane_slot_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
+class KvCacheGroupKey(NamedTuple):
+    kv_size: int
+    hidden: int
+    block_size: int
+    dtype_key: Any
+    num_tensors: int
+
+
+def _plane_slot_bytes(
+    kv_cache: Sequence[torch.Tensor], *, is_310p: bool = False
+) -> list[int]:
     """Return per-plane payload bytes per paged slot.
 
     Used when :func:`lmcache_ascend.v1.kv_format._uses_packed_multi_plane_row`
@@ -43,7 +53,7 @@ def _plane_slot_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
     out: list[int] = []
     for t in kv_cache:
         nb = int(t.shape[0])
-        bs = _plane_block_size(t)
+        bs = _plane_block_size(t, is_310p=is_310p)
         slots = nb * bs
         if slots == 0:
             out.append(0)
@@ -52,9 +62,7 @@ def _plane_slot_bytes(kv_cache: Sequence[torch.Tensor]) -> list[int]:
     return out
 
 
-def _lmc_chunk_hidden_bytes(
-    plane_slot_bytes: Sequence[int], num_tokens: int
-) -> int:
+def _lmc_chunk_hidden_bytes(plane_slot_bytes: Sequence[int], num_tokens: int) -> int:
     """Return ``shape_desc.hs`` / ``MemoryObj`` last dim for a uint8 row group.
 
     Upstream allocates LMCache chunks as ``[kv_size, nl, num_tokens, hidden]``
@@ -67,7 +75,7 @@ def _lmc_chunk_hidden_bytes(
     ``AlignUp32Bytes`` padding (including partial-chunk transfers).
     """
     if num_tokens <= 0:
-        # Empty g_end chunk: kernel is not invoked; keep last dim positive for allocation.
+        # Empty g_end chunk: kernel is not invoked; keep last dim positive for alloc.
         return max(1, sum(int(b) for b in plane_slot_bytes))
     layer_chunk_bytes = 0
     for slot_bytes in plane_slot_bytes:
@@ -112,7 +120,6 @@ def _get_tuple_storage_shape(
 
 def _get_blob_storage_shape(
     kv_cache: Sequence[torch.Tensor],
-    vllm_block_size: int,
     *,
     is_310p: bool = False,
 ) -> torch.Size:
@@ -121,7 +128,6 @@ def _get_blob_storage_shape(
     Multiple dtype views alias one allocation; only the primary view (largest byte
     coverage) carries the canonical paging geometry.
     """
-    del vllm_block_size
     primary = _get_primary_blob_view(kv_cache)
     num_blocks = int(primary.shape[0])
     block_size = int(primary.shape[-2]) if is_310p else int(primary.shape[1])
@@ -134,7 +140,7 @@ def _get_kv_cache_group_key_and_info(
     *,
     is_310p: bool = False,
     vllm_block_size: Optional[int] = None,
-) -> tuple[int, int, int, Any, int]:
+) -> KvCacheGroupKey:
     """Return the kernel grouping identity for one layer entry.
 
     Layers that share ``(kv_size, hidden, block_size, dtype_key, num_tensors)``
@@ -148,10 +154,12 @@ def _get_kv_cache_group_key_and_info(
     if isinstance(kv_cache, (tuple, list)):
         if _uses_packed_multi_plane_row(kv_cache):
             # Grouping key: sum of per-slot plane widths (chunk-independent).
-            plane_slot_bytes = _plane_slot_bytes(kv_cache)
+            plane_slot_bytes = _plane_slot_bytes(kv_cache, is_310p=is_310p)
             total_plane_bytes = sum(plane_slot_bytes)
-            primary_bs = _plane_block_size(kv_cache[0])
-            return (1, total_plane_bytes, primary_bs, torch.uint8, len(kv_cache))
+            primary_bs = _plane_block_size(kv_cache[0], is_310p=is_310p)
+            return KvCacheGroupKey(
+                1, total_plane_bytes, primary_bs, torch.uint8, len(kv_cache)
+            )
 
         if _is_shared_storage_blob(kv_cache):
             if vllm_block_size is None or int(vllm_block_size) <= 0:
@@ -161,13 +169,11 @@ def _get_kv_cache_group_key_and_info(
                 )
             primary = _get_primary_blob_view(kv_cache)
             _, bs, hidden_per_token = (
-                int(x)
-                for x in _get_blob_storage_shape(
-                    kv_cache, int(vllm_block_size), is_310p=is_310p
-                )
+                int(x) for x in _get_blob_storage_shape(kv_cache, is_310p=is_310p)
             )
-            # kv_size=2 matches SEPARATE_KV LMCache chunk layout; num_tensors=0 marks blob.
-            return (2, hidden_per_token, bs, primary.dtype, 0)
+            # kv_size=2 matches SEPARATE_KV LMCache chunk layout;
+            # num_tensors=0 marks blob.
+            return KvCacheGroupKey(2, hidden_per_token, bs, primary.dtype, 0)
 
         dtypes = tuple(tensor.dtype for tensor in kv_cache)
         dtype_key: Any = dtypes[0] if len(set(dtypes)) == 1 else dtypes
@@ -184,7 +190,7 @@ def _get_kv_cache_group_key_and_info(
             and kv_cache[0].dtype == kv_cache[1].dtype
         )
         kv_size = 2 if is_separate else 1
-        return (kv_size, hidden, bs, dtype_key, len(kv_cache))
+        return KvCacheGroupKey(kv_size, hidden, bs, dtype_key, len(kv_cache))
 
     if isinstance(kv_cache, torch.Tensor):
         # Flattened multi-spec / MLA page buffer: [num_blocks, block_size, hidden]
@@ -193,7 +199,7 @@ def _get_kv_cache_group_key_and_info(
             num_blocks = int(kv_cache.shape[0])
             bs = int(kv_cache.shape[1])
             hidden = int(kv_cache.shape[2])
-            return (1, hidden, bs, kv_cache.dtype, 1)
+            return KvCacheGroupKey(1, hidden, bs, kv_cache.dtype, 1)
 
         # MERGED_KV single tensor layouts vary by chip (910B vs 310P); flash-infer
         # second form is also accepted.
@@ -213,7 +219,7 @@ def _get_kv_cache_group_key_and_info(
             bs = int(rep.shape[2]) if rep.ndim > 2 else 0
         denom = kv_size * num_blocks * bs
         hidden = int(rep.numel()) // denom if denom > 0 else 0
-        return (kv_size, hidden, bs, dtype, 1)
+        return KvCacheGroupKey(kv_size, hidden, bs, dtype, 1)
 
     raise RuntimeError(f"Unknown KVCache type: {type(kv_cache)}")
 
@@ -285,17 +291,12 @@ def build_kv_layer_groups(
             layer, is_310p=is_310p, vllm_block_size=vllm_bs
         )
         key: tuple = (
-            (shape_key, int(sched_map[idx]))
-            if sched_map is not None
-            else shape_key
+            (shape_key, int(sched_map[idx])) if sched_map is not None else shape_key
         )
         groups_dict[key].append(idx)
 
-    # Sort groups by the first layer index to maintain order
-    def _get_first_layer_index(key):
-        return groups_dict[key][0]
-
-    sorted_keys = sorted(groups_dict.keys(), key=_get_first_layer_index)
+    # Sort groups by first layer index to maintain deterministic flat-kv order.
+    sorted_keys = sorted(groups_dict, key=lambda key: groups_dict[key][0])
 
     kv_layer_groups: list[KVLayerGroupInfo] = []
     for group_idx, key in enumerate(sorted_keys):
@@ -314,9 +315,7 @@ def build_kv_layer_groups(
         shape_desc.nh = 1
         shape_desc.hs = hidden
         if isinstance(rep, (tuple, list)) and _is_shared_storage_blob(rep):
-            shape_desc.element_size = int(
-                _get_primary_blob_view(rep).element_size()
-            )
+            shape_desc.element_size = int(_get_primary_blob_view(rep).element_size())
         elif isinstance(rep, (tuple, list)):
             shape_desc.element_size = max(int(t.element_size()) for t in rep)
         else:
@@ -337,15 +336,16 @@ def build_kv_layer_groups(
         sched_g = int(sched_map[indices[0]]) if sched_map is not None else group_idx
         compress_ratio = 1
         if compress_ratios_by_group is not None:
-            assert sched_g < len(
-                compress_ratios_by_group
-            ), f"scheduler group {sched_g} out of range for compress_ratios_by_group"
+            assert sched_g < len(compress_ratios_by_group), (
+                f"scheduler group {sched_g} out of range for compress_ratios_by_group"
+            )
             compress_ratio = max(1, int(compress_ratios_by_group[sched_g]))
         sw = None
         if sliding_window_size_by_group is not None:
-            assert sched_g < len(
-                sliding_window_size_by_group
-            ), f"scheduler group {sched_g} out of range for sliding_window_size_by_group"
+            assert sched_g < len(sliding_window_size_by_group), (
+                f"scheduler group {sched_g} out of range for "
+                f"sliding_window_size_by_group"
+            )
             sw = sliding_window_size_by_group[sched_g]
         if sw is not None:
             physical_chunk_size = max(1, int(sw) // compress_ratio)
@@ -357,7 +357,7 @@ def build_kv_layer_groups(
         multi_plane_hidden_bytes: tuple[int, ...] | None = None
         if isinstance(rep, (tuple, list)) and _uses_packed_multi_plane_row(rep):
             rep_dtype = torch.uint8
-            plane_slot_bytes = _plane_slot_bytes(rep)
+            plane_slot_bytes = _plane_slot_bytes(rep, is_310p=is_310p)
             shape_desc.hs = _lmc_chunk_hidden_bytes(
                 plane_slot_bytes, physical_chunk_size
             )

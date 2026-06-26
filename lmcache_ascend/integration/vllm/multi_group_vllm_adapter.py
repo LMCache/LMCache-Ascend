@@ -1,12 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 """Multi-group vLLM adapter layer for LMCache-Ascend (DSv4 / HMA).
 
-vllm adapter overrides for multi-group KV cache without modificaiton to upstream LMCache.
+vllm adapter overrides for multi-group KV cache without modification to
+upstream LMCache.
 Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Impl``.
 """
+
 # Standard
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
+
+# First Party
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    LMCacheConnectorMetadata,
+    LMCacheConnectorV1Impl,
+    LoadSpec,
+    logger,
+)
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    ReqMeta as UpstreamReqMeta,
+)
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    RequestTracker as UpstreamRequestTracker,
+)
+from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.config import LMCacheEngineConfig
+import torch
+
+from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 # Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -15,25 +36,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
-import torch
-
-# First Party
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    LMCacheConnectorMetadata,
-    LMCacheConnectorV1Impl,
-    LoadSpec,
-    ReqMeta as UpstreamReqMeta,
-    RequestTracker as UpstreamRequestTracker,
-    logger,
-)
-from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.config import LMCacheEngineConfig
-
-from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.sched.output import NewRequestData
 
 BlockIdsLike = Optional[Union[list[int], list[list[int]], "tuple[list[int], ...]"]]
@@ -80,9 +85,7 @@ def _normalize_block_ids(
     so mixed KV-cache models can preserve each group's allocation.
     """
     if expected_num_groups < 1:
-        raise ValueError(
-            f"expected_num_groups must be >= 1, got {expected_num_groups}"
-        )
+        raise ValueError(f"expected_num_groups must be >= 1, got {expected_num_groups}")
 
     if block_ids is None:
         return _empty_block_ids_by_group(expected_num_groups)
@@ -92,8 +95,7 @@ def _normalize_block_ids(
             return _empty_block_ids_by_group(expected_num_groups)
 
         if all(
-            isinstance(group_block_ids, (list, tuple))
-            for group_block_ids in block_ids
+            isinstance(group_block_ids, (list, tuple)) for group_block_ids in block_ids
         ):
             if len(block_ids) != expected_num_groups:
                 raise ValueError(
@@ -164,8 +166,9 @@ def _build_slot_mapping_for_group(
 ) -> torch.Tensor:
     """Map compressed rows for tokens in [window_start_token, num_tokens).
 
-    Returns num_tokens/compress_ratio slot: a slot for each row (i.e., token or 
-    compressed token) in the sequence. The slots for the rows that must not be copied are -1.
+    Returns num_tokens/compress_ratio slot: a slot for each row (i.e., token or
+    compressed token) in the sequence. The slots for the rows that must not be
+    copied are -1.
     """
     if block_size <= 0:
         raise ValueError(f"block_size must be positive, got {block_size}")
@@ -180,7 +183,7 @@ def _build_slot_mapping_for_group(
     block_idx = tokens_compressed // block_size
     block_ids = block_ids_tensor[block_idx]
     valid_mask = block_ids != 0
-    if (is_store and sliding_win_size is not None and sliding_win_size > 0):
+    if is_store and sliding_win_size is not None and sliding_win_size > 0:
         valid_mask &= _sliding_window_store_mask(
             tokens_uncompressed,
             sliding_win_size=sliding_win_size,
@@ -244,9 +247,7 @@ def _build_slot_mappings_by_group(
 @dataclass
 class RequestTracker(UpstreamRequestTracker):
     # Block ids grouped by KV cache group (multi-group path).
-    allocated_block_ids_by_group: "tuple[list[int], ...]" = field(
-        default_factory=tuple
-    )
+    allocated_block_ids_by_group: "tuple[list[int], ...]" = field(default_factory=tuple)
 
     @property
     def num_kv_groups(self) -> int:
@@ -368,9 +369,7 @@ class ReqMeta(UpstreamReqMeta):
     # Slot mappings grouped by KV cache group.
     slot_mappings_by_group: "tuple[torch.Tensor, ...]" = field(default_factory=tuple)
     # Allocated block ids grouped by KV cache group.
-    allocated_block_ids_by_group: "tuple[list[int], ...]" = field(
-        default_factory=tuple
-    )
+    allocated_block_ids_by_group: "tuple[list[int], ...]" = field(default_factory=tuple)
     # Index of the KV group whose block table covers the most logical tokens
     # (dense / full-sequence path). Used for store/retrieve when only one
     # group's slot_mapping can drive the LMCache engine (Phase 2: all groups).
@@ -412,15 +411,17 @@ class ReqMeta(UpstreamReqMeta):
         if tracker.num_kv_groups > 1:
             assert discard_partial_chunks, (
                 "Multi-group KV cache requires discard_partial_chunks=True; "
-                "partial-chunk store/load is not supported for state and sliding windowgroups."
+                "partial-chunk store/load is not supported for state and "
+                "sliding windowgroups."
             )
         if tracker.num_kv_groups == 1:
             primary_kv_group_idx = 0
         else:
             primary_kv_group_idx = max(
                 range(tracker.num_kv_groups),
-                key=lambda i: len(tracker.allocated_block_ids_by_group[i])
-                * block_sizes[i],
+                key=lambda i: (
+                    len(tracker.allocated_block_ids_by_group[i]) * block_sizes[i]
+                ),
             )
 
         saved_allocated_block_ids = tracker.allocated_block_ids
@@ -462,12 +463,8 @@ class ReqMeta(UpstreamReqMeta):
             load_spec is not None and load_spec.can_load
         ) or base.save_spec.can_save
         if needs_filtered:
-            ratios = compress_ratios or tuple(1 for _ in block_sizes)
             filtered_slot_by_group, slot_valid_prefix_by_group = (
-                build_filtered_slot_mappings(
-                    slot_mappings_by_group,
-                    compress_ratios=ratios,
-                )
+                build_filtered_slot_mappings(slot_mappings_by_group)
             )
 
         return ReqMeta(
@@ -514,9 +511,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         config: LMCacheEngineConfig,
     ) -> None:
         super()._init_connector_state(role, vllm_config, config)
-        if (
-            self._kv_cache_config is not None
-            and getattr(self._kv_cache_config, "kv_cache_groups", None)
+        if self._kv_cache_config is not None and getattr(
+            self._kv_cache_config, "kv_cache_groups", None
         ):
             self._num_kv_groups = len(self._kv_cache_config.kv_cache_groups)
             self._block_sizes_by_group: "tuple[int, ...]" = tuple(
@@ -526,8 +522,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             try:
                 groups = self._kv_cache_config.kv_cache_groups
                 mems = [
-                    g.kv_cache_spec.max_memory_usage_bytes(vllm_config)
-                    for g in groups
+                    g.kv_cache_spec.max_memory_usage_bytes(vllm_config) for g in groups
                 ]
                 max_mem_hint_idx = int(mems.index(max(mems)))
             except Exception:
@@ -578,7 +573,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         if self._num_kv_groups > 1:
             assert self._discard_partial_chunks, (
                 "Multi-group KV cache requires discard_partial_chunks=True; "
-                "partial-chunk store/load is not supported for state and sliding windowgroups."
+                "partial-chunk store/load is not supported for state and "
+                "sliding windowgroups."
             )
 
     def record_failed_blocks(

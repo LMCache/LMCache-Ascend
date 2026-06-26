@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import contextlib
-from types import SimpleNamespace
 from typing import Any, List, Optional, Sequence, Set, Tuple, Union
+import contextlib
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
-from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.utils import EngineType, _lmcache_nvtx_annotate
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
@@ -16,7 +15,8 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.gpu_connector.utils import LayoutHints, normalize_kv_and_discover_format
+from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 import torch
@@ -27,6 +27,11 @@ from lmcache_ascend.v1.kv_format import (
     _get_primary_blob_view,
     _is_shared_storage_blob,
 )
+from lmcache_ascend.v1.kv_layer_groups import (
+    _lmc_chunk_hidden_bytes,
+    build_kv_layer_groups,
+)
+from lmcache_ascend.v1.npu_connector.utils import permute_kv_caches_to_contiguous
 from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.slot_mapping_utils import (
     compute_mp_plane_launch_ptrs,
@@ -61,7 +66,9 @@ def build_mp_launch_meta(
     assert connector.per_group_params is not None
     meta: dict[tuple[int, int, int], tuple[torch.Tensor, torch.Tensor]] = {}
     device = filtered_slot_mappings_npu[0].device
-    npu_ctx = torch.npu.stream(stream) if stream is not None else contextlib.nullcontext()
+    npu_ctx = (
+        torch.npu.stream(stream) if stream is not None else contextlib.nullcontext()
+    )
     with npu_ctx:
         for npu_g, group_params in enumerate(connector.per_group_params):
             if not _uses_multi_plane_kv_transfer(group_params):
@@ -70,7 +77,8 @@ def build_mp_launch_meta(
             sched_groups = group_params.get("scheduler_groups_per_plane") or []
             if len(sched_groups) != num_planes:
                 raise ValueError(
-                    f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
+                    f"scheduler_groups_per_plane length {len(sched_groups)} "
+                    f"!= num_planes {num_planes}"
                 )
             bufs = connector._ensure_mp_launch_bufs(npu_g, num_planes, device)
             ptrs = compute_mp_plane_launch_ptrs(
@@ -125,7 +133,7 @@ def _build_multi_plane_group_params(
     n = len(pb)
     if kv_format == KVCacheFormat.DSA_C8_KV and n != 4:
         raise ValueError(f"DSA-C8 expects 4 plane byte widths, got {n}")
-    if not bs_list:
+    if len(bs_list) == 0:
         bs_list = [int(block_size or 0)] * n
         pbs_list = [int(page_buffer_size or 0)] * n
     sched_per_plane = (
@@ -175,9 +183,7 @@ def _materialize_mp_device_params(
             dtype=torch.int32,
             device=device,
         ),
-        "lmc_row_offsets": torch.zeros(
-            num_planes, dtype=torch.int32, device=device
-        ),
+        "lmc_row_offsets": torch.zeros(num_planes, dtype=torch.int32, device=device),
     }
 
 
@@ -192,9 +198,7 @@ def _is_kernel_compatible_entry(
     if isinstance(entry, (tuple, list)):
         if len(entry) < 1:
             return False
-        return all(
-            isinstance(t, torch.Tensor) and t.ndim >= 3 for t in entry
-        )
+        return all(isinstance(t, torch.Tensor) and t.ndim >= 3 for t in entry)
     return False
 
 
@@ -296,7 +300,9 @@ def _derive_group_params(
         else:
             if isinstance(entry, (tuple, list)):
                 if (len(entry) >= 2 and kv_size == 2) or not entry:
-                    raise ValueError(f"Unsupported SEPARATE_KV entry for multi-plane: {type(entry)}")
+                    raise ValueError(
+                        f"Unsupported SEPARATE_KV entry for multi-plane: {type(entry)}"
+                    )
                 k_cache = entry[0]
             elif isinstance(entry, torch.Tensor):
                 k_cache = entry
@@ -306,10 +312,9 @@ def _derive_group_params(
                 )
             if is_310p():
                 block_size = int(k_cache.shape[-2])
-                page_buffer_size = int(k_cache.shape[0]) * block_size
             else:
                 block_size = int(k_cache.shape[1])
-                page_buffer_size = int(k_cache.shape[0]) * block_size
+            page_buffer_size = int(k_cache.shape[0]) * block_size
             hidden_bytes = int(k_cache.shape[-1]) * k_cache.element_size()
         params = _build_multi_plane_group_params(
             kv_format=entry_format,
@@ -320,21 +325,25 @@ def _derive_group_params(
     elif entry_format == KVCacheFormat.MLA_KV:
         sched_groups = (layout_hints or {}).get("layer_to_scheduler_groups", {})
         layer_name = (layout_hints or {}).get("_current_layer_name")
-        sched_per_plane: list[int] = []
+        mla_sched_per_plane: list[int] = []
         if layer_name and layer_name in sched_groups:
-            sched_per_plane = list(sched_groups[layer_name])
-            if len(sched_per_plane) == 1:
-                sched_per_plane = sched_per_plane * 2
-        build_kw: dict[str, Any] = {
+            mla_sched_per_plane = list(sched_groups[layer_name])
+        n_planes = len(entry)
+        # MLA_KV: tuple of 2 tensors with different shapes (heterogeneous planes).
+        # Standard MLA (lora/rope, same shape) uses the flat copy path, not here.
+        if len(mla_sched_per_plane) == 1 and n_planes > 1:
+            mla_sched_per_plane = mla_sched_per_plane * n_planes
+        mla_build_kw: dict[str, Any] = {
             "kv_format": entry_format,
             "planes": list(entry),
         }
-        if sched_per_plane:
-            build_kw["scheduler_groups_per_plane"] = sched_per_plane
-        params = _build_multi_plane_group_params(**build_kw)
+        if mla_sched_per_plane:
+            mla_build_kw["scheduler_groups_per_plane"] = mla_sched_per_plane
+        params = _build_multi_plane_group_params(**mla_build_kw)
     else:
         raise ValueError(
-            f"Cannot derive multi-plane params for {entry_format.name} in mixed-format path"
+            f"Cannot derive multi-plane params for {entry_format.name} "
+            f"in mixed-format path"
         )
 
     if stride_elems > 0:
@@ -753,7 +762,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.kv_lora_rank: int = 0
         self.qk_rope_head_dim: int = 0
         self.dsa_head_dim: int = 0
-        # Per-token byte spans for DSA_C8_KV (k, v, dsa_k, dsa_k_scale); lmc_chunk is uint8
+        # Per-token byte spans for DSA_C8_KV (k, v, dsa_k, dsa_k_scale); uint8 chunk
         self.dsa_c8_plane_bytes: tuple[int, int, int, int] = (0, 0, 0, 0)
         # vLLM logical slots (nb*bs) when ``block_stride_elems`` is set on the group
         self._logical_page_slots: Optional[int] = None
@@ -786,10 +795,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """Initialize KV cache pointers using Ascend-safe permute for pool slices."""
         if "kvcaches" in kwargs:
             self.kvcaches = kwargs["kvcaches"]
-            from lmcache_ascend.v1.npu_connector.utils import (
-                permute_kv_caches_to_contiguous,
-            )
-
             self.kvcaches = permute_kv_caches_to_contiguous(self.kvcaches)
 
     @classmethod
@@ -864,9 +869,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
     # Called from register_kv_caches (adapter) so the group manager exists
     # before post_init / first store; without it, metadata.get_shapes() has
     # no group info and allocates a single MemoryObj instead of per-group slots.
-    def ensure_kv_layer_groups(
-        self, kv_caches: List[torch.Tensor]
-    ) -> None:
+    def ensure_kv_layer_groups(self, kv_caches: List[torch.Tensor]) -> None:
         """Build ``metadata.kv_layer_groups_manager`` for allocation sizing.
 
         Idempotent. Must run before ``metadata.get_shapes()`` is used to
@@ -876,13 +879,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if self.metadata is None or self.metadata.kv_layer_groups_manager is not None:
             self._sync_logical_page_slots_from_manager()
             return
-
-        # Third Party
-        from lmcache.v1.gpu_connector.utils import normalize_kv_and_discover_format
-        from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
-        from lmcache.utils import EngineType
-
-        from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
 
         first_entry = kv_caches[0]
         if isinstance(first_entry, torch.Tensor):
@@ -896,9 +892,10 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         # normalize_kv_and_discover_format cannot detect (it only handles
         # tensor_dim 3 or 5). Multi-group runs also use Ascend-local grouping
         # so scheduler slot group is part of the bucket key in one pass.
-        if hints.get("bundle_multi_spec") or hints.get(
-            "scheduler_group_by_flat_layer"
-        ) is not None:
+        if (
+            hints.get("bundle_multi_spec")
+            or hints.get("scheduler_group_by_flat_layer") is not None
+        ):
             mgr = KVLayerGroupsManager.__new__(KVLayerGroupsManager)
             build_kv_layer_groups(
                 mgr,
@@ -946,22 +943,21 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """Get or allocate reusable NPU launch buffers for one multi-plane group."""
         if getattr(self, "_mp_launch_bufs", None) is None:
             per_group_params = getattr(self, "per_group_params", None)
-            n = (
-                len(per_group_params)
-                if per_group_params
-                else npu_group_idx + 1
-            )
+            n = len(per_group_params) if per_group_params else npu_group_idx + 1
             self._mp_launch_bufs = [None] * n
-        while len(self._mp_launch_bufs) <= npu_group_idx:
-            self._mp_launch_bufs.append(None)
-        bufs = self._mp_launch_bufs[npu_group_idx]
+        mp_bufs = self._mp_launch_bufs
+        assert mp_bufs is not None
+        missing = npu_group_idx + 1 - len(mp_bufs)
+        if missing > 0:
+            mp_bufs.extend([None] * missing)
+        bufs = mp_bufs[npu_group_idx]
         if bufs is None or bufs["ptrs"].numel() != num_planes:
             bufs = {
                 "ptrs": torch.empty(num_planes, dtype=torch.int64, device=device),
                 "starts": torch.empty(num_planes, dtype=torch.int32, device=device),
                 "counts": torch.empty(num_planes, dtype=torch.int32, device=device),
             }
-            self._mp_launch_bufs[npu_group_idx] = bufs
+            mp_bufs[npu_group_idx] = bufs
         return bufs
 
     def _invoke_multi_plane_kv_transfer(
@@ -992,13 +988,23 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if mp_launch_meta is not None:
             cached = mp_launch_meta.get(key)
             if cached is None:
+                # Batch precompute omits keys with no valid slots (has_work=False);
+                # same as mp_launch_meta is None path — skip kernel for chunk/group.
+                logger.debug(
+                    "Skipping multi-plane %s for chunk [%d, %d) group %d: no work",
+                    "store" if is_store else "load",
+                    g_start,
+                    g_end,
+                    npu_group_idx,
+                )
                 return
             starts_npu, counts_npu = cached
         else:
             sched_groups = group_params.get("scheduler_groups_per_plane") or []
             if len(sched_groups) != num_planes:
                 raise ValueError(
-                    f"scheduler_groups_per_plane length {len(sched_groups)} != num_planes {num_planes}"
+                    f"scheduler_groups_per_plane length {len(sched_groups)} "
+                    f"!= num_planes {num_planes}"
                 )
             starts_cpu, counts_cpu, has_work = compute_mp_plane_launch_row(
                 g_start,
@@ -1049,9 +1055,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         """Build per-group pointer tensors and kernel params for multi-group store."""
         self._reset_mp_launch_bufs()
         klg_manager = (
-            self.metadata.kv_layer_groups_manager
-            if self.metadata is not None
-            else None
+            self.metadata.kv_layer_groups_manager if self.metadata is not None else None
         )
         if klg_manager is None or not klg_manager.kv_layer_groups:
             self.group_kv_cache_pointers = None
@@ -1061,6 +1065,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         group_pointers: list[torch.Tensor] = []
         group_params: list[dict[str, Any]] = []
         for group_idx, group in enumerate(klg_manager.kv_layer_groups):
+            # ``build_kv_layer_groups`` buckets layers by layout identity
+            # (kv_size, hidden, block_size, dtype, tensor count). Every member
+            # of ``indices`` shares that key and ``group.shape_desc``, so format
+            # detection and ``_derive_group_params`` on ``indices[0]`` apply to
+            # the whole group; per-layer device pointers are collected below.
             indices = group.layer_indices
             rep = kv_caches[indices[0]]
             if not _is_kernel_compatible_entry(rep):
@@ -1096,7 +1105,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             chunk_tokens = (
                 int(group.physical_chunk_size)
                 if getattr(group, "physical_chunk_size", None) is not None
-                else (int(self.metadata.chunk_size) if self.metadata is not None else None)
+                else (
+                    int(self.metadata.chunk_size) if self.metadata is not None else None
+                )
             )
             params = _derive_group_params(
                 rep,
@@ -1133,7 +1144,6 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             len(group_pointers),
         )
 
-
     def _needs_per_group_pointers(self, kv_caches: List[torch.Tensor]) -> bool:
         """True when store/retrieve uses per-group pointer tables."""
         if self._is_mixed_format or self.kv_format == KVCacheFormat.DSA_C8_KV:
@@ -1145,9 +1155,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         ):
             return True
         manager = (
-            self.metadata.kv_layer_groups_manager
-            if self.metadata is not None
-            else None
+            self.metadata.kv_layer_groups_manager if self.metadata is not None else None
         )
         return manager is not None and len(manager.kv_layer_groups) > 1
 
@@ -1343,9 +1351,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             self._initialize_group_pointers_and_params(kv_caches)
         if self.kv_format == KVCacheFormat.DSA_C8_KV:
             self.dsa_c8_plane_bytes = tuple(
-                self._dsa_c8_group_params(kv_caches)[
-                    "per_plane_hidden_dim_bytes"
-                ]
+                self._dsa_c8_group_params(kv_caches)["per_plane_hidden_dim_bytes"]
             )
         return self.kv_cache_pointers_on_gpu[idx]
 
@@ -1360,14 +1366,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         assert caches is not None
         entry = caches[0]
         k_cache = entry[0]
+        shape_desc = lmc_ops.PageBufferShapeDesc()
+        shape_desc.nb = int(k_cache.shape[0])
+        shape_desc.bs = int(k_cache.shape[1])
+        shape_desc.block_stride_elems = 0
         return _derive_group_params(
             entry,
             KVCacheFormat.DSA_C8_KV,
-            SimpleNamespace(
-                nb=int(k_cache.shape[0]),
-                bs=int(k_cache.shape[1]),
-                block_stride_elems=0,
-            ),
+            shape_desc,
             logical_page_slots=self._logical_page_slots,
         )
 
@@ -1492,8 +1498,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 self.kv_format.value,  # 1:MERGED_KV / 2:SEPARATE_KV
             )
 
-            memory_obj.tensor.copy_(tmp_gpu_buffer)
-
+        memory_obj.tensor.copy_(tmp_gpu_buffer)
         if self.use_mla:
             memory_obj.metadata.fmt = MemoryFormat.KV_MLA_FMT
 
@@ -1590,6 +1595,8 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         filtered = kwargs.get("filtered_slot_mappings_npu")
         prefixes = kwargs.get("slot_valid_prefix_by_group")
         slot_mappings_by_group = kwargs.get("slot_mappings_by_group")
+        # Caller omitted filtered mappings / prefixes / per-group slots, or the
+        # engine provided no chunk starts — nothing to precompute for this batch.
         if (
             filtered is None
             or prefixes is None
@@ -1638,10 +1645,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         if slot_mappings is not None and self._has_per_group_transfer_infra():
             filtered_slot_mappings_npu = kwargs.get("filtered_slot_mappings_npu")
             slot_valid_prefix_by_group = kwargs.get("slot_valid_prefix_by_group")
-            if (
-                filtered_slot_mappings_npu is None
-                or slot_valid_prefix_by_group is None
-            ):
+            if filtered_slot_mappings_npu is None or slot_valid_prefix_by_group is None:
                 raise ValueError(
                     f"Mixed-format KV {op} requires filtered_slot_mappings_npu "
                     "and slot_valid_prefix_by_group."
@@ -1675,9 +1679,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         assert memory_obj.tensor is not None
         if memory_obj.tensor.dtype != torch.uint8:
-            raise ValueError(
-                "DSA-C8 memory objects must use uint8 LMCache chunks."
-            )
+            raise ValueError("DSA-C8 memory objects must use uint8 LMCache chunks.")
         with torch.npu.stream(stream):
             self._invoke_multi_plane_kv_transfer(
                 mem_tensor=memory_obj.tensor,
@@ -1686,9 +1688,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                 slot_mappings_by_group=(slot_mapping,),
                 filtered_slot_mappings_npu=(slot_mapping,),
                 slot_valid_prefix_by_group=(
-                    torch.arange(
-                        slot_mapping.shape[0] + 1, dtype=torch.int32
-                    ),
+                    torch.arange(slot_mapping.shape[0] + 1, dtype=torch.int32),
                 ),
                 compress_ratios=(1,),
                 g_start=start,
@@ -2098,26 +2098,15 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         else:
             self.store_stream.wait_stream(current_stream)
 
-        start_event = torch.npu.Event(enable_timing=True)
-        end_event = torch.npu.Event(enable_timing=True)
-        start_event.record(self.store_stream)
-
         for memory_obj, start, end in zip(memory_objs, starts, ends, strict=False):
             if is_310p():
                 self.from_gpu_310p(memory_obj, start, end, **kwargs)
             else:
                 self.from_gpu(memory_obj, start, end, **kwargs)
-
-        end_event.record(self.store_stream)
         self.store_stream.synchronize()
-        from_gpu_time = start_event.elapsed_time(end_event)
-
-        return from_gpu_time / 1000.0  # convert to seconds
 
     def get_shape(self, num_tokens: int) -> torch.Size:
         if self.kv_format == KVCacheFormat.DSA_C8_KV:
-            from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
-
             row_bytes = _lmc_chunk_hidden_bytes(
                 list(self.dsa_c8_plane_bytes), num_tokens
             )

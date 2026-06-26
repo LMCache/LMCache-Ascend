@@ -110,7 +110,11 @@ def test_initialize_pointers_mixed_format_no_unpack_crash() -> None:
     num_blocks = 4
     block_size = 8
 
-    npu = torch.device("npu:0") if hasattr(torch, "npu") and torch.npu.is_available() else None
+    npu = (
+        torch.device("npu:0")
+        if hasattr(torch, "npu") and torch.npu.is_available()
+        else None
+    )
     if npu is None:
         pytest.skip("NPU not available")
 
@@ -197,14 +201,11 @@ def test_ds4_pointer_init_matches_scheduler_map() -> None:
     for group_idx, group in enumerate(mgr.kv_layer_groups):
         expected = {sched_map[i] for i in group.layer_indices}
         assert len(expected) == 1
-        assert (
-            connector.per_group_params[group_idx]["scheduler_slot_group"]
-            == next(iter(expected))
+        assert connector.per_group_params[group_idx]["scheduler_slot_group"] == next(
+            iter(expected)
         )
 
-    sched_groups = {
-        p["scheduler_slot_group"] for p in connector.per_group_params
-    }
+    sched_groups = {p["scheduler_slot_group"] for p in connector.per_group_params}
     assert 1 in sched_groups
 
 
@@ -275,9 +276,10 @@ def test_bundled_multi_plane_kernel_routing(monkeypatch: pytest.MonkeyPatch) -> 
         connector=connector,
         chunk_ranges=[(0, DS4_CHUNK_SIZE)],
     )
-    with patch.object(
-        connector, "_invoke_multi_plane_kv_transfer"
-    ) as mock_mp, patch.object(lmc_ops, "multi_layer_kv_transfer") as mock_single:
+    with (
+        patch.object(connector, "_invoke_multi_plane_kv_transfer") as mock_mp,
+        patch.object(lmc_ops, "multi_layer_kv_transfer") as mock_single,
+    ):
         connector._multi_group_kv_transfer(
             mem,
             0,
@@ -291,19 +293,19 @@ def test_bundled_multi_plane_kernel_routing(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert mock_mp.call_count >= 1
     l2_calls = [
-        c for c in mock_mp.call_args_list
+        c
+        for c in mock_mp.call_args_list
         if c.kwargs["group_params"].get("num_planes") == 8
     ]
     assert len(l2_calls) == 1
     assert any(
-        c.kwargs["group_params"].get("num_planes") == 4
-        for c in mock_mp.call_args_list
+        c.kwargs["group_params"].get("num_planes") == 4 for c in mock_mp.call_args_list
     )
     separate_calls = [
-        c for c in mock_mp.call_args_list
+        c
+        for c in mock_mp.call_args_list
         if c.kwargs["group_params"].get("num_planes") == 1
-        and c.kwargs["group_params"].get("kv_format")
-        == KVCacheFormat.SEPARATE_KV.value
+        and c.kwargs["group_params"].get("kv_format") == KVCacheFormat.SEPARATE_KV.value
     ]
     assert len(separate_calls) == 2
     assert mock_mp.call_count == 4
@@ -421,9 +423,7 @@ def test_mp_device_materialized_at_pointer_init() -> None:
         connector._initialize_pointers(kv_caches)
 
     materialized = [
-        p
-        for p in connector.per_group_params
-        if p.get("mp_device") is not None
+        p for p in connector.per_group_params if p.get("mp_device") is not None
     ]
     assert materialized
 

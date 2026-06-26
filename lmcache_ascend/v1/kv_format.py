@@ -17,10 +17,12 @@ _BlobEntry = Union[torch.Tensor, Tuple[torch.Tensor, ...], List[torch.Tensor]]
 # Extracts the block_size dimension from a KV plane tensor (dim-1 for 3-D/4-D).
 # Used by _is_multi_plane_tuple and the NPU kernel param builder to derive
 # per-plane paging geometry.
-def _plane_block_size(tensor: torch.Tensor) -> int:
-    # block_size lives at dim-1 for both 3-D (nb, bs, hidden) and
-    # 4-D (nb, bs, nh, hs) layouts; ndim < 3 has no paging geometry.
+def _plane_block_size(tensor: torch.Tensor, *, is_310p: bool = False) -> int:
+    # block_size lives at dim-1 for 910B (nb, bs, hidden) layouts; on 310P
+    # multi-dim tuple layouts it moves to dim ``-2``.
     if tensor.ndim >= 3:
+        if is_310p:
+            return int(tensor.shape[-2])
         return int(tensor.shape[1])
     raise ValueError(f"Unexpected KV plane ndim={tensor.ndim}")
 
@@ -36,11 +38,7 @@ def _is_multi_plane_tuple(cache_entry: Sequence[torch.Tensor]) -> bool:
     # so block_size is uniform by construction — they are never multi-plane.
     if _is_shared_storage_blob(cache_entry):
         return False
-    tensors = [
-        t
-        for t in cache_entry
-        if isinstance(t, torch.Tensor) and t.ndim >= 3
-    ]
+    tensors = [t for t in cache_entry if isinstance(t, torch.Tensor) and t.ndim >= 3]
     if len(tensors) < 2:
         return False
     block_sizes = {_plane_block_size(t) for t in tensors}
@@ -193,7 +191,7 @@ class KVCacheFormat(Enum):
 
     def get_kv_size(self) -> int:
         # MULTI_PLANE_KV has a variable number of planes per layer, so there
-        # is no fixed stride for a flat pointer table; 0 signals "use per-group pointers".
+        # is no fixed stride for a flat pointer table; 0 signals per-group pointers.
         if self == KVCacheFormat.MULTI_PLANE_KV:
             return 0
         if self == KVCacheFormat.DSA_C8_KV:
@@ -292,7 +290,8 @@ class KVCacheFormat(Enum):
             shape = first_cache.shape
 
             # Flattened multi-spec / MLA page buffer: [num_blocks, block_size, hidden]
-            # Only taken when tuple bundling is disabled (LMCACHE_ASCEND_BUNDLE_MULTI_SPEC=0).
+            # Only taken when tuple bundling is disabled
+            # (LMCACHE_ASCEND_BUNDLE_MULTI_SPEC=0).
             if ndim == 3:
                 return KVCacheFormat.SEPARATE_KV
 

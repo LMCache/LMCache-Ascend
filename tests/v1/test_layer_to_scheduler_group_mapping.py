@@ -34,6 +34,7 @@ DSV4_CR128_SCHEDULE = (
     ("C128AttnScoreStateSpec", 64),
 )
 
+
 class SWAAttentionSpec:
     def __init__(self, block_size: int = 128) -> None:
         self.block_size = block_size
@@ -130,17 +131,13 @@ def ds4_config():
 
 
 def test_dense_layer_spec_order(ds4_config) -> None:
-    groups = ordered_scheduler_groups_for_layer(
-        L0, _tensor(128), ds4_config
-    )
+    groups = ordered_scheduler_groups_for_layer(L0, _tensor(128), ds4_config)
     assert groups == [1]
 
 
 def test_compress4_layer_spec_order(ds4_config) -> None:
     subs = [_tensor(block_size) for _, block_size in DSV4_CR4_SCHEDULE]
-    groups = ordered_scheduler_groups_for_layer(
-        L2, subs, ds4_config
-    )
+    groups = ordered_scheduler_groups_for_layer(L2, subs, ds4_config)
     assert groups == [0, 2, 3, 3, 4, 5, 6, 7]
 
 
@@ -170,9 +167,7 @@ def test_compress128_layer_spec_order() -> None:
     ]
     config = SimpleNamespace(kv_cache_groups=kv_cache_groups)
     subs = [_tensor(block_size) for _, block_size in DSV4_CR128_SCHEDULE]
-    groups = ordered_scheduler_groups_for_layer(
-        layer, subs, config
-    )
+    groups = ordered_scheduler_groups_for_layer(layer, subs, config)
     assert groups == [0, 1, 2, 3]
 
 

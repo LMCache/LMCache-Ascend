@@ -159,6 +159,7 @@ public:
 
     // Copy one contiguous byte span from Paged GM into UB at dstByteOff via DataCopyPad.
     // No branches; used as the MTE2 producer step inside the depth-2 pipeline.
+    // GM->UB (MTE2) requires DataCopyPadExtParams; UB->GM (MTE3) uses plain DataCopyPad.
     __aicore__ inline void CopyPagedToUb(AscendC::LocalTensor<uint8_t> &dst,
         const int64_t dstByteOff, AscendC::GlobalTensor<uint8_t> &src,
         const int64_t srcByteOff, const uint32_t copyBytes) const {
@@ -350,17 +351,66 @@ public:
         this->pagedTokenQue_.FreeTensor(buf);
     }
 
-    // Copy one paged-block part on the blockwise (hd<32) path using the depth-2 queue when bulk fits UB.
-    // Branch bulk: store EnQue Paged->UB then flush prev to Lmc, or load EnQue Lmc->UB then flush prev to
-    // Paged; branch !bulk: drain pending then copyBlockSetValue (no UB pipeline for this part).
-    __aicore__ inline void copyBlock(
+    // Copy one paged-block part on the store path (page -> LMC). Uses depth-2 UB queue when
+    // bulk fits; otherwise drains pending and falls back to copyBlockSetValue.
+    __aicore__ inline void copyBlockPageToLmc(
         const int32_t layerIdx, const int32_t tokenOff, const int32_t nTokens,
-        const bool page2L, __gm__ slot_t *slotmappingPtr,
-        AscendC::GlobalTensor<uint8_t> &pagedGm, AscendC::GlobalTensor<uint8_t> &lmcGm,
-        const int64_t hdBytes, const int64_t blockBytesI64, const bool ubPending,
-        const int32_t pendingTokenOff, const int64_t pendingPagedByteStart,
+        __gm__ slot_t *slotmappingPtr, AscendC::GlobalTensor<uint8_t> &pagedGm,
+        AscendC::GlobalTensor<uint8_t> &lmcGm, const int64_t hdBytes,
+        const int64_t blockBytesI64, const bool ubPending, const int32_t pendingTokenOff,
         const int32_t pendingNumTokens, bool &outUbPending, int32_t &outPendingTokenOff,
-        int64_t &outPendingPagedByteStart, int32_t &outPendingNumTokens) {
+        int32_t &outPendingNumTokens) {
+        outUbPending = ubPending;
+        outPendingTokenOff = pendingTokenOff;
+        outPendingNumTokens = pendingNumTokens;
+        if (nTokens <= 0) {
+            return;
+        }
+        const int64_t currentSlot = static_cast<int64_t>(slotmappingPtr[tokenOff]);
+        const int64_t copyBytesI64 = static_cast<int64_t>(nTokens) * hdBytes;
+        const bool useBulk = currentSlot >= 0 && currentSlot < this->pageBuffSize_ &&
+            copyBytesI64 > 0LL && copyBytesI64 <= this->perLoopBuffSize_;
+        if (!useBulk) {
+            if (outUbPending) {
+                flushPendingUbPartToLmc(
+                    lmcGm, layerIdx, outPendingTokenOff, outPendingNumTokens, hdBytes);
+                outUbPending = false;
+            }
+            this->copyBlockSetValue(
+                slotmappingPtr, tokenOff, nTokens, layerIdx, true, pagedGm, lmcGm, hdBytes,
+                blockBytesI64);
+            return;
+        }
+        const uint32_t copyBytesU32 = static_cast<uint32_t>(copyBytesI64);
+        const int64_t bsz64 = static_cast<int64_t>(this->blockSize_);
+        const int64_t pagedByteStart =
+            (currentSlot / bsz64) * blockBytesI64 + (currentSlot % bsz64) * hdBytes;
+
+        MP_TRACE(1, "copyBlockPageToLmc bulk nTok=%d off=%d slot=%lld copyBytes=%u", nTokens,
+            tokenOff, currentSlot, copyBytesU32);
+        local_scalar_t scratch = this->pagedTokenQue_.template AllocTensor<scalar_t>();
+        AscendC::LocalTensor<uint8_t> scratchU8 = scratch.template ReinterpretCast<uint8_t>();
+        CopyPagedToUb(scratchU8, 0, pagedGm, pagedByteStart, copyBytesU32);
+        this->pagedTokenQue_.EnQue(scratch);
+        if (outUbPending) {
+            flushPendingUbPartToLmc(
+                lmcGm, layerIdx, outPendingTokenOff, outPendingNumTokens, hdBytes);
+        }
+        outUbPending = true;
+        outPendingTokenOff = tokenOff;
+        outPendingNumTokens = nTokens;
+    }
+
+    // Copy one paged-block part on the load path (LMC -> page). Uses depth-2 UB queue when
+    // bulk fits; otherwise drains pending and falls back to copyBlockSetValue.
+    __aicore__ inline void copyBlockLmcToPage(
+        const int32_t layerIdx, const int32_t tokenOff, const int32_t nTokens,
+        __gm__ slot_t *slotmappingPtr, AscendC::GlobalTensor<uint8_t> &pagedGm,
+        AscendC::GlobalTensor<uint8_t> &lmcGm, const int64_t hdBytes,
+        const int64_t blockBytesI64, const bool ubPending, const int32_t pendingTokenOff,
+        const int64_t pendingPagedByteStart, const int32_t pendingNumTokens,
+        bool &outUbPending, int32_t &outPendingTokenOff, int64_t &outPendingPagedByteStart,
+        int32_t &outPendingNumTokens) {
         outUbPending = ubPending;
         outPendingTokenOff = pendingTokenOff;
         outPendingPagedByteStart = pendingPagedByteStart;
@@ -370,23 +420,16 @@ public:
         }
         const int64_t currentSlot = static_cast<int64_t>(slotmappingPtr[tokenOff]);
         const int64_t copyBytesI64 = static_cast<int64_t>(nTokens) * hdBytes;
-        // Pipeline bulk: valid lead slot, non-empty part, nTok*hd fits one UB scratch (perLoopBuffSize_).
         const bool useBulk = currentSlot >= 0 && currentSlot < this->pageBuffSize_ &&
             copyBytesI64 > 0LL && copyBytesI64 <= this->perLoopBuffSize_;
-        // Fallback: drain depth-2 queue then scalar SetValue (invalid slot or part larger than UB).
         if (!useBulk) {
             if (outUbPending) {
-                if (page2L) {
-                    flushPendingUbPartToLmc(
-                        lmcGm, layerIdx, outPendingTokenOff, outPendingNumTokens, hdBytes);
-                } else {
-                    flushPendingUbPartToPaged(
-                        pagedGm, outPendingPagedByteStart, outPendingNumTokens, hdBytes);
-                }
+                flushPendingUbPartToPaged(
+                    pagedGm, outPendingPagedByteStart, outPendingNumTokens, hdBytes);
                 outUbPending = false;
             }
             this->copyBlockSetValue(
-                slotmappingPtr, tokenOff, nTokens, layerIdx, page2L, pagedGm, lmcGm, hdBytes,
+                slotmappingPtr, tokenOff, nTokens, layerIdx, false, pagedGm, lmcGm, hdBytes,
                 blockBytesI64);
             return;
         }
@@ -394,28 +437,16 @@ public:
         const int64_t bsz64 = static_cast<int64_t>(this->blockSize_);
         const int64_t pagedByteStart =
             (currentSlot / bsz64) * blockBytesI64 + (currentSlot % bsz64) * hdBytes;
-
-        MP_TRACE(1, "copyBlock bulk nTok=%d off=%d slot=%lld copyBytes=%u", nTokens, tokenOff,
-            currentSlot, copyBytesU32);
-        local_scalar_t scratch = this->pagedTokenQue_.template AllocTensor<scalar_t>();
-        AscendC::LocalTensor<uint8_t> scratchU8 = scratch.template ReinterpretCast<uint8_t>();
-        if (page2L) {
-            CopyPagedToUb(scratchU8, 0, pagedGm, pagedByteStart, copyBytesU32);
-            this->pagedTokenQue_.EnQue(scratch);
-            if (outUbPending) {
-                flushPendingUbPartToLmc(
-                    lmcGm, layerIdx, outPendingTokenOff, outPendingNumTokens, hdBytes);
-            }
-            outUbPending = true;
-            outPendingTokenOff = tokenOff;
-            outPendingNumTokens = nTokens;
-            return;
-        }
         const int64_t lmcByteOff =
             static_cast<int64_t>(layerIdx) * this->layerBlockBytes_ +
             this->planeBaseOffsetInLayer_ +
             static_cast<int64_t>(this->planeLmcRowOffset_ + tokenOff) *
                 this->planeRowStrideBytes_;
+
+        MP_TRACE(1, "copyBlockLmcToPage bulk nTok=%d off=%d slot=%lld copyBytes=%u", nTokens,
+            tokenOff, currentSlot, copyBytesU32);
+        local_scalar_t scratch = this->pagedTokenQue_.template AllocTensor<scalar_t>();
+        AscendC::LocalTensor<uint8_t> scratchU8 = scratch.template ReinterpretCast<uint8_t>();
         CopyLmcChunkToUb(scratchU8, lmcGm, lmcByteOff, nTokens, hdBytes, true);
         this->pagedTokenQue_.EnQue(scratch);
         if (outUbPending) {
@@ -428,8 +459,9 @@ public:
         outPendingNumTokens = nTokens;
     }
 
-    // Entire-chunk path when hd<32 and one physical block fits in UB: split by block geometry, then
-    // pipelined copyBlock per part (store or load per page2L). Early exit if lead slot invalid.
+    // Entire-chunk path when hd<32 and one physical block fits in UB: split by block geometry,
+    // then pipelined copyBlockPageToLmc or copyBlockLmcToPage per part. Early exit if lead slot
+    // invalid.
     __aicore__ inline void blockwiseCopy(__gm__ uint8_t *pagedKVCaches, __gm__ uint8_t *cacheTensor,
         __gm__ uint8_t *slotmappings, const int32_t layerIdx, const bool page2L) {
         __gm__ slot_t *slotmappingPtr = reinterpret_cast<__gm__ slot_t *>(slotmappings);
@@ -481,9 +513,18 @@ public:
         for (int32_t blockPartIdx = 0; blockPartIdx < nPagedBlockParts; ++blockPartIdx) {
             const int32_t blockPartNumTokens =
                 this->pagedBlockPartNumTokens(blockPartIdx, nFirst, nFullBlocks, nLast, bs);
-            this->copyBlock(layerIdx, tokenOff, blockPartNumTokens, page2L, slotmappingPtr, pagedGm,
-                lmcGm, hdBytes, blockBytesI64, ubPending, pendingTokenOff, pendingPagedByteStart,
-                pendingNumTokens, ubPending, pendingTokenOff, pendingPagedByteStart, pendingNumTokens);
+            if (page2L) {
+                this->copyBlockPageToLmc(
+                    layerIdx, tokenOff, blockPartNumTokens, slotmappingPtr, pagedGm, lmcGm,
+                    hdBytes, blockBytesI64, ubPending, pendingTokenOff, pendingNumTokens,
+                    ubPending, pendingTokenOff, pendingNumTokens);
+            } else {
+                this->copyBlockLmcToPage(
+                    layerIdx, tokenOff, blockPartNumTokens, slotmappingPtr, pagedGm, lmcGm,
+                    hdBytes, blockBytesI64, ubPending, pendingTokenOff, pendingPagedByteStart,
+                    pendingNumTokens, ubPending, pendingTokenOff, pendingPagedByteStart,
+                    pendingNumTokens);
+            }
             tokenOff += blockPartNumTokens;
         }
         if (ubPending) {

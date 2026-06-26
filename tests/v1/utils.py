@@ -293,9 +293,7 @@ def generate_dsa_c8_kv_cache(
     kv_dtype: torch.dtype = torch.bfloat16,
     dsa_dtype: torch.dtype = torch.int8,
     scale_dtype: torch.dtype = torch.float16,
-) -> list[
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
-]:
+) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Generate DSA + C8 tuple (k, v, dsa_k, dsa_k_scale) with mixed dtypes.
 
@@ -311,7 +309,9 @@ def generate_dsa_c8_kv_cache(
     for _ in range(num_layers):
         k_cache = torch.rand(k_shape, dtype=kv_dtype, device=device)
         v_cache = torch.rand(v_shape, dtype=kv_dtype, device=device)
-        dsa_k_cache = torch.randint(-128, 127, dsa_k_shape, dtype=dsa_dtype, device=device)
+        dsa_k_cache = torch.randint(
+            -128, 127, dsa_k_shape, dtype=dsa_dtype, device=device
+        )
         dsa_k_scale = torch.rand(scale_shape, dtype=scale_dtype, device=device)
         ret.append((k_cache, v_cache, dsa_k_cache, dsa_k_scale))
     return ret

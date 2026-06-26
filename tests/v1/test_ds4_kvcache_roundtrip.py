@@ -11,7 +11,6 @@ from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.slot_mapping_utils import multi_plane_slot_slice_bounds
 
 from .conftest_ds4 import (
-    DS4_IE_LOGICAL_BLOCK_SIZE,
     DS4_PRODUCTION_CHUNK_TOKENS,
     build_bundled_ds4_connector,
     compress_ratios_from_block_sizes,

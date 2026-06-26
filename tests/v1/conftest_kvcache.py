@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from lmcache.v1.memory_management import PinMemoryAllocator, TensorMemoryObj
+from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
@@ -26,7 +27,6 @@ def _filtered_slot_invoke_kwargs(
 ) -> dict:
     filtered, prefixes = build_filtered_slot_mappings(
         tuple(sm.cpu() for sm in slot_mappings),
-        compress_ratios=compress_ratios,
     )
     dev = slot_mappings[0].device
     return {
@@ -198,9 +198,7 @@ def assert_token_aligned_plane_parity(
     step = 1 if ratio <= 1 else ratio
     for t in range(lo, hi, step):
         store_idx = _compressed_slot_index(t, sched_g, compress_ratios, window_start=0)
-        load_idx = _compressed_slot_index(
-            t, sched_g, compress_ratios, window_start=win
-        )
+        load_idx = _compressed_slot_index(t, sched_g, compress_ratios, window_start=win)
         if store_idx < 0 or store_idx >= int(store_sm.shape[0]):
             continue
         if load_idx < 0 or load_idx >= int(load_sm.shape[0]):
@@ -225,6 +223,7 @@ def multi_plane_round_trip_via_connector(
 ) -> None:
     if chunk <= 0:
         return
+    assert connector.per_group_params is not None
     dev = connector.kvcaches_device
     g_params = connector.per_group_params[gi]
     sched_groups = list(g_params.get("scheduler_groups_per_plane") or [])
@@ -308,6 +307,7 @@ def separate_kv_round_trip_via_connector(
 
     from .conftest_ds4 import _get_multi_group_pinned_allocator
 
+    assert connector.per_group_params is not None
     g_params = connector.per_group_params[gi]
     num_planes = int(g_params.get("num_planes", 0))
     if num_planes <= 0:
@@ -351,6 +351,7 @@ def separate_kv_round_trip_via_connector(
         paged_dst_list: list[torch.Tensor] = []
         ptrs_store = connector.group_kv_cache_pointers[gi].clone()
         ptrs_load = connector.group_kv_cache_pointers[gi].clone()
+        assert connector.kvcaches is not None
         for li, layer_idx in enumerate(layer_indices):
             tmpl = first_layer_tensor(connector.kvcaches[int(layer_idx)])
             src = tmpl.clone()
@@ -401,8 +402,48 @@ def separate_kv_round_trip_via_connector(
             )
 
 
+def standard_group_round_trip_via_connector(
+    connector: VLLMPagedMemNPUConnectorV2,
+    gi: int,
+    chunk: int,
+    slot_mappings: tuple[torch.Tensor, ...],
+    compress_ratios: tuple[int, ...],
+    *,
+    label: str,
+) -> None:
+    """Round-trip one NPU group via the connector's multi-plane or SEPARATE_KV path."""
+    assert connector.per_group_params is not None
+    g_params = connector.per_group_params[gi]
+    kv_fmt = g_params.get("kv_format")
+    num_planes = int(g_params.get("num_planes", 0))
+    sched_per_plane = g_params.get("scheduler_groups_per_plane")
+    is_separate = kv_fmt in (
+        KVCacheFormat.SEPARATE_KV,
+        KVCacheFormat.SEPARATE_KV.value,
+    )
+    if is_separate and num_planes <= 1 and not sched_per_plane:
+        separate_kv_round_trip_via_connector(
+            connector,
+            gi,
+            chunk,
+            slot_mappings,
+            compress_ratios,
+            label=label,
+        )
+        return
+    multi_plane_round_trip_via_connector(
+        connector,
+        gi,
+        chunk,
+        slot_mappings,
+        compress_ratios,
+        label=label,
+    )
+
+
 LARGE_TOKEN_COPY_SIZE = 40960
 MULTI_PLANE_C8_TOKEN_ALIGN = 32
+
 
 def power_of_two_boundary_triplet(exp: int) -> tuple[int, int, int]:
     """Return (2^exp - 1, 2^exp, 2^exp + 1)."""

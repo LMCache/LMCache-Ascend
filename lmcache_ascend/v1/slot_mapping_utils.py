@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Slot-mapping helpers for multi-plane KV transfer (slice bounds, compaction, precompute)."""
+"""Slot-mapping helpers for multi-plane KV transfer (slice bounds, compaction).
+"""
 
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ def multi_plane_slot_slice_bounds(
     compress_ratios: Sequence[int],
     sm_len: int,
 ) -> tuple[int, int]:
-    """Map a global token span to compressed slot bounds in the full slot-mapping tensor.
+    """Map a global token span to compressed slot bounds in the slot-mapping tensor.
 
     Each scheduler group ``sched_g`` has its own compression ratio. Given logical token
     indices ``[token_start, token_end)`` returns ``(s0, s1)`` such that
@@ -100,7 +101,7 @@ def compute_mp_plane_launch_row(
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     """Per-plane dense offsets for one token chunk in a multi-plane transfer.
 
-    For each plane's scheduler group, maps a logical range to physical slot range 
+    For each plane's scheduler group, maps a logical range to physical slot range
     and produces pinned CPU tensors ``starts`` and ``counts`` that are used by
     transfer kernel to index into each plane's filtered slot-mapping buffer.
 
@@ -132,8 +133,6 @@ def compute_mp_plane_launch_row(
 
 def build_filtered_slot_mappings(
     slot_mappings_by_group: tuple[torch.Tensor, ...] | list[torch.Tensor],
-    *,
-    compress_ratios: tuple[int, ...] | Sequence[int],
 ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
     """Precompute per-group compacted slot mappings and prefix lookup tables.
 
@@ -143,10 +142,6 @@ def build_filtered_slot_mappings(
     :func:`dense_bounds_from_prefix` instead of scanning ``-1`` on every
     transfer.
     """
-    ratios = tuple(int(r) for r in compress_ratios)
-    if not ratios:
-        ratios = (1,) * len(slot_mappings_by_group)
-
     filtered: list[torch.Tensor] = []
     prefixes: list[torch.Tensor] = []
     for sched_g, sm in enumerate(slot_mappings_by_group):

@@ -3,29 +3,32 @@
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from typing import List
 from unittest.mock import MagicMock, patch
+import os
 
+from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    PinMemoryAllocator,
+    TensorMemoryObj,
+)
+from lmcache.v1.metadata import LMCacheMetadata
 import pytest
 import torch
 
-import lmcache_ascend  # noqa: F401
-
-from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
-from lmcache_ascend.integration.vllm.multi_spec_flatten import build_flat_kv_caches
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     ReqMeta,
     _build_slot_mapping_for_group,
 )
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator, TensorMemoryObj
-from lmcache.v1.metadata import LMCacheMetadata
+from lmcache_ascend.integration.vllm.multi_spec_flatten import build_flat_kv_caches
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
     build_mp_launch_meta,
 )
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
+import lmcache_ascend  # noqa: F401
 
 from .conftest_kvcache import (
     LARGE_TOKEN_COPY_SIZE,
@@ -90,9 +93,7 @@ def compress_ratios_from_block_sizes() -> tuple[int, ...]:
 def set_bundle_multi_spec_env(
     monkeypatch: pytest.MonkeyPatch, *, enabled: bool
 ) -> None:
-    monkeypatch.setenv(
-        "LMCACHE_ASCEND_BUNDLE_MULTI_SPEC", "1" if enabled else "0"
-    )
+    monkeypatch.setenv("LMCACHE_ASCEND_BUNDLE_MULTI_SPEC", "1" if enabled else "0")
     monkeypatch.setattr(
         "lmcache_ascend.integration.vllm.multi_spec_flatten.bundle_multi_spec_enabled",
         lambda: enabled,
@@ -141,9 +142,7 @@ def _make_4d_page(
     dev: torch.device,
     dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    return torch.zeros(
-        num_blocks, block_size, 1, head_size, dtype=dtype, device=dev
-    )
+    return torch.zeros(num_blocks, block_size, 1, head_size, dtype=dtype, device=dev)
 
 
 def _make_shared_blob_layer(
@@ -231,10 +230,7 @@ def make_slot_transfer_kwargs(
     """Build filtered NPU mappings + CPU prefix kwargs for multi-group transfer."""
     ratios = compress_ratios or DS4_COMPRESS_RATIOS[: len(slot_mappings_npu)]
     cpu_mappings = tuple(sm.cpu() for sm in slot_mappings_npu)
-    filtered_cpu, prefixes = build_filtered_slot_mappings(
-        cpu_mappings,
-        compress_ratios=ratios,
-    )
+    filtered_cpu, prefixes = build_filtered_slot_mappings(cpu_mappings)
     dev = slot_mappings_npu[0].device
     filtered_npu = tuple(f.to(dev) for f in filtered_cpu)
     kwargs: dict = {
@@ -543,9 +539,7 @@ def make_ds4_slot_mappings_cpu(
     return tuple(mappings)
 
 
-def make_ascend_adapter_for_load(
-    *, num_kv_groups: int = DS4_NUM_SCHEDULER_GROUPS
-):
+def make_ascend_adapter_for_load(*, num_kv_groups: int = DS4_NUM_SCHEDULER_GROUPS):
     pytest.importorskip("vllm")
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         LMCacheAscendConnectorV1Impl,

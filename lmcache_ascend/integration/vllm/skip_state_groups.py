@@ -3,17 +3,17 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
-
-import torch
+from typing import Any, Mapping, Sequence, Union
+import os
 
 from lmcache.logging import init_logger
+from lmcache.v1.config import LMCacheEngineConfig
+import torch
 
 logger = init_logger(__name__)
 
-_KVEntry = torch.Tensor | tuple[torch.Tensor, ...] | list[torch.Tensor]
+_KVEntry = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
 
 # Default allowlist when LMCACHE_ASCEND_SKIP_STATE_SPEC_ALLOWLIST is unset.
 DEFAULT_SKIP_STATE_SPEC_NAMES = (
@@ -59,7 +59,7 @@ def effective_layer_name_suffix(policy: SkipStateGroupsPolicy | None) -> str:
 
 def parse_skip_state_policy_from_env() -> SkipStateGroupsPolicy | None:
     """Read skip policy from env and return None when the feature is disabled."""
-    if os.environ.get("LMCACHE_ASCEND_SKIP_STATE_GROUPS", "1") != "1":
+    if not LMCacheEngineConfig.from_env().ascend_skip_state_groups:
         return None
     raw_allowlist = os.environ.get("LMCACHE_ASCEND_SKIP_STATE_SPEC_ALLOWLIST")
     raw_suffix = os.environ.get("LMCACHE_ASCEND_SKIP_STATE_LAYER_SUFFIX")
@@ -167,7 +167,8 @@ def apply_skip_filter_to_flattened(
     bundled: bool,
     policy: SkipStateGroupsPolicy | None,
 ) -> tuple[dict[str, _KVEntry], tuple[int, ...], dict[str, list[int]]]:
-    """Filter flattened registration artifacts so skipped groups never reach planning."""
+    """Filter flattened registration artifacts so skipped groups never reach planning.
+    """
     kept_layer_to_groups = {
         layer: [int(g) for g in groups]
         for layer, groups in layer_to_scheduler_groups.items()
@@ -194,10 +195,13 @@ def apply_skip_filter_to_flattened(
     kept_layer_to_groups_out: dict[str, list[int]] = {}
 
     def _drop_flat_layer(layer_name: str, sched_g: int) -> bool:
-        return should_skip_layer(
-            layer_name=layer_name,
-            policy=policy,
-        ) or int(sched_g) in skipped_groups
+        return (
+            should_skip_layer(
+                layer_name=layer_name,
+                policy=policy,
+            )
+            or int(sched_g) in skipped_groups
+        )
 
     # Unbundled path: one flat entry maps to exactly one scheduler group.
     if not bundled:
@@ -242,9 +246,7 @@ def apply_skip_filter_to_flattened(
             continue
         kept_flat[layer_name] = entry
         kept_sched_list.append(fallback_sched)
-        filtered_groups = [
-            int(g) for g in layer_groups if int(g) not in skipped_groups
-        ]
+        filtered_groups = [int(g) for g in layer_groups if int(g) not in skipped_groups]
         if filtered_groups:
             kept_layer_to_groups_out[layer_name] = filtered_groups
 

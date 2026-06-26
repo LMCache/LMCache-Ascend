@@ -199,7 +199,7 @@ def test_shared_storage_blob_classified_with_vllm_block_size():
     assert g.layer_indices == [0, 1]
     assert g.shape_desc.kv_size == 2
     assert g.shape_desc.bs == vllm_bs
-  # bfloat16 reinterpretation halves the last dim vs int8 layout.
+    # bfloat16 reinterpretation halves the last dim vs int8 layout.
     assert g.shape_desc.hs == _get_primary_blob_view(layer).shape[-1]
     assert g.shape_desc.element_size == 2  # primary view is bfloat16
     assert g.dtype == torch.bfloat16
@@ -210,11 +210,13 @@ def test_shared_storage_blob_padded_storage_uses_primary_view():
     num_blocks = 2
     page_bytes_padded = 133168
     blob = torch.zeros(num_blocks * page_bytes_padded, dtype=torch.int8)
-    small = blob[: num_blocks * 32 * 64 * 2].view(torch.bfloat16).view(
-        num_blocks, 32, 64
+    small = (
+        blob[: num_blocks * 32 * 64 * 2].view(torch.bfloat16).view(num_blocks, 32, 64)
     )
-    large = blob[: num_blocks * 128 * 512 * 2].view(torch.bfloat16).view(
-        num_blocks, 128, 512
+    large = (
+        blob[: num_blocks * 128 * 512 * 2]
+        .view(torch.bfloat16)
+        .view(num_blocks, 128, 512)
     )
     layer = [small, large]
     assert _is_shared_storage_blob(layer)
@@ -244,9 +246,7 @@ def test_shared_storage_blob_padded_storage_uses_primary_view():
         bs = 128
         block_stride_elems = 0
 
-    params = _derive_group_params(
-        layer, KVCacheFormat.SEPARATE_KV, _ShapeDesc()
-    )
+    params = _derive_group_params(layer, KVCacheFormat.SEPARATE_KV, _ShapeDesc())
     assert params["block_size"] == 128
     assert params["page_buffer_size"] == num_blocks * 128
     assert params["num_planes"] == 1
