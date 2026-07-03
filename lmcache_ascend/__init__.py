@@ -366,14 +366,18 @@ def _patch_storage_manager():
     # between lookup-pin and touch_cache degrades the eviction-policy update to a
     # no-op instead of aborting the lookup (which dropped local hits and timed
     # out the lookup RPC). Prefetch all-done callback mirrors loaded tiers into
-    # the local hot cache when enabled. See lmcache_ascend.v1.storage_backend
-    # .storage_manager.
+    # the local hot cache when enabled. Multi-group disk save/load patches live
+    # in lmcache_ascend.v1.storage_backend.local_disk_backend.
     # Third Party
     import lmcache.v1.storage_backend.local_cpu_backend as lm_local_cpu_backend
     import lmcache.v1.storage_backend.local_disk_backend as lm_local_disk_backend
     import lmcache.v1.storage_backend.storage_manager as lm_storage_manager
 
     # First Party
+    from lmcache_ascend.v1.storage_backend import local_disk_backend as ascend_local_disk
+    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        allocate as ascend_allocate,
+    )
     from lmcache_ascend.v1.storage_backend.storage_manager import (
         batched_get as ascend_batched_get,
     )
@@ -391,6 +395,26 @@ def _patch_storage_manager():
     )
     lm_local_cpu_backend.LocalCPUBackend.touch_cache = local_cpu_touch_cache
     lm_local_disk_backend.LocalDiskBackend.touch_cache = local_disk_touch_cache
+
+    ascend_local_disk._orig_async_save_bytes_to_disk = (
+        lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk = (
+        ascend_local_disk.local_disk_async_save_bytes_to_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.load_bytes_from_disk = (
+        ascend_local_disk.local_disk_load_bytes_from_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.batched_get_non_blocking = (
+        ascend_local_disk.local_disk_batched_get_non_blocking
+    )
+
+    import lmcache_ascend.v1.storage_backend.storage_manager as ascend_storage_manager
+
+    ascend_storage_manager._orig_storage_manager_allocate = (
+        lm_storage_manager.StorageManager.allocate
+    )
+    lm_storage_manager.StorageManager.allocate = ascend_allocate
 
 
 def _patch_torch_capability():

@@ -61,16 +61,45 @@ no-op for missing keys instead of aborting the lookup.
 """
 
 # Standard
-from typing import List, Optional, cast
+from typing import List, Optional, Union, cast
 
 # Third Party
+import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.event_manager import EventStatus, EventType
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
+# First Party
+from lmcache_ascend.v1.memory_management import maybe_normalize_multi_group_metadata
+
 logger = init_logger(__name__)
+
+_orig_storage_manager_allocate = None
+
+
+def allocate(
+    self,
+    shapes: Union[torch.Size, list[torch.Size]],
+    dtypes: Union[torch.dtype, list[torch.dtype]],
+    fmt: MemoryFormat = MemoryFormat.KV_2LTD,
+    eviction=True,
+    busy_loop=True,
+) -> Optional[MemoryObj]:
+    """Allocate and normalize multi-group legacy metadata for disk ``.tensor``."""
+    assert _orig_storage_manager_allocate is not None
+    memory_obj = _orig_storage_manager_allocate(
+        self,
+        shapes,
+        dtypes,
+        fmt=fmt,
+        eviction=eviction,
+        busy_loop=busy_loop,
+    )
+    if memory_obj is not None:
+        maybe_normalize_multi_group_metadata(memory_obj)
+    return memory_obj
 
 
 def get(

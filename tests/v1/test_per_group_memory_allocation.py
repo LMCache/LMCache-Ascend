@@ -24,6 +24,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
+from lmcache_ascend.v1.memory_management import maybe_normalize_multi_group_metadata
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 from .conftest_ds4 import (
@@ -228,13 +229,93 @@ def test_bundled_ds4_sw_group_uses_physical_token_dim(
             assert shapes[group_idx][2] == num
 
 
-def test_multi_group_memory_obj_tensor_view_fails() -> None:
-    """Document why single-group ``memory_obj.tensor`` must not be used on multi-group."""
+def test_multi_group_memory_obj_tensor_is_flat_uint8() -> None:
+    """Multi-group legacy metadata exposes the full buffer as flat uint8."""
     _, metadata, _, _ = make_ds4_setup()
     mem_obj = allocate_multi_group_memory_obj(metadata, DS4_CHUNK_SIZE)
     assert len(mem_obj.group_prefix_sum) >= 3
-    with pytest.raises(RuntimeError, match="invalid for input of size"):
-        _ = mem_obj.tensor
+    maybe_normalize_multi_group_metadata(mem_obj)
+    tensor = mem_obj.tensor
+    assert tensor is not None
+    assert tensor.shape == (mem_obj.get_size(),)
+    assert tensor.dtype == torch.uint8
+    shapes = metadata.get_shapes(DS4_CHUNK_SIZE)
+    for i, shape in enumerate(shapes):
+        group_tensor = mem_obj.get_tensor(i)
+        assert group_tensor is not None
+        assert group_tensor.shape == shape
+
+
+def test_multi_group_disk_save_load_roundtrip(tmp_path) -> None:
+    """Disk tier stores multi-group chunks and reloads per-group structure."""
+    # Standard
+    import asyncio
+    import os
+
+    # Third Party
+    from lmcache.utils import CacheEngineKey
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.memory_management import PinMemoryAllocator
+    from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+    from lmcache.v1.storage_backend.local_disk_backend import LocalDiskBackend
+
+    _, metadata, _, _ = make_ds4_setup()
+    mem_obj = allocate_multi_group_memory_obj(metadata, DS4_CHUNK_SIZE)
+    maybe_normalize_multi_group_metadata(mem_obj)
+    num_bytes = mem_obj.get_size()
+    mem_obj.raw_data[:num_bytes] = torch.arange(num_bytes, dtype=torch.uint8)
+
+    key = CacheEngineKey(
+        model_name="ds4-multi-group",
+        world_size=1,
+        worker_id=0,
+        chunk_hash=12345,
+        dtype=torch.uint8,
+    )
+
+    loop = asyncio.new_event_loop()
+    try:
+        config = LMCacheEngineConfig.from_defaults(
+            chunk_size=DS4_CHUNK_SIZE,
+            local_disk=str(tmp_path),
+            max_local_disk_size=500.0,
+            lmcache_instance_id="test_instance",
+        )
+        allocator = PinMemoryAllocator(512 * 1024 * 1024)
+        cpu_backend = LocalCPUBackend(config, memory_allocator=allocator)
+        disk_backend = LocalDiskBackend(
+            config=config,
+            loop=loop,
+            local_cpu_backend=cpu_backend,
+            dst_device="cpu",
+        )
+
+        mem_obj.ref_count_up()
+        disk_backend.async_save_bytes_to_disk(key, mem_obj)
+
+        disk_meta = disk_backend.dict[key]
+        assert disk_meta.shapes is not None
+        assert disk_meta.dtypes is not None
+        assert os.path.getsize(disk_meta.path) == num_bytes
+
+        loaded = disk_backend.get_blocking(key)
+        assert loaded is not None
+        assert loaded.get_size() == num_bytes
+        assert loaded.tensor is not None
+        assert loaded.tensor.shape == (num_bytes,)
+        assert torch.equal(loaded.raw_data[:num_bytes], mem_obj.raw_data[:num_bytes])
+        shapes = metadata.get_shapes(DS4_CHUNK_SIZE)
+        for i in range(len(shapes)):
+            begin = loaded.group_prefix_sum[i]
+            end = loaded.group_prefix_sum[i + 1]
+            assert torch.equal(
+                loaded.raw_data[begin:end],
+                mem_obj.raw_data[begin:end],
+            )
+
+        allocator.close()
+    finally:
+        loop.close()
 
 
 def test_single_group_connector_from_gpu_uses_tensor() -> None:
