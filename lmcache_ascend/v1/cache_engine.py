@@ -27,6 +27,8 @@ import torch
 
 logger = init_logger(__name__)
 
+ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
+
 
 class ThreadSafeEventList:
     """queue.Queue-backed, list-compatible thread-safe buffer for
@@ -166,9 +168,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         if total <= 0:
             return []
         step = max(1, shard_size)
-        return [
-            (i, min(step, total - i)) for i in range(0, total, step)
-        ]
+        return [(i, min(step, total - i)) for i in range(0, total, step)]
 
     def _try_release_pending(
         self,
@@ -205,7 +205,9 @@ class AscendLMCacheEngine(LMCacheEngine):
             logger.warning(
                 "rank=%d NPU OOM allocating merged-buffer pool "
                 "(%d bytes/slot); batched broadcast disabled: %s",
-                self.metadata.worker_id, max_bytes, e,
+                self.metadata.worker_id,
+                max_bytes,
+                e,
             )
             self._merged_pool = []
             self._pool_bytes = 0
@@ -256,9 +258,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                     # may include alignment padding) so that the
                     # receiver can faithfully reconstruct the chunk
                     # tensor via dtype/shape views.
-                    chunk_meta = MemoryObjMetadata.from_dict(
-                        meta_table[i][2]
-                    )
+                    chunk_meta = MemoryObjMetadata.from_dict(meta_table[i][2])
                     chunk_bytes = chunk_meta.get_size()
                     layout.append((i, byte_off, chunk_bytes))
                     byte_off += chunk_bytes
@@ -294,23 +294,28 @@ class AscendLMCacheEngine(LMCacheEngine):
         first_rank = self.metadata.first_rank
         load_stream = self.gpu_connector.load_stream
 
-        plan = self._broadcast_metadata_table(
-            reordered_chunks, shard_size, first_rank
-        )
+        plan = self._broadcast_metadata_table(reordered_chunks, shard_size, first_rank)
         if plan is None or plan.get("total", 0) == 0:
+            # Sender's CPU mem_objs won't enter the pipeline; release
+            # them now to avoid leaking.
+            if self.metadata.is_first_rank():
+                for _, mem_obj, _, _ in reordered_chunks:
+                    mem_obj.ref_count_down()
             return
 
         if self.metadata.is_first_rank():
             # sender
             self._pipeline_broadcast_and_load(
-                plan, load_stream,
+                plan,
+                load_stream,
                 reordered_chunks=reordered_chunks,
                 **kwargs,
             )
         else:
             # receiver
             self._pipeline_broadcast_and_load(
-                plan, load_stream,
+                plan,
+                load_stream,
                 ret_mask=ret_mask,
                 **kwargs,
             )
@@ -333,27 +338,31 @@ class AscendLMCacheEngine(LMCacheEngine):
             start, end_pos, _ = meta_table[ci]
             raw = mem_obj.raw_tensor
             if raw is None:
-                raise ValueError(
-                    f"rank=0 chunk [{start}:{end_pos}] raw_tensor is None"
-                )
+                raise ValueError(f"rank=0 chunk [{start}:{end_pos}] raw_tensor is None")
 
-            dst = merged[byte_off:byte_off + byte_size]
+            dst = merged[byte_off : byte_off + byte_size]
             dst.copy_(
                 raw.contiguous().view(torch.uint8).flatten(),
                 non_blocking=True,
             )
 
             meta = mem_obj.metadata
-            objs.append(TensorMemoryObj(
-                raw_data=dst.view(meta.dtype).view(meta.shape),
-                metadata=MemoryObjMetadata(
-                    shape=meta.shape, dtype=meta.dtype,
-                    address=meta.address, phy_size=meta.phy_size,
-                    ref_count=1, fmt=meta.fmt,
-                    shapes=meta.shapes, dtypes=meta.dtypes,
-                ),
-                parent_allocator=None,
-            ))
+            objs.append(
+                TensorMemoryObj(
+                    raw_data=dst.view(meta.dtype).view(meta.shape),
+                    metadata=MemoryObjMetadata(
+                        shape=meta.shape,
+                        dtype=meta.dtype,
+                        address=meta.address,
+                        phy_size=meta.phy_size,
+                        ref_count=1,
+                        fmt=meta.fmt,
+                        shapes=meta.shapes,
+                        dtypes=meta.dtypes,
+                    ),
+                    parent_allocator=None,
+                )
+            )
             starts.append(start)
             ends.append(end_pos)
         return objs, starts, ends
@@ -374,12 +383,14 @@ class AscendLMCacheEngine(LMCacheEngine):
         for ci, byte_off, byte_size in layout:
             start, end_pos, meta_dict = meta_table[ci]
             metadata = MemoryObjMetadata.from_dict(meta_dict)
-            dst = merged[byte_off:byte_off + byte_size]
-            objs.append(TensorMemoryObj(
-                raw_data=dst.view(metadata.dtype).view(metadata.shape),
-                metadata=metadata,
-                parent_allocator=None,
-            ))
+            dst = merged[byte_off : byte_off + byte_size]
+            objs.append(
+                TensorMemoryObj(
+                    raw_data=dst.view(metadata.dtype).view(metadata.shape),
+                    metadata=metadata,
+                    parent_allocator=None,
+                )
+            )
             starts.append(start)
             ends.append(end_pos)
             ret_mask[start:end_pos] = True
@@ -416,7 +427,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             objs, starts, ends, ev_bc, idx, slot = ctx
             load_stream.wait_event(ev_bc)
             with torch.npu.stream(load_stream):
-                for obj, s, e in zip(objs, starts, ends):
+                for obj, s, e in zip(objs, starts, ends, strict=False):
                     self.gpu_connector.to_gpu(obj, s, e, **kwargs)
                 ev_togpu = torch.npu.Event()
                 ev_togpu.record()
@@ -427,7 +438,9 @@ class AscendLMCacheEngine(LMCacheEngine):
             self._try_release_pending(pending)
             logger.debug(
                 "rank=%d shard[%d] cnt=%d submitted",
-                self.metadata.worker_id, idx, len(objs),
+                self.metadata.worker_id,
+                idx,
+                len(objs),
             )
 
         prev_ctx = None
@@ -439,9 +452,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 # Slot was last used by shard_idx-2; wait for its
                 # to_gpu before overwriting.
                 if shard_idx >= 2:
-                    self.broadcast_stream.wait_event(
-                        self._pool_scatter_ev[slot]
-                    )
+                    self.broadcast_stream.wait_event(self._pool_scatter_ev[slot])
 
                 merged = self._merged_pool[slot]
                 shard_bytes = sum(s for _, _, s in layout)
@@ -449,7 +460,10 @@ class AscendLMCacheEngine(LMCacheEngine):
                 with torch.npu.stream(self.broadcast_stream):
                     if is_sender:
                         objs, starts, ends = self._fill_shard_sender(
-                            merged, layout, meta_table, reordered_chunks,
+                            merged,
+                            layout,
+                            meta_table,
+                            reordered_chunks,
                         )
                         self.broadcast_fn(
                             merged[:shard_bytes], self.metadata.first_rank
@@ -459,7 +473,10 @@ class AscendLMCacheEngine(LMCacheEngine):
                             merged[:shard_bytes], self.metadata.first_rank
                         )
                         objs, starts, ends = self._fill_shard_receiver(
-                            merged, layout, meta_table, ret_mask,
+                            merged,
+                            layout,
+                            meta_table,
+                            ret_mask,
                         )
 
                     ev_bc = torch.npu.Event()
@@ -474,6 +491,9 @@ class AscendLMCacheEngine(LMCacheEngine):
                 _submit_togpu(prev_ctx)
 
         finally:
+            # All to_gpu events in pending depend (transitively) on the
+            # H2D copies on broadcast_stream, so once these synchronize
+            # the CPU mem_objs are safe to release.
             for objs, ev in pending:
                 try:
                     ev.synchronize()
@@ -485,6 +505,15 @@ class AscendLMCacheEngine(LMCacheEngine):
                     except Exception:
                         pass
             pending.clear()
+
+            # Sender-only: release the original CPU mem_objs whose
+            # raw_tensor was H2D-copied into the merged buffer.
+            if is_sender:
+                for _, mem_obj, _, _ in reordered_chunks:
+                    try:
+                        mem_obj.ref_count_down()
+                    except Exception:
+                        pass
 
     @torch.inference_mode()
     def retrieve(
@@ -575,14 +604,19 @@ class AscendLMCacheEngine(LMCacheEngine):
                 )
 
         # --- Cleanup ---
+        # When save_only_first_rank is set, the sharded-broadcast pipeline
+        # takes ownership of the sender's CPU mem_objs (it releases them in
+        # its finally block after the H2D copies complete).  So we skip the
+        # ref_count_down here for the sender to avoid double-free.
+        skip_refcnt = self.save_only_first_rank and self.metadata.is_first_rank()
         for key, memory_obj, _, _ in reordered_chunks:
             if self.remove_after_retrieve and not self._is_passive():
                 if self.storage_manager is None:
                     raise ValueError("storage_manager is required for remove")
                 self.storage_manager.remove(key, self.retrieve_locations)
-                if self._is_sync_pd_backend():
+                if self._is_sync_pd_backend() and not skip_refcnt:
                     memory_obj.ref_count_down()
-            elif not self.async_loading:
+            elif not self.async_loading and not skip_refcnt:
                 memory_obj.ref_count_down()
 
         retrieved_tokens = torch.sum(ret_mask)
@@ -602,9 +636,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 len(tokens),
                 tot_kv_size / 1024**3,
                 onload_time * 1000,
-                tot_kv_size / onload_time / 1024**3
-                if onload_time > 0
-                else 0,
+                tot_kv_size / onload_time / 1024**3 if onload_time > 0 else 0,
             )
         return ret_mask
 
