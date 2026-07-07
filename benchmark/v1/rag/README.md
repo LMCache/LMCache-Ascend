@@ -1,5 +1,7 @@
 # Benchmarking LLM Performance: RAG Use Case
 
+Compatibility note: This feature has been developed and tested against `vllm-ascend v0.18.0`.
+
 ## Some ad-hoc changes needed in vLLM-Ascend for CacheBlend Integration
 These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
 

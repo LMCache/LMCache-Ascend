@@ -1240,6 +1240,12 @@ def run_batched_queries(
             else build_empty_layer_timer_metrics(DEFAULT_LAYER_TIMER_LAYERS)
         )
         timer_rows.append(timer_metrics)
+        if not output.outputs:
+            logger.warning(
+                "Skipping request %s because vLLM returned no outputs.",
+                req_id,
+            )
+            continue
         output_str = output.outputs[0].text
         answers = meta['answers']
 

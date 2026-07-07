@@ -538,11 +538,12 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         yield None
 
-        next(mem_obj_consumer)
+        if keys:
+            next(mem_obj_consumer)
 
-        for mem_obj in to_count_down:
-            if mem_obj.is_pinned:
-                mem_obj.unpin()
+            for mem_obj in to_count_down:
+                if mem_obj.is_pinned:
+                    mem_obj.unpin()
 
         retrieved_tokens = torch.sum(ret_mask)
         self.stats_monitor.on_retrieve_finished(monitor_req_id, retrieved_tokens)

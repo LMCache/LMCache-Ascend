@@ -816,17 +816,25 @@ def _patch_api_server():
 
 
 def _patch_trace_utils_compat():
+    # First Party
+    from lmcache_ascend.v1 import trace_utils_compat as _compat
+
     try:
         # Third Party
-        import lmcache.v1.trace_utils  # noqa: F401
+        import lmcache.v1.trace_utils as _upstream
     except ModuleNotFoundError as exc:
         if exc.name != "lmcache.v1.trace_utils":
             raise
+        # Upstream module missing — install our compat module as a full stand-in
+        sys.modules["lmcache.v1.trace_utils"] = _compat
+        return
 
-        # First Party
-        from lmcache_ascend.v1 import trace_utils_compat
-
-        sys.modules["lmcache.v1.trace_utils"] = trace_utils_compat
+    # Upstream exists — backfill any symbols it's missing from our compat
+    for attr in dir(_compat):
+        if attr.startswith("_"):
+            continue
+        if not hasattr(_upstream, attr):
+            setattr(_upstream, attr, getattr(_compat, attr))
 
 
 # Check if we've already patched to avoid redundant work

@@ -55,7 +55,7 @@ def parse_npu_process_info(npu_id, chip_id):
 def get_mem(npu_id, chip_id=0):
     try:
         return parse_npu_process_info(npu_id,chip_id)['memory_mb']
-    except:
+    except Exception:
         return -1
 
 def report_npu_tensors2():
