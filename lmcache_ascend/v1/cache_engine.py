@@ -184,6 +184,33 @@ class AscendLMCacheEngine(LMCacheEngine):
                 remaining.append((objs, ev))
         pending[:] = remaining
 
+    def _submit_togpu(
+        self,
+        ctx: Tuple[List[MemoryObj], List[int], List[int], "torch.npu.Event", int, int],
+        load_stream: "torch.npu.Stream",
+        pending: List[Tuple[List[MemoryObj], "torch.npu.Event"]],
+        **kwargs,
+    ) -> None:
+        """Enqueue ctx's to_gpu on load_stream and release its slot."""
+        objs, starts, ends, ev_bc, idx, slot = ctx
+        load_stream.wait_event(ev_bc)
+        with torch.npu.stream(load_stream):
+            for obj, s, e in zip(objs, starts, ends, strict=False):
+                self.gpu_connector.to_gpu(obj, s, e, **kwargs)
+            ev_togpu = torch.npu.Event()
+            ev_togpu.record()
+        # Record scatter completion so the next broadcast reusing
+        # this slot waits for it.
+        self._pool_scatter_ev[slot].record(load_stream)
+        pending.append((objs, ev_togpu))
+        self._try_release_pending(pending)
+        logger.debug(
+            "rank=%d shard[%d] cnt=%d submitted",
+            self.metadata.worker_id,
+            idx,
+            len(objs),
+        )
+
     # Ping-pong merged-buffer pool for batched broadcast.  Two slots
     # suffice: while slot A's to_gpu runs on load_stream, slot B
     # receives the next shard's broadcast on broadcast_stream.
@@ -422,27 +449,6 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
 
-        def _submit_togpu(ctx):
-            """Enqueue ctx's to_gpu on load_stream and release its slot."""
-            objs, starts, ends, ev_bc, idx, slot = ctx
-            load_stream.wait_event(ev_bc)
-            with torch.npu.stream(load_stream):
-                for obj, s, e in zip(objs, starts, ends, strict=False):
-                    self.gpu_connector.to_gpu(obj, s, e, **kwargs)
-                ev_togpu = torch.npu.Event()
-                ev_togpu.record()
-            # Record scatter completion so the next broadcast reusing
-            # this slot waits for it.
-            self._pool_scatter_ev[slot].record(load_stream)
-            pending.append((objs, ev_togpu))
-            self._try_release_pending(pending)
-            logger.debug(
-                "rank=%d shard[%d] cnt=%d submitted",
-                self.metadata.worker_id,
-                idx,
-                len(objs),
-            )
-
         prev_ctx = None
         try:
             for shard_idx, _ in enumerate(shard_plan):
@@ -484,21 +490,15 @@ class AscendLMCacheEngine(LMCacheEngine):
 
                 # Now that broadcast[N+1] is enqueued, submit to_gpu[N].
                 if prev_ctx is not None:
-                    _submit_togpu(prev_ctx)
+                    self._submit_togpu(prev_ctx, load_stream, pending, **kwargs)
                 prev_ctx = (objs, starts, ends, ev_bc, shard_idx, slot)
 
             if prev_ctx is not None:
-                _submit_togpu(prev_ctx)
+                self._submit_togpu(prev_ctx, load_stream, pending, **kwargs)
 
         finally:
-            # All to_gpu events in pending depend (transitively) on the
-            # H2D copies on broadcast_stream, so once these synchronize
-            # the CPU mem_objs are safe to release.
-            for objs, ev in pending:
-                try:
-                    ev.synchronize()
-                except Exception:
-                    pass
+            load_stream.synchronize()
+            for objs, _ in pending:
                 for obj in objs:
                     try:
                         obj.ref_count_down()
