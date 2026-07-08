@@ -4,10 +4,7 @@ from enum import Enum, auto
 from typing import List, Tuple, Union
 
 # Third Party
-from lmcache.logging import init_logger
 import torch
-
-logger = init_logger(__name__)
 
 
 class KVCacheFormat(Enum):
@@ -120,10 +117,6 @@ class KVCacheFormat(Enum):
                 k_cache, v_cache, dsa_k_cache = first_cache
                 if all(isinstance(t, torch.Tensor) for t in first_cache):
                     if k_cache.shape != v_cache.shape:
-                        logger.debug(
-                            f"Detected DSA_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
-                        )
                         return KVCacheFormat.DSA_KV
 
             # MLA_KV or SEPARATE_KV: tuple with 2 elements
@@ -134,10 +127,6 @@ class KVCacheFormat(Enum):
                 ):
                     # MLA_KV: K/V shapes differ
                     if k_cache.shape != v_cache.shape:
-                        logger.debug(
-                            f"Detected MLA_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}"
-                        )
                         return KVCacheFormat.MLA_KV
                     # SEPARATE_KV: K/V shapes are same
                     return KVCacheFormat.SEPARATE_KV

@@ -194,22 +194,15 @@ class AscendLMCacheEngine(LMCacheEngine):
         """Enqueue ctx's to_gpu on load_stream and release its slot."""
         objs, starts, ends, ev_bc, idx, slot = ctx
         load_stream.wait_event(ev_bc)
+        t_h2d = time.perf_counter()
         with torch.npu.stream(load_stream):
             for obj, s, e in zip(objs, starts, ends, strict=False):
                 self.gpu_connector.to_gpu(obj, s, e, **kwargs)
             ev_togpu = torch.npu.Event()
             ev_togpu.record()
-        # Record scatter completion so the next broadcast reusing
-        # this slot waits for it.
         self._pool_scatter_ev[slot].record(load_stream)
         pending.append((objs, ev_togpu))
         self._try_release_pending(pending)
-        logger.debug(
-            "rank=%d shard[%d] cnt=%d submitted",
-            self.metadata.worker_id,
-            idx,
-            len(objs),
-        )
 
     # Ping-pong merged-buffer pool for batched broadcast.  Two slots
     # suffice: while slot A's to_gpu runs on load_stream, slot B
@@ -464,6 +457,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 shard_bytes = sum(s for _, _, s in layout)
 
                 with torch.npu.stream(self.broadcast_stream):
+                    t_bc = time.perf_counter()
                     if is_sender:
                         objs, starts, ends = self._fill_shard_sender(
                             merged,
@@ -484,13 +478,23 @@ class AscendLMCacheEngine(LMCacheEngine):
                             meta_table,
                             ret_mask,
                         )
-
                     ev_bc = torch.npu.Event()
                     ev_bc.record()
+                    bc_ms = (time.perf_counter() - t_bc) * 1000
 
                 # Now that broadcast[N+1] is enqueued, submit to_gpu[N].
                 if prev_ctx is not None:
+                    t_enqueue = time.perf_counter()
                     self._submit_togpu(prev_ctx, load_stream, pending, **kwargs)
+                    enqueue_ms = (time.perf_counter() - t_enqueue) * 1000
+                    logger.debug(
+                        "rank=%d shard[%d] cnt=%d bc=%.2fms enqueue=%.2fms",
+                        self.metadata.worker_id,
+                        shard_idx - 1,
+                        len(prev_ctx[0]),
+                        bc_ms,
+                        enqueue_ms,
+                    )
                 prev_ctx = (objs, starts, ends, ev_bc, shard_idx, slot)
 
             if prev_ctx is not None:
