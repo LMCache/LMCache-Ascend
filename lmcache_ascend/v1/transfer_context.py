@@ -20,6 +20,7 @@ Subclasses only need to implement :meth:`_send_done`.
 # Standard
 from typing import Any, List, Optional
 import asyncio
+import concurrent.futures
 import threading
 
 # Third Party
@@ -214,7 +215,15 @@ class P2PTransferContext(AscendBaseTransferContext):
         return self._target_peer_url
 
     def _send_done(self) -> None:
-        """Send the Done signal to the remote peer via the event loop."""
+        """Schedule the Done signal on the P2P loop without blocking callers.
+
+        Delay-pull cleanup runs on the connector host thread after stream work
+        has been queued. Blocking that thread on ``future.result(timeout=...)``
+        creates a bad failure mode under load: a temporarily delayed P2P loop
+        makes this context mark Done as sent, time out locally, and never retry,
+        leaving sender-side resources pinned until TTL. Fire-and-log preserves
+        idempotence while letting the P2P loop drain the Done socket when it can.
+        """
         try:
             coro = self._p2p_backend._send_done_signal(
                 self._lookup_id,
@@ -226,12 +235,33 @@ class P2PTransferContext(AscendBaseTransferContext):
                 running_loop = None
 
             if running_loop is self._loop:
-                self._loop.create_task(coro)
+                task = self._loop.create_task(coro)
+                task.add_done_callback(self._log_done_result)
                 return
 
             future = asyncio.run_coroutine_threadsafe(coro, self._loop)
-            timeout_s = getattr(self._p2p_backend, "p2p_done_timeout_s", 5.0)
-            future.result(timeout=timeout_s)
+            future.add_done_callback(self._log_done_result)
+        except Exception as e:
+            logger.error(
+                "Failed to schedule P2P Done signal for lookup_id %s: %s",
+                self._lookup_id,
+                e,
+            )
+
+    def _log_done_result(
+        self,
+        future: "asyncio.Future[Any] | concurrent.futures.Future[Any]",
+    ) -> None:
+        try:
+            future.result()
+        except asyncio.CancelledError:
+            logger.warning(
+                "P2P Done signal cancelled for lookup_id %s", self._lookup_id
+            )
+        except concurrent.futures.CancelledError:
+            logger.warning(
+                "P2P Done signal cancelled for lookup_id %s", self._lookup_id
+            )
         except Exception as e:
             logger.error(
                 "Failed to send P2P Done signal for lookup_id %s: %s",

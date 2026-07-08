@@ -270,68 +270,75 @@ class HcclChannel(BaseMultiBufferChannel):
             "connect",
         )
 
-        # The async transfer-channel loop may run on a different thread from the
-        # vLLM worker thread. NPU current device is thread-local.
-        torch.npu.set_device(self.handle_device)
+        try:
+            # The async transfer-channel loop may run on a different thread from
+            # the vLLM worker thread. NPU current device is thread-local.
+            torch.npu.set_device(self.handle_device)
 
-        hccl_init_req = HcclInitRequest(
-            local_id=local_id,
-            client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
-        )
-        await init_tmp_socket.send(msgspec.msgpack.encode(hccl_init_req))
-
-        # Wait remote agent metadata and connect to remote agent
-        hccl_init_resp_bytes = await init_tmp_socket.recv()
-        hccl_init_resp = msgspec.msgpack.decode(hccl_init_resp_bytes, type=HcclMsg)
-        server_meta = pickle.loads(hccl_init_resp.server_meta_bytes)
-
-        conn_handle = self.hccl_agent.connect(server_meta)
-        with self._state_lock:
-            self.conn_handles_dict[peer_id] = conn_handle
-
-        # Exchange and register memory with peer
-        mem_handles = self.hccl_wrapper.mem_handles
-
-        hccl_mem_reg_req = HcclMemRegRequest(
-            local_id=local_id,
-            client_mem_handle_bytes=pickle.dumps(mem_handles),
-        )
-        await init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
-        hccl_mem_reg_resp_bytes = await init_tmp_socket.recv()
-        hccl_mem_reg_resp = msgspec.msgpack.decode(
-            hccl_mem_reg_resp_bytes, type=HcclMsg
-        )
-        server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-
-        if not isinstance(server_mem_handles, list):
-            server_mem_handles = [server_mem_handles]
-
-        for handle in server_mem_handles:
-            self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
-
-        with self._state_lock:
-            self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(
-                server_mem_handles
+            hccl_init_req = HcclInitRequest(
+                local_id=local_id,
+                client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
             )
+            await init_tmp_socket.send(msgspec.msgpack.encode(hccl_init_req))
 
-        ready_req = HcclReadyRequest(local_id=local_id)
-        await init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
-        ready_bytes = await init_tmp_socket.recv()
-        ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcclMsg)
-        if isinstance(ready_resp, HcclReadyResponse) and not ready_resp.ok:
-            raise ConnectionError(
-                f"Server failed to complete handshake for peer {peer_id}"
+            # Wait remote agent metadata and connect to remote agent
+            hccl_init_resp_bytes = await init_tmp_socket.recv()
+            hccl_init_resp = msgspec.msgpack.decode(hccl_init_resp_bytes, type=HcclMsg)
+            server_meta = pickle.loads(hccl_init_resp.server_meta_bytes)
+
+            conn_handle = self.hccl_agent.connect(server_meta)
+            with self._state_lock:
+                self.conn_handles_dict[peer_id] = conn_handle
+
+            # Exchange and register memory with peer
+            mem_handles = self.hccl_wrapper.mem_handles
+
+            hccl_mem_reg_req = HcclMemRegRequest(
+                local_id=local_id,
+                client_mem_handle_bytes=pickle.dumps(mem_handles),
             )
-
-        init_ret_msg: Optional[InitSideRetMsgBase] = None
-        if init_side_msg is not None:
-            init_ret_msg = await self.async_send_init_side_msg(
-                init_tmp_socket,
-                init_side_msg,
+            await init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
+            hccl_mem_reg_resp_bytes = await init_tmp_socket.recv()
+            hccl_mem_reg_resp = msgspec.msgpack.decode(
+                hccl_mem_reg_resp_bytes, type=HcclMsg
             )
+            server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
 
-        init_tmp_socket.close()
-        return init_ret_msg
+            if not isinstance(server_mem_handles, list):
+                server_mem_handles = [server_mem_handles]
+
+            for handle in server_mem_handles:
+                self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
+
+            with self._state_lock:
+                self.remote_index_addr_dict[peer_id] = RemotePeerBufferList(
+                    server_mem_handles
+                )
+
+            ready_req = HcclReadyRequest(local_id=local_id)
+            await init_tmp_socket.send(msgspec.msgpack.encode(ready_req))
+            ready_bytes = await init_tmp_socket.recv()
+            ready_resp = msgspec.msgpack.decode(ready_bytes, type=HcclMsg)
+            if isinstance(ready_resp, HcclReadyResponse) and not ready_resp.ok:
+                raise ConnectionError(
+                    f"Server failed to complete handshake for peer {peer_id}"
+                )
+
+            init_ret_msg: Optional[InitSideRetMsgBase] = None
+            if init_side_msg is not None:
+                init_ret_msg = await self.async_send_init_side_msg(
+                    init_tmp_socket,
+                    init_side_msg,
+                )
+
+            return init_ret_msg
+        except BaseException:
+            with self._state_lock:
+                self.conn_handles_dict.pop(peer_id, None)
+                self.remote_index_addr_dict.pop(peer_id, None)
+            raise
+        finally:
+            init_tmp_socket.close()
 
     def remote_xfer_handler_exists(self, receiver_or_sender_id: str) -> bool:
         return receiver_or_sender_id in self.conn_handles_dict

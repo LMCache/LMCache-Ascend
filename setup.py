@@ -96,7 +96,7 @@ def _is_cann_85_or_later(cann_version_tuple):
     if os.path.exists(new_path) and not os.path.exists(old_path):
         logger.warning(
             "CANN version detection failed but set_env.sh location "
-            "suggests CANN >= 8.5 — building with HIXL/hcomm_onesided. "
+            "suggests CANN >= 8.5 — building HIXL and HCCL. "
             "Set USE_HIXL=0 to override."
         )
         return True
@@ -350,7 +350,6 @@ class CustomAscendCmakeBuildExt(build_ext):
 
         if self._cann_version_8_5:
             cmake_cmd += ["  -DUSE_HIXL=ON"]
-            cmake_cmd += ["  -DUSE_HCOMM_ONESIDED=ON"]
 
         if _cxx_compiler is not None:
             cmake_cmd += [f"  -DCMAKE_CXX_COMPILER={_cxx_compiler}"]
@@ -379,7 +378,6 @@ class CustomAscendCmakeBuildExt(build_ext):
         if self._cann_version_8_5:
             expected_patterns.append("hccl_npu_comms*.so")
             expected_patterns.append("hixl_npu_comms*.so")
-            expected_patterns.append("hcomm_onesided*.so")
 
         # Search for files matching our patterns
         so_files = []

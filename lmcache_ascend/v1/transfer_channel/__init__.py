@@ -106,7 +106,7 @@ def CreateTransferChannel(
     Create a transfer channel based on the specified channel type.
 
     :param channel_type: Type of the transfer channel
-        (e.g., "hccl", "hixl", "hcomm_onesided").
+        (e.g., "hccl", "hixl").
     :param async_mode: Whether to operate in asynchronous mode.
     :param role: Role of the channel (e.g., "both", "sender" or "receiver").
     :param buffer_ptr: Pointer(s) to the pre-allocated buffer(s).
@@ -122,7 +122,6 @@ def CreateTransferChannel(
     assert channel_type in [
         "hccl",
         "hixl",
-        "hcomm_onesided",
     ], f"Unsupported channel type: {channel_type}"
 
     buffer_type = kwargs.pop("buffer_type", [])
@@ -135,20 +134,6 @@ def CreateTransferChannel(
         from lmcache_ascend.v1.transfer_channel.hixl_channel import HixlChannel
 
         return HixlChannel(
-            async_mode=async_mode,
-            buffers=buffer_configs,
-            role=role,
-            tp_rank=tp_rank,
-            peer_init_url=peer_init_url,
-            **kwargs,
-        )
-    elif channel_type == "hcomm_onesided":
-        # First Party
-        from lmcache_ascend.v1.transfer_channel.hcomm_onesided_channel import (
-            HcommOneSidedChannel,
-        )
-
-        return HcommOneSidedChannel(
             async_mode=async_mode,
             buffers=buffer_configs,
             role=role,

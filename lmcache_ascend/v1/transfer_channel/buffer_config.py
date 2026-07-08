@@ -30,8 +30,7 @@ class MemHandleMeta:
     """Transport-agnostic metadata for a registered memory buffer.
 
     Each channel implementation stores an opaque library-specific handle
-    in ``mem_handle`` (e.g. ``hcomm.RmaMemDesc``, ``int`` for hixl /
-    hcomm_onesided).
+    in ``mem_handle`` (e.g. ``hcomm.RmaMemDesc``, ``int`` for hixl).
     """
 
     mem_handle: Any
