@@ -290,14 +290,18 @@ class AscendP2PBackend(P2PBackend):
         self._pull_lease_guard_s: float = float(
             config.get_extra_config_value("p2p_pull_lease_guard_s", 15.0)
         )
+        self._validate_host_staging_mode(
+            self.use_host_staging,
+            self.pull_mode,
+            self.delay_pull,
+            self.use_npu,
+        )
         if self.use_host_staging:
-            assert self.delay_pull, (
-                "use_host_staging requires p2p_delay_pull=True because the "
-                "reader must use ping-pong buffers when the producer CPU KV "
-                "pool is not registered."
-            )
             logger.info(
-                "P2P host staging enabled (lease_ttl=%.1fs, guard=%.1fs)",
+                "P2P host-staging enabled (arena-backed one-sided reads, "
+                "delay_pull=%s use_npu=%s lease_ttl=%.1fs guard=%.1fs).",
+                self.delay_pull,
+                self.use_npu,
                 self._pull_pending_ttl,
                 self._pull_lease_guard_s,
             )
@@ -453,6 +457,22 @@ class AscendP2PBackend(P2PBackend):
         )
         asyncio.run_coroutine_threadsafe(
             self._sweep_expired_pending_pull_resources(), self.loop
+        )
+
+    @staticmethod
+    def _validate_host_staging_mode(
+        use_host_staging: bool,
+        pull_mode: bool,
+        delay_pull: bool,
+        use_npu: bool,
+    ) -> None:
+        if not use_host_staging:
+            return
+        assert pull_mode, "use_host_staging requires p2p_pull_mode=True"
+        assert delay_pull or not use_npu, (
+            "use_host_staging with p2p_delay_pull=False currently supports "
+            "p2p_use_npu=False only. p2p_use_npu=True eager host-staging "
+            "pull is deferred."
         )
 
     def _is_on_p2p_loop(self) -> bool:
@@ -1606,6 +1626,7 @@ class AscendP2PBackend(P2PBackend):
         hit_mem_objs: list[MemoryObj],
         remote_buffer_uuids: list[str],
         remote_mem_indexes: list[int],
+        lease_ttl_s: float = 0.0,
     ) -> bool:
         """Execute pull-mode: read data from remote, then send Done signal.
 
@@ -1619,18 +1640,53 @@ class AscendP2PBackend(P2PBackend):
             )
             return False
 
+        if lease_ttl_s > 0.0 and lease_ttl_s <= self._pull_lease_guard_s:
+            logger.error(
+                "P2P pull lease too short for lookup_id %s "
+                "(ttl=%.1fs guard=%.1fs); aborting read.",
+                lookup_id,
+                lease_ttl_s,
+                self._pull_lease_guard_s,
+            )
+            await self._send_done_signal(lookup_id, target_peer_url)
+            return False
+
         read_success = False
+        staging_objs: list[MemoryObj] = []
         try:
             channel_transfer_spec = build_channel_transfer_spec(
                 target_peer_url,
                 remote_buffer_uuids,
                 remote_mem_indexes,
             )
-            await self.transfer_channel.async_batched_read(
-                buffers=hit_mem_objs,
-                transfer_spec=channel_transfer_spec,
-            )
-            read_success = True
+            if self.use_host_staging and not self.delay_pull and not self.use_npu:
+                staging_objs = self.transfer_channel.allocate_receiver_staging(
+                    hit_mem_objs
+                )
+                if len(staging_objs) != len(hit_mem_objs):
+                    logger.warning(
+                        "Receiver host-staging arena could allocate only %d/%d "
+                        "slots for lookup_id %s; treating as miss.",
+                        len(staging_objs),
+                        len(hit_mem_objs),
+                        lookup_id,
+                    )
+                else:
+                    await self.transfer_channel.async_batched_read(
+                        buffers=staging_objs,
+                        transfer_spec=channel_transfer_spec,
+                    )
+                    await self.transfer_channel.copy_receiver_staging_to(
+                        staging_objs,
+                        hit_mem_objs,
+                    )
+                    read_success = True
+            else:
+                await self.transfer_channel.async_batched_read(
+                    buffers=hit_mem_objs,
+                    transfer_spec=channel_transfer_spec,
+                )
+                read_success = True
         except Exception as e:
             logger.error(
                 "Error during P2P batched read operation for lookup_id %s: %s",
@@ -1639,6 +1695,18 @@ class AscendP2PBackend(P2PBackend):
                 exc_info=True,
             )
             # Do not return yet — must send Done signal to server
+        finally:
+            if staging_objs:
+                try:
+                    self.transfer_channel.release_staged(staging_objs)
+                except Exception as e:
+                    logger.error(
+                        "Failed to release receiver host-staging slots for "
+                        "lookup_id %s: %s",
+                        lookup_id,
+                        e,
+                        exc_info=True,
+                    )
 
         await self._send_done_signal(lookup_id, target_peer_url)
         return read_success
@@ -1679,9 +1747,15 @@ class AscendP2PBackend(P2PBackend):
                     lookup_id,
                 )
                 return []
-            local_buffer_uuids, local_mem_indexes = (
-                self.transfer_channel.get_local_buffer_refs(mem_objs)
-            )
+            if self.pull_mode and self.use_host_staging:
+                # Pull mode ignores receiver buffer refs. Under host staging
+                # the final CPU objects are intentionally not registered with
+                # the channel, so refs would fail to resolve.
+                local_buffer_uuids, local_mem_indexes = [], []
+            else:
+                local_buffer_uuids, local_mem_indexes = (
+                    self.transfer_channel.get_local_buffer_refs(mem_objs)
+                )
 
         msg = AscendBatchedLookupAndGetMsg(
             lookup_id=lookup_id,
@@ -1766,6 +1840,7 @@ class AscendP2PBackend(P2PBackend):
                     hit_mem_objs,
                     ret_msg.remote_buffer_uuids,
                     ret_msg.remote_mem_indexes,
+                    ret_msg.lease_ttl_s,
                 )
             )
             if not success:
