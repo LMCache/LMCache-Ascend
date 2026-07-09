@@ -109,8 +109,9 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         self._device_id: Optional[int] = None
 
+        # None means auto-estimate in post_init based on available NPU memory.
         self._broadcast_shard_size = self.config.get_extra_config_value(
-            "broadcast_shard_size", 16
+            "broadcast_shard_size", None
         )
 
         if self.kv_events_enabled and self.is_store_async:
@@ -142,11 +143,60 @@ class AscendLMCacheEngine(LMCacheEngine):
         # Override upstream broadcast_stream with a dedicated NPU stream
         # so broadcast and to_gpu can execute on separate streams.
         if self.save_only_first_rank and hasattr(self.gpu_connector, "load_stream"):
+            # Auto-estimate or validate shard_size now that model weights
+            # are loaded and NPU memory state is stable.
+            estimated = self._estimate_shard_size()
+            if self._broadcast_shard_size is not None:
+                if self._broadcast_shard_size > estimated:
+                    logger.warning(
+                        "broadcast_shard_size=%d may cause NPU OOM "
+                        "(estimated safe max=%d)",
+                        self._broadcast_shard_size, estimated,
+                    )
+            else:
+                self._broadcast_shard_size = estimated
+
             self.broadcast_stream = torch.npu.Stream()
             logger.info(
                 "Ascend broadcast stream initialized: shard_size=%d",
                 self._broadcast_shard_size,
             )
+
+    def _estimate_shard_size(self) -> int:
+        """Estimate a safe ``broadcast_shard_size`` from available NPU memory.
+
+        Uses 1/4 of the free memory as the pool budget so the remainder
+        is reserved for KV-cache growth and temporary buffers.
+
+        Returns the estimated shard size, clamped to [1, 8].
+        """
+        chunk_size = self.metadata.chunk_size
+        shapes = self.metadata.get_shapes(chunk_size)
+        dtypes = self.metadata.get_dtypes()
+
+        from lmcache.integration.vllm.utils import get_size_bytes
+        per_chunk_bytes = get_size_bytes(shapes, dtypes)
+
+        device = self.metadata.worker_id
+        props = torch.npu.get_device_properties(device)
+        total_mem = props.total_memory
+        allocated = torch.npu.memory_allocated(device)
+        available = total_mem - allocated
+        pool_budget = available // 4
+
+        max_shard = int(pool_budget // (2 * per_chunk_bytes))
+        recommended = max(1, min(max_shard, 16))
+
+        logger.info(
+            "Estimated broadcast_shard_size=%d "
+            "(per_chunk=%.1f MB, available=%.2f GB, "
+            "pool_budget=%.2f GB)",
+            recommended,
+            per_chunk_bytes / 1024 ** 2,
+            available / 1024 ** 3,
+            pool_budget / 1024 ** 3,
+        )
+        return recommended
 
     def _build_shard_plan(
         self,
@@ -369,7 +419,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             meta = mem_obj.metadata
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst.view(meta.dtype).view(meta.shape),
+                    raw_data=dst,
                     metadata=MemoryObjMetadata(
                         shape=meta.shape,
                         dtype=meta.dtype,
@@ -406,7 +456,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             dst = merged[byte_off : byte_off + byte_size]
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst.view(metadata.dtype).view(metadata.shape),
+                    raw_data=dst,
                     metadata=metadata,
                     parent_allocator=None,
                 )
