@@ -399,14 +399,18 @@ class HcclChannel(BaseMultiBufferChannel):
             # MemReg can arrive before that thread publishes conn_handle —
             # wait for the handshake ready event first.
             event = self._peer_ready_events.get(req.local_id)
-            if event is not None and not event.wait(timeout=120):
+            if event is None:
+                raise ConnectionError(
+                    f"No handshake initiated for peer {req.local_id}"
+                )
+            if not event.wait(timeout=120):
                 raise TimeoutError(
                     f"Timed out waiting for HCCL accept for peer {req.local_id}"
                 )
 
             with self._state_lock:
                 if req.local_id not in self.conn_handles_dict:
-                    raise KeyError(
+                    raise ConnectionError(
                         f"HCCL conn_handle missing for peer {req.local_id} "
                         "after handshake wait"
                     )
