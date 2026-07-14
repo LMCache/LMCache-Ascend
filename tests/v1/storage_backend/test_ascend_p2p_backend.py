@@ -8,6 +8,7 @@ NPU devices and are gated with ``@pytest.mark.skipif``.
 
 # Standard
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 import asyncio
 import threading
@@ -104,8 +105,8 @@ def _make_p2p_backend_stub(
     delay_pull: bool = False,
     use_npu: bool = False,
     peer_init_url: str = "localhost:5000",
-    kv_shapes: list = None,
-    kv_dtypes: list = None,
+    kv_shapes: Optional[List] = None,
+    kv_dtypes: Optional[List] = None,
     fmt: MemoryFormat = MemoryFormat.KV_2LTD,
     save_unfull_chunk: bool = False,
 ) -> MagicMock:
@@ -156,20 +157,26 @@ def _make_p2p_backend_stub(
     backend._allocate_memory_for_keys = lambda keys, cum_chunk_lengths: (
         AscendP2PBackend._allocate_memory_for_keys(backend, keys, cum_chunk_lengths)
     )
-    backend._handle_pull_mode_transfer = (
-        lambda lookup_id, target_peer_url, hit_mem_objs, remote_buffer_uuids,
-        remote_mem_indexes, lease_ttl_s=0.0: (
-            AscendP2PBackend._handle_pull_mode_transfer(
-                backend,
-                lookup_id,
-                target_peer_url,
-                hit_mem_objs,
-                remote_buffer_uuids,
-                remote_mem_indexes,
-                lease_ttl_s,
-            )
+
+    def _handle_pull_mode_transfer(
+        lookup_id,
+        target_peer_url,
+        hit_mem_objs,
+        remote_buffer_uuids,
+        remote_mem_indexes,
+        lease_ttl_s=0.0,
+    ):
+        return AscendP2PBackend._handle_pull_mode_transfer(
+            backend,
+            lookup_id,
+            target_peer_url,
+            hit_mem_objs,
+            remote_buffer_uuids,
+            remote_mem_indexes,
+            lease_ttl_s,
         )
-    )
+
+    backend._handle_pull_mode_transfer = _handle_pull_mode_transfer
 
     return backend
 
@@ -232,9 +239,7 @@ class TestAscendP2PBackendUnit:
         # First Party
         from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
-        with pytest.raises(
-            AssertionError, match="requires p2p_pull_mode=True"
-        ):
+        with pytest.raises(AssertionError, match="requires p2p_pull_mode=True"):
             AscendP2PBackend._validate_host_staging_mode(
                 True,
                 False,
