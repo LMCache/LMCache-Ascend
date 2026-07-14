@@ -11,6 +11,7 @@ import threading
 import time
 
 # Third Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
@@ -113,9 +114,6 @@ class AscendLMCacheEngine(LMCacheEngine):
         self._broadcast_shard_size = self.config.get_extra_config_value(
             "broadcast_shard_size", None
         )
-        self._preallocate_broadcast_pool = self.config.get_extra_config_value(
-            "preallocate_broadcast_pool", True
-        )
 
         if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
@@ -145,7 +143,12 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         # Override upstream broadcast_stream with a dedicated NPU stream
         # so broadcast and to_gpu can execute on separate streams.
-        if self.save_only_first_rank and hasattr(self.gpu_connector, "load_stream"):
+        if self.save_only_first_rank:
+            if not hasattr(self.gpu_connector, "load_stream"):
+                raise RuntimeError(
+                    "gpu_connector must have 'load_stream' when "
+                    "save_only_first_rank is True"
+                )
             # Auto-estimate or validate shard_size now that model weights
             # are loaded and NPU memory state is stable.
             if self._broadcast_shard_size is None:
@@ -159,16 +162,17 @@ class AscendLMCacheEngine(LMCacheEngine):
                         "(1) reduce broadcast_shard_size to <= %d; "
                         "(2) or increase --gpu-memory-utilization appropriately "
                         "(note: KV cache also uses free memory, do not set too high)",
-                        self._broadcast_shard_size, estimated, estimated,
+                        self._broadcast_shard_size,
+                        estimated,
+                        estimated,
                     )
+                    self._broadcast_shard_size = estimated
 
             self.broadcast_stream = torch.npu.Stream()
             logger.info(
                 "Ascend broadcast stream initialized: shard_size=%d",
                 self._broadcast_shard_size,
             )
-            if self._preallocate_broadcast_pool:
-                self._preallocate_merged_pool()
 
     def _estimate_shard_size(self) -> int:
         """Estimate a safe ``broadcast_shard_size`` from available NPU memory.
@@ -181,8 +185,6 @@ class AscendLMCacheEngine(LMCacheEngine):
         chunk_size = self.metadata.chunk_size
         shapes = self.metadata.get_shapes(chunk_size)
         dtypes = self.metadata.get_dtypes()
-
-        from lmcache.integration.vllm.utils import get_size_bytes
         per_chunk_bytes = get_size_bytes(shapes, dtypes)
 
         device = self.metadata.worker_id
@@ -200,9 +202,9 @@ class AscendLMCacheEngine(LMCacheEngine):
             "(per_chunk=%.1f MB, available=%.2f GB, "
             "pool_budget=%.2f GB)",
             recommended,
-            per_chunk_bytes / 1024 ** 2,
-            available / 1024 ** 3,
-            pool_budget / 1024 ** 3,
+            per_chunk_bytes / 1024**2,
+            available / 1024**3,
+            pool_budget / 1024**3,
         )
         return recommended
 
@@ -267,85 +269,12 @@ class AscendLMCacheEngine(LMCacheEngine):
             len(objs),
         )
 
-    def _sync_pipeline_streams_to_current(
-        self,
-        load_stream: "torch.npu.Stream",
-    ) -> None:
-        """Fence pipeline streams before returning to model execution.
-
-        In graph mode / cross-machine scenarios, host synchronization alone
-        (``load_stream.synchronize()``) does not establish a device-side
-        dependency that the ACL graph replay can see.  We explicitly make
-        the current (model/graph) stream wait on both pipeline streams so
-        that subsequent model ops see the broadcast+scatter results.
-        """
-        current_stream = torch.npu.current_stream()
-        for stream in (self.broadcast_stream, load_stream):
-            if stream is not current_stream:
-                current_stream.wait_stream(stream)
-
     # Ping-pong merged-buffer pool for batched broadcast.  Two slots
     # suffice: while slot A's to_gpu runs on load_stream, slot B
     # receives the next shard's broadcast on broadcast_stream.
     _merged_pool: List["torch.Tensor"] = []
     _pool_scatter_ev: List["torch.npu.Event"] = []
     _pool_bytes: int = 0
-
-    def _broadcast_pool_device(self) -> str:
-        return f"npu:{self.metadata.worker_id}"
-
-    @staticmethod
-    def _dtype_nbytes(dtype: torch.dtype) -> int:
-        if dtype is torch.bool:
-            return 1
-        itemsize = getattr(dtype, "itemsize", None)
-        if itemsize is not None:
-            return int(itemsize)
-        try:
-            return int(torch.finfo(dtype).bits // 8)
-        except TypeError:
-            return int(torch.iinfo(dtype).bits // 8)
-
-    def _broadcast_pool_chunk_bytes(self) -> int:
-        """Estimate the byte size of a full chunk for preallocating buffers."""
-        chunk_size = getattr(self.config, "chunk_size", None)
-        if chunk_size is None:
-            chunk_size = self.metadata.kv_shape[2]
-        chunk_size = int(chunk_size)
-        kv_shapes = self.metadata.get_shapes(chunk_size)
-        kv_dtypes = self.metadata.get_dtypes()
-
-        total = 0
-        for shape, dtype in zip(kv_shapes, kv_dtypes, strict=False):
-            total += int(torch.Size(shape).numel()) * self._dtype_nbytes(dtype)
-        return total
-
-    def _preallocate_merged_pool(self) -> None:
-        if self._broadcast_shard_size <= 0:
-            return
-
-        try:
-            chunk_bytes = self._broadcast_pool_chunk_bytes()
-        except Exception as e:
-            logger.warning(
-                "rank=%d unable to preallocate broadcast merged-buffer pool; "
-                "will allocate on first use: %s",
-                self.metadata.worker_id,
-                e,
-            )
-            return
-        max_bytes = chunk_bytes * self._broadcast_shard_size
-        if max_bytes <= 0:
-            return
-
-        if self._ensure_merged_pool(max_bytes, self._broadcast_pool_device()):
-            logger.info(
-                "Ascend broadcast merged-buffer pool preallocated: "
-                "chunk_bytes=%d shard_size=%d bytes_per_slot=%d",
-                chunk_bytes,
-                self._broadcast_shard_size,
-                max_bytes,
-            )
 
     def _ensure_merged_pool(self, max_bytes: int, device: str) -> bool:
         """Allocate the 2-slot ping-pong pool if not yet created or if a
@@ -573,11 +502,12 @@ class AscendLMCacheEngine(LMCacheEngine):
         meta_table = plan["meta"]
         shard_plan = plan["shard_plan"]
         shard_layouts = plan["shard_layouts"]
-        device = self._broadcast_pool_device()
+        device = f"npu:{self.metadata.worker_id}"
         if not self._ensure_merged_pool(plan["max_shard_bytes"], device):
             raise RuntimeError(
-                "Unable to allocate Ascend broadcast merged-buffer pool "
-                f"({plan['max_shard_bytes']} bytes/slot) on {device}"
+                f"Failed to allocate merged broadcast pool on {device} "
+                f"({plan['max_shard_bytes']} bytes/slot). "
+                "Consider reducing broadcast_shard_size."
             )
 
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
@@ -631,12 +561,6 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         finally:
             load_stream.synchronize()
-            # Keep the model/graph stream ordered after all broadcast
-            # H2D copies and KV scatters. Host synchronization alone
-            # does not create a stream dependency visible to ACL graph
-            # replay, which can cause hangs on the first request in
-            # graph mode / cross-machine scenarios.
-            self._sync_pipeline_streams_to_current(load_stream)
             for objs, _ in pending:
                 for obj in objs:
                     try:
