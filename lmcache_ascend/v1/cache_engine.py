@@ -11,6 +11,7 @@ import threading
 import time
 
 # Third Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
@@ -142,19 +143,30 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         # Override upstream broadcast_stream with a dedicated NPU stream
         # so broadcast and to_gpu can execute on separate streams.
-        if self.save_only_first_rank and hasattr(self.gpu_connector, "load_stream"):
+        if self.save_only_first_rank:
+            if not hasattr(self.gpu_connector, "load_stream"):
+                raise RuntimeError(
+                    "gpu_connector must have 'load_stream' when "
+                    "save_only_first_rank is True"
+                )
             # Auto-estimate or validate shard_size now that model weights
             # are loaded and NPU memory state is stable.
-            estimated = self._estimate_shard_size()
-            if self._broadcast_shard_size is not None:
+            if self._broadcast_shard_size is None:
+                self._broadcast_shard_size = self._estimate_shard_size()
+            else:
+                estimated = self._estimate_shard_size()
                 if self._broadcast_shard_size > estimated:
                     logger.warning(
-                        "broadcast_shard_size=%d may cause NPU OOM "
-                        "(estimated safe max=%d)",
-                        self._broadcast_shard_size, estimated,
+                        "broadcast_shard_size=%d (user-set) may cause NPU OOM "
+                        "(estimated safe max=%d). Suggestions: "
+                        "(1) reduce broadcast_shard_size to <= %d; "
+                        "(2) or increase --gpu-memory-utilization appropriately "
+                        "(note: KV cache also uses free memory, do not set too high)",
+                        self._broadcast_shard_size,
+                        estimated,
+                        estimated,
                     )
-            else:
-                self._broadcast_shard_size = estimated
+                    self._broadcast_shard_size = estimated
 
             self.broadcast_stream = torch.npu.Stream()
             logger.info(
@@ -168,13 +180,11 @@ class AscendLMCacheEngine(LMCacheEngine):
         Uses 1/4 of the free memory as the pool budget so the remainder
         is reserved for KV-cache growth and temporary buffers.
 
-        Returns the estimated shard size, clamped to [1, 8].
+        Returns the estimated shard size, clamped to [1, 16].
         """
         chunk_size = self.metadata.chunk_size
         shapes = self.metadata.get_shapes(chunk_size)
         dtypes = self.metadata.get_dtypes()
-
-        from lmcache.integration.vllm.utils import get_size_bytes
         per_chunk_bytes = get_size_bytes(shapes, dtypes)
 
         device = self.metadata.worker_id
@@ -184,17 +194,33 @@ class AscendLMCacheEngine(LMCacheEngine):
         available = total_mem - allocated
         pool_budget = available // 4
 
+        if per_chunk_bytes <= 0:
+            raise RuntimeError(
+                f"Invalid per-chunk size {per_chunk_bytes} bytes; "
+                "cannot estimate broadcast_shard_size. "
+                "Check model config (shapes/dtypes)."
+            )
         max_shard = int(pool_budget // (2 * per_chunk_bytes))
-        recommended = max(1, min(max_shard, 16))
+        if max_shard <= 0:
+            raise RuntimeError(
+                f"NPU free memory insufficient for broadcast pool "
+                f"(available={available / 1024**3:.2f} GB, "
+                f"pool_budget={pool_budget / 1024**3:.2f} GB, "
+                f"per_chunk={per_chunk_bytes / 1024**2:.1f} MB; "
+                f"need at least {2 * per_chunk_bytes / 1024**2:.1f} MB "
+                f"pool budget for shard_size=1). "
+                "Consider reducing --gpu-memory-utilization or chunk_size."
+            )
+        recommended = min(max_shard, 16)
 
         logger.info(
             "Estimated broadcast_shard_size=%d "
             "(per_chunk=%.1f MB, available=%.2f GB, "
             "pool_budget=%.2f GB)",
             recommended,
-            per_chunk_bytes / 1024 ** 2,
-            available / 1024 ** 3,
-            pool_budget / 1024 ** 3,
+            per_chunk_bytes / 1024**2,
+            available / 1024**3,
+            pool_budget / 1024**3,
         )
         return recommended
 
@@ -244,7 +270,6 @@ class AscendLMCacheEngine(LMCacheEngine):
         """Enqueue ctx's to_gpu on load_stream and release its slot."""
         objs, starts, ends, ev_bc, idx, slot = ctx
         load_stream.wait_event(ev_bc)
-        t_h2d = time.perf_counter()
         with torch.npu.stream(load_stream):
             for obj, s, e in zip(objs, starts, ends, strict=False):
                 self.gpu_connector.to_gpu(obj, s, e, **kwargs)
@@ -253,6 +278,12 @@ class AscendLMCacheEngine(LMCacheEngine):
         self._pool_scatter_ev[slot].record(load_stream)
         pending.append((objs, ev_togpu))
         self._try_release_pending(pending)
+        logger.debug(
+            "rank=%d shard[%d] cnt=%d submitted",
+            self.metadata.worker_id,
+            idx,
+            len(objs),
+        )
 
     # Ping-pong merged-buffer pool for batched broadcast.  Two slots
     # suffice: while slot A's to_gpu runs on load_stream, slot B
@@ -419,7 +450,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             meta = mem_obj.metadata
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst,
+                    raw_data=dst.view(meta.dtype).view(meta.shape),
                     metadata=MemoryObjMetadata(
                         shape=meta.shape,
                         dtype=meta.dtype,
@@ -456,7 +487,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             dst = merged[byte_off : byte_off + byte_size]
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst,
+                    raw_data=dst.view(metadata.dtype).view(metadata.shape),
                     metadata=metadata,
                     parent_allocator=None,
                 )
@@ -488,7 +519,12 @@ class AscendLMCacheEngine(LMCacheEngine):
         shard_plan = plan["shard_plan"]
         shard_layouts = plan["shard_layouts"]
         device = f"npu:{self.metadata.worker_id}"
-        self._ensure_merged_pool(plan["max_shard_bytes"], device)
+        if not self._ensure_merged_pool(plan["max_shard_bytes"], device):
+            raise RuntimeError(
+                f"Failed to allocate merged broadcast pool on {device} "
+                f"({plan['max_shard_bytes']} bytes/slot). "
+                "Consider reducing broadcast_shard_size."
+            )
 
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
 
@@ -507,7 +543,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                 shard_bytes = sum(s for _, _, s in layout)
 
                 with torch.npu.stream(self.broadcast_stream):
-                    t_bc = time.perf_counter()
                     if is_sender:
                         objs, starts, ends = self._fill_shard_sender(
                             merged,
@@ -528,23 +563,13 @@ class AscendLMCacheEngine(LMCacheEngine):
                             meta_table,
                             ret_mask,
                         )
+
                     ev_bc = torch.npu.Event()
                     ev_bc.record()
-                    bc_ms = (time.perf_counter() - t_bc) * 1000
 
                 # Now that broadcast[N+1] is enqueued, submit to_gpu[N].
                 if prev_ctx is not None:
-                    t_enqueue = time.perf_counter()
                     self._submit_togpu(prev_ctx, load_stream, pending, **kwargs)
-                    enqueue_ms = (time.perf_counter() - t_enqueue) * 1000
-                    logger.debug(
-                        "rank=%d shard[%d] cnt=%d bc=%.2fms enqueue=%.2fms",
-                        self.metadata.worker_id,
-                        shard_idx - 1,
-                        len(prev_ctx[0]),
-                        bc_ms,
-                        enqueue_ms,
-                    )
                 prev_ctx = (objs, starts, ends, ev_bc, shard_idx, slot)
 
             if prev_ctx is not None:
@@ -655,6 +680,12 @@ class AscendLMCacheEngine(LMCacheEngine):
             with retrieve_stats.profile_broadcast():
                 self._pipelined_sharded_broadcast_and_load(
                     reordered_chunks, ret_mask, **kwargs
+                )
+        elif len(reordered_chunks) > 0:
+            with retrieve_stats.profile_to_gpu():
+                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                self.gpu_connector.batched_to_gpu(
+                    list(memory_objs), list(starts), list(ends), **kwargs
                 )
 
         # --- Cleanup ---
@@ -889,10 +920,17 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         tot_time = store_stats.time_to_store()
 
+        # NOTE(#233): `from_gpu_time` includes a `wait_for_forward` stall since
+        # PR #221 (slot_mapping/ordering async copy), so it is NOT pure device
+        # copy time. Report the breakdown explicitly to avoid misleading
+        # "offload_time" semantics; a dedicated device-copy metric should be
+        # added at the connector layer (see Issue #233 fix plan).
         logger.info(
             "[req_id=%s] Stored %d out of total %d tokens. "
             "size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s; "
-            "offload_time: %.4f ms, put_time: %.4f ms",
+            "offload_total_time: %.4f ms "
+            "(process_tokens: %.4f ms, from_gpu: %.4f ms), "
+            "put_time: %.4f ms",
             req_id,
             tot_token_num,
             num_to_store_tokens,
@@ -900,6 +938,8 @@ class AscendLMCacheEngine(LMCacheEngine):
             tot_time * 1000,
             tot_kv_size / tot_time / 1024**3 if tot_time > 0 else 0,
             (store_stats.process_tokens_time + store_stats.from_gpu_time) * 1000,
+            store_stats.process_tokens_time * 1000,
+            store_stats.from_gpu_time * 1000,
             store_stats.put_time * 1000,
         )
 
