@@ -400,10 +400,8 @@ class HcclChannel(BaseMultiBufferChannel):
             # wait for the handshake ready event first.
             event = self._peer_ready_events.get(req.local_id)
             if event is None:
-                raise ConnectionError(
-                    f"No handshake initiated for peer {req.local_id}"
-                )
-            if not event.wait(timeout=120):
+                raise ConnectionError(f"No handshake initiated for peer {req.local_id}")
+            if not event.wait(timeout=5):
                 raise TimeoutError(
                     f"Timed out waiting for HCCL accept for peer {req.local_id}"
                 )
