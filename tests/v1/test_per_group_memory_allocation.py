@@ -17,6 +17,7 @@ from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObjMetadata,
+    PagedTensorMemoryAllocator,
     TensorMemoryObj,
     get_size_bytes,
 )
@@ -24,7 +25,6 @@ from lmcache.v1.metadata import LMCacheMetadata
 
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
-from lmcache_ascend.v1.memory_management import maybe_normalize_multi_group_metadata
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 from .conftest_ds4 import (
@@ -230,17 +230,49 @@ def test_bundled_ds4_sw_group_uses_physical_token_dim(
 
 
 def test_multi_group_memory_obj_tensor_is_flat_uint8() -> None:
-    """Multi-group legacy metadata exposes the full buffer as flat uint8."""
+    """Multi-group .tensor is flat uint8; meta.shape stays group-0."""
     _, metadata, _, _ = make_ds4_setup()
     mem_obj = allocate_multi_group_memory_obj(metadata, DS4_CHUNK_SIZE)
     assert len(mem_obj.group_prefix_sum) >= 3
-    maybe_normalize_multi_group_metadata(mem_obj)
+    shapes = metadata.get_shapes(DS4_CHUNK_SIZE)
+    assert mem_obj.meta.shape == shapes[0]
+    assert mem_obj.meta.dtype == metadata.get_dtypes()[0]
     tensor = mem_obj.tensor
     assert tensor is not None
     assert tensor.shape == (mem_obj.get_size(),)
     assert tensor.dtype == torch.uint8
-    shapes = metadata.get_shapes(DS4_CHUNK_SIZE)
     for i, shape in enumerate(shapes):
+        group_tensor = mem_obj.get_tensor(i)
+        assert group_tensor is not None
+        assert group_tensor.shape == shape
+
+
+def test_paged_allocate_syncs_group_prefix_sum_for_partial_chunk() -> None:
+    """Paged freelist allocate must refresh prefixes when shapes shrink."""
+    _, metadata, _, _ = make_ds4_setup()
+    full_shapes = metadata.get_shapes()
+    partial_shapes = metadata.get_shapes(num_tokens=max(1, DS4_CHUNK_SIZE // 2))
+    dtypes = metadata.get_dtypes()
+    assert full_shapes != partial_shapes
+
+    page_bytes = get_size_bytes(full_shapes, dtypes)
+    buffer = torch.zeros(page_bytes * 2, dtype=torch.uint8)
+    allocator = PagedTensorMemoryAllocator(
+        buffer, full_shapes, dtypes, fmt=MemoryFormat.KV_2LTD
+    )
+
+    mem_obj = allocator.allocate(partial_shapes, dtypes, fmt=MemoryFormat.KV_2LTD)
+    assert mem_obj is not None
+    assert mem_obj.meta.shapes == partial_shapes
+
+    expected = [0]
+    nbytes = 0
+    for shape, dtype in zip(partial_shapes, dtypes, strict=True):
+        nbytes += int(shape.numel()) * dtype.itemsize
+        expected.append(nbytes)
+    assert mem_obj.group_prefix_sum == expected
+    assert mem_obj.get_size() == expected[-1]
+    for i, shape in enumerate(partial_shapes):
         group_tensor = mem_obj.get_tensor(i)
         assert group_tensor is not None
         assert group_tensor.shape == shape
@@ -261,7 +293,6 @@ def test_multi_group_disk_save_load_roundtrip(tmp_path) -> None:
 
     _, metadata, _, _ = make_ds4_setup()
     mem_obj = allocate_multi_group_memory_obj(metadata, DS4_CHUNK_SIZE)
-    maybe_normalize_multi_group_metadata(mem_obj)
     num_bytes = mem_obj.get_size()
     mem_obj.raw_data[:num_bytes] = torch.arange(num_bytes, dtype=torch.uint8)
 

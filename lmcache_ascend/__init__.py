@@ -359,6 +359,62 @@ def _patch_storage_backend_init():
     lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
 
 
+def _patch_memory_object_tensor():
+    """Patch ``TensorMemoryObj.tensor`` for multi-group flat byte views.
+
+    Upstream views the whole buffer via ``meta.dtype``/``meta.shape`` (group 0).
+    Multi-group objs keep real group-0 metadata and expose the full blob as
+    flat ``uint8`` here so disk/copy paths need no metadata mutation.
+    """
+    # Third Party
+    import torch
+    from lmcache.v1.memory_management import TensorMemoryObj
+
+    _orig_tensor_fget = TensorMemoryObj.tensor.fget
+
+    def _tensor(self):
+        if not self.valid:
+            return _orig_tensor_fget(self)
+        if len(getattr(self, "group_prefix_sum", (0,))) > 2:
+            return self.raw_data[: self.get_size()].view(torch.uint8)
+        return _orig_tensor_fget(self)
+
+    TensorMemoryObj.tensor = property(_tensor)
+
+
+def _patch_paged_allocator_sync_group_prefix():
+    """Refresh ``group_prefix_sum`` after paged allocate rewrites ``meta.shapes``.
+
+    Upstream ``PagedTensorMemoryAllocator.allocate`` / ``batched_allocate`` update
+    shapes on freelist objs but leave prefix sums from page init. Wrapping here
+    covers LocalCPU, PD, and any other path through that allocator.
+    """
+    # Third Party
+    from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+
+    # First Party
+    from lmcache_ascend.v1.memory_management import sync_group_prefix_sum
+
+    _orig_allocate = PagedTensorMemoryAllocator.allocate
+    _orig_batched_allocate = PagedTensorMemoryAllocator.batched_allocate
+
+    def _allocate(self, *args, **kwargs):
+        mem_obj = _orig_allocate(self, *args, **kwargs)
+        if mem_obj is not None:
+            sync_group_prefix_sum(mem_obj)
+        return mem_obj
+
+    def _batched_allocate(self, *args, **kwargs):
+        mem_objs = _orig_batched_allocate(self, *args, **kwargs)
+        if mem_objs is not None:
+            for mem_obj in mem_objs:
+                sync_group_prefix_sum(mem_obj)
+        return mem_objs
+
+    PagedTensorMemoryAllocator.allocate = _allocate
+    PagedTensorMemoryAllocator.batched_allocate = _batched_allocate
+
+
 def _patch_storage_manager():
     # Rebind StorageManager.get / batched_get so the delay-pull proxy
     # write-back guard lives in the Ascend overlay instead of upstream LMCache.
@@ -376,13 +432,9 @@ def _patch_storage_manager():
     # First Party
     from lmcache_ascend.v1.storage_backend import local_disk_backend as ascend_local_disk
     from lmcache_ascend.v1.storage_backend.storage_manager import (
-        allocate as ascend_allocate,
-    )
-    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        allocate_and_copy_objects as ascend_allocate_and_copy_objects,
         batched_get as ascend_batched_get,
-    )
-    from lmcache_ascend.v1.storage_backend.storage_manager import get as ascend_get
-    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        get as ascend_get,
         local_cpu_touch_cache,
         local_disk_touch_cache,
         patched_prefetch_all_done_callback,
@@ -409,12 +461,7 @@ def _patch_storage_manager():
         ascend_local_disk.local_disk_batched_get_non_blocking
     )
 
-    import lmcache_ascend.v1.storage_backend.storage_manager as ascend_storage_manager
-
-    ascend_storage_manager._orig_storage_manager_allocate = (
-        lm_storage_manager.StorageManager.allocate
-    )
-    lm_storage_manager.StorageManager.allocate = ascend_allocate
+    lm_storage_manager.allocate_and_copy_objects = ascend_allocate_and_copy_objects
 
 
 def _patch_torch_capability():
@@ -875,6 +922,8 @@ if not LMCACHE_ASCEND_PATCHED:
     _patch_remote_backend()
 
     if _build_info.__framework_name__ == "pytorch":
+        _patch_memory_object_tensor()
+        _patch_paged_allocator_sync_group_prefix()
         _patch_storage_backend_init()
         _patch_storage_manager()
         _patch_transfer_channel()

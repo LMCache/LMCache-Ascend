@@ -13,6 +13,7 @@ import time
 from lmcache.logging import init_logger
 from lmcache.utils import STR_DTYPE_TO_TORCH_DTYPE, CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.storage_backend.pd_backend import AllocRequest
 import msgspec
@@ -38,6 +39,22 @@ from lmcache_ascend.v1.storage_backend.utils import (
 from lmcache_ascend.v1.transfer_context import PDTransferContext
 
 logger = init_logger(__name__)
+
+
+def _multi_group_shapes_for_chunk(
+    metadata: LMCacheMetadata,
+    idx: int,
+    total_allocs: int,
+    last_chunk_toks: int,
+) -> list[torch.Size]:
+    """Multi-group analogue of ``adjust_last_chunk_shape``.
+
+    Wire ``shape`` describes one group only; recompute every group's shape
+    at ``last_chunk_toks`` for the final allocation.
+    """
+    if idx == total_allocs - 1:
+        return metadata.get_shapes(num_tokens=last_chunk_toks)
+    return metadata.get_shapes()
 
 
 class AscendPDReceiverMixin:
@@ -66,8 +83,14 @@ class AscendPDReceiverMixin:
         """
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
-        shape = list(alloc_request.shape)
+        num_groups = self._metadata.get_num_groups()
+        if num_groups > 1:
+            # Multi-group (e.g. DSv4): wire shape/dtype describe one group
+            # only — allocate from local metadata instead.
+            dtypes = self._metadata.get_dtypes()
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[alloc_request.dtype]
+            shape = list(alloc_request.shape)
 
         already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
             alloc_request.keys
@@ -80,18 +103,28 @@ class AscendPDReceiverMixin:
         for idx in new_indexes:
             key = CacheEngineKey.from_string(alloc_request.keys[idx])
 
-            alloc_shape = adjust_last_chunk_shape(
-                shape,
-                idx,
-                total_allocs,
-                fmt,
-                alloc_request.last_chunk_toks,
-            )
+            if num_groups > 1:
+                alloc_shapes = _multi_group_shapes_for_chunk(
+                    self._metadata,
+                    idx,
+                    total_allocs,
+                    alloc_request.last_chunk_toks,
+                )
+                alloc_dtypes = dtypes
+            else:
+                alloc_shape = adjust_last_chunk_shape(
+                    shape,
+                    idx,
+                    total_allocs,
+                    fmt,
+                    alloc_request.last_chunk_toks,
+                )
+                alloc_shapes, alloc_dtypes = torch.Size(alloc_shape), dtype
 
             mem_obj = allocate_with_retry(
                 self.allocate,
-                torch.Size(alloc_shape),
-                dtype,
+                alloc_shapes,
+                alloc_dtypes,
                 fmt,
                 timeout=self._peer_alloc_backoff_ttl,
             )
@@ -164,8 +197,12 @@ class AscendPDReceiverMixin:
         """
         total_allocs = len(msg.keys)
         fmt = MemoryFormat(msg.fmt)
-        dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
-        shape = list(msg.shape)
+        num_groups = self._metadata.get_num_groups()
+        if num_groups > 1:
+            dtypes = self._metadata.get_dtypes()
+        else:
+            dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
+            shape = list(msg.shape)
 
         already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
             msg.keys
@@ -178,18 +215,28 @@ class AscendPDReceiverMixin:
         for idx in new_indexes:
             key = CacheEngineKey.from_string(msg.keys[idx])
 
-            alloc_shape = adjust_last_chunk_shape(
-                shape,
-                idx,
-                total_allocs,
-                fmt,
-                msg.last_chunk_toks,
-            )
+            if num_groups > 1:
+                alloc_shapes = _multi_group_shapes_for_chunk(
+                    self._metadata,
+                    idx,
+                    total_allocs,
+                    msg.last_chunk_toks,
+                )
+                alloc_dtypes = dtypes
+            else:
+                alloc_shape = adjust_last_chunk_shape(
+                    shape,
+                    idx,
+                    total_allocs,
+                    fmt,
+                    msg.last_chunk_toks,
+                )
+                alloc_shapes, alloc_dtypes = torch.Size(alloc_shape), dtype
 
             mem_obj = allocate_with_retry(
                 self.allocate,
-                torch.Size(alloc_shape),
-                dtype,
+                alloc_shapes,
+                alloc_dtypes,
                 fmt,
                 timeout=self._peer_alloc_backoff_ttl,
             )
@@ -288,39 +335,59 @@ class AscendPDReceiverMixin:
 
             total_allocs = len(msg.keys)
             fmt = MemoryFormat(msg.fmt)
-            shape = list(msg.shape)
-            dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
+            num_groups = self._metadata.get_num_groups()
 
-            # Use the sender's shape/dtype/fmt for the transfer context
-            # so that ping-pong backing buffers are allocated with the
-            # sender's tensor layout.  The RDMA read copies raw bytes in
-            # the sender's layout; the scatter kernel
-            # (multi_layer_kv_transfer) derives num_layers and hidden_dims
-            # from the tensor shape, so a mismatch would corrupt the KV
-            # cache scatter.
-            sender_shapes = [torch.Size(shape)]
-            sender_dtypes = [dtype]
+            if num_groups > 1:
+                # Pool buffers are reused across proxies — size at full chunk.
+                shapes = self._metadata.get_shapes()
+                dtypes = self._metadata.get_dtypes()
+            else:
+                shape = list(msg.shape)
+                dtype = STR_DTYPE_TO_TORCH_DTYPE[msg.dtype]
+
+                # Use the sender's shape/dtype/fmt for the transfer context
+                # so that ping-pong backing buffers are allocated with the
+                # sender's tensor layout.  The RDMA read copies raw bytes in
+                # the sender's layout; the scatter kernel
+                # (multi_layer_kv_transfer) derives num_layers and hidden_dims
+                # from the tensor shape, so a mismatch would corrupt the KV
+                # cache scatter.
+                shapes = [torch.Size(shape)]
+                dtypes = [dtype]
 
             transfer_context = PDTransferContext(
                 sender_id=sender_id,
                 done_callback=done_callback,
                 num_proxies=num_proxies,
                 memory_allocator=self.memory_allocator,
-                shapes=sender_shapes,
-                dtypes=sender_dtypes,
+                shapes=shapes,
+                dtypes=dtypes,
                 fmt=fmt,
             )
 
             for proxy_seq, msg_idx in enumerate(new_indexes):
                 key = CacheEngineKey.from_string(msg.keys[msg_idx])
 
-                alloc_shape = adjust_last_chunk_shape(
-                    shape,
-                    msg_idx,
-                    total_allocs,
-                    fmt,
-                    msg.last_chunk_toks,
-                )
+                if num_groups > 1:
+                    proxy_shapes = _multi_group_shapes_for_chunk(
+                        self._metadata,
+                        msg_idx,
+                        total_allocs,
+                        msg.last_chunk_toks,
+                    )
+                    proxy_dtypes = dtypes
+                else:
+                    alloc_shape = adjust_last_chunk_shape(
+                        shape,
+                        msg_idx,
+                        total_allocs,
+                        fmt,
+                        msg.last_chunk_toks,
+                    )
+                    proxy_shapes, proxy_dtypes = (
+                        [torch.Size(alloc_shape)],
+                        self._kv_dtypes,
+                    )
 
                 proxy = ProxyMemoryObj(
                     backing_obj=None,
@@ -330,8 +397,8 @@ class AscendPDReceiverMixin:
                     remote_mem_index=msg.sender_mem_indexes[msg_idx],
                     transfer_context=transfer_context,
                     chunk_index=proxy_seq,
-                    shapes=[torch.Size(alloc_shape)],
-                    dtypes=self._kv_dtypes,
+                    shapes=proxy_shapes,
+                    dtypes=proxy_dtypes,
                     fmt=self._fmt,
                 )
                 self.put(key, proxy)
