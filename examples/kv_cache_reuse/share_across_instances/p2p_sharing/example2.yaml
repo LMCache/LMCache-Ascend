@@ -24,3 +24,7 @@ lmcache_worker_ports: [9952, 9953] # per TP instance
 
 extra_config:
   lookup_backoff_time: 0.001
+  # Host staging is intentionally omitted here because this example uses P2P
+  # push mode (p2p_pull_mode: False). use_host_staging requires pull mode; in
+  # pull mode it registers a bounded CPU staging arena for HCCL instead of the
+  # full CPU KV cache.

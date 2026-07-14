@@ -24,3 +24,11 @@ lmcache_worker_ports: [9950, 9951] # per TP instance
 
 extra_config:
   lookup_backoff_time: 0.001
+  # Optional for HCCL P2P pull mode. When enabled, HCCL registers a bounded
+  # CPU staging arena instead of the full CPU KV cache. The producer copies hit
+  # chunks into this arena, returns staging refs to the receiver, then releases
+  # them after the receiver sends Done or the pull lease expires. This avoids
+  # HCCL registration OOMs when the local CPU cache is large.
+  use_host_staging: False
+  # Only used when use_host_staging is True; caps in-flight staged KV bytes.
+  os_staging_bytes: 8589934592 # 8GB
