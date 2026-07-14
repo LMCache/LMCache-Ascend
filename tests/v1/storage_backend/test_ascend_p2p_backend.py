@@ -1420,7 +1420,6 @@ class TestAscendP2PBackendUnit:
                 channel,
                 src_tensors,
                 dst_tensors,
-                "unit",
             )
             return loop_thread_id
 
