@@ -918,8 +918,8 @@ class AscendLMCacheEngine(LMCacheEngine):
             )
             start_time = time.monotonic()
             self._store_cv.wait_for(
-                lambda: not any(
-                    req_id in self._pending_store_reqs for req_id in req_id_set
+                lambda: (
+                    not any(req_id in self._pending_store_reqs for req_id in req_id_set)
                 )
             )
             elapsed_ms = (time.monotonic() - start_time) * 1000
