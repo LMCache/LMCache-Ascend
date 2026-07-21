@@ -22,6 +22,7 @@ from typing import Any, List, Optional
 import asyncio
 import concurrent.futures
 import threading
+import time
 
 # Third Party
 from lmcache.logging import init_logger
@@ -31,6 +32,10 @@ import torch
 logger = init_logger(__name__)
 
 _DEFAULT_PIPELINE_DEPTH = 4
+
+
+class LeaseExpiredError(RuntimeError):
+    """Raised when a one-sided read is attempted after producer lease expiry."""
 
 
 class AscendBaseTransferContext:
@@ -152,6 +157,10 @@ class AscendBaseTransferContext:
         """Deliver the Done signal.  **Must be overridden by subclasses.**"""
         raise NotImplementedError("_send_done() must be implemented by subclasses")
 
+    def check_lease(self) -> None:
+        """No-op by default; P2P host staging overrides this."""
+        return None
+
 
 class P2PTransferContext(AscendBaseTransferContext):
     """Shared context for a batch of ProxyMemoryObjs from the same P2P lookup.
@@ -176,6 +185,8 @@ class P2PTransferContext(AscendBaseTransferContext):
         dtypes: Optional[List[torch.dtype]] = None,
         fmt: MemoryFormat = MemoryFormat.UNDEFINED,
         use_npu: bool = False,
+        lease_ttl_s: float = 0.0,
+        lease_guard_s: float = 0.0,
     ):
         super().__init__(
             num_proxies=num_proxies,
@@ -189,6 +200,9 @@ class P2PTransferContext(AscendBaseTransferContext):
         self._lookup_id = lookup_id
         self._loop = loop
         self._use_npu = use_npu
+        self._lease_ttl_s = lease_ttl_s
+        self._lease_guard_s = lease_guard_s
+        self._lease_start = time.monotonic()
         logger.debug(
             "Initialized P2PTransferContext: lookup_id=%s, "
             "target_peer=%s, num_proxies=%d, use_npu=%s, "
@@ -213,6 +227,21 @@ class P2PTransferContext(AscendBaseTransferContext):
     @property
     def target_peer_url(self) -> str:
         return self._target_peer_url
+
+    def lease_remaining_s(self) -> Optional[float]:
+        if self._lease_ttl_s <= 0.0:
+            return None
+        elapsed = time.monotonic() - self._lease_start
+        return self._lease_ttl_s - self._lease_guard_s - elapsed
+
+    def check_lease(self) -> None:
+        remaining = self.lease_remaining_s()
+        if remaining is not None and remaining <= 0.0:
+            raise LeaseExpiredError(
+                f"Producer lease expired for lookup_id {self._lookup_id} "
+                f"(ttl={self._lease_ttl_s:.1f}s, "
+                f"guard={self._lease_guard_s:.1f}s)."
+            )
 
     def _send_done(self) -> None:
         """Schedule the Done signal on the P2P loop without blocking callers.

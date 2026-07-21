@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Union
 import asyncio
 import pickle
@@ -7,7 +8,11 @@ import threading
 
 # Third Party
 from lmcache.logging import init_logger
-from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    MixedMemoryAllocator,
+)
 from lmcache.v1.rpc_utils import get_zmq_socket
 from lmcache.v1.transfer_channel.transfer_utils import (
     InitSideMsgBase,
@@ -25,12 +30,15 @@ import lmcache_ascend.hccl_npu_comms as hcomm
 from .base_channel import BaseMultiBufferChannel
 from .buffer_config import (
     BufferConfig,
+    BufferType,
     RemotePeerBufferList,
 )
 from .hccl_agent import HcclAgentWrapper
 from .transfer_spec import TS_RECEIVER_ID
 
 logger = init_logger(__name__)
+
+_DEFAULT_STAGING_BYTES = 10 * 1024 * 1024 * 1024
 
 
 class HcclMsgBase(msgspec.Struct, tag=True):
@@ -99,14 +107,201 @@ class HcclChannel(BaseMultiBufferChannel):
         self._peer_ready_events: Dict[str, threading.Event] = {}
         self._peer_handshake_locks: Dict[str, asyncio.Lock] = {}
 
+        self._use_host_staging: bool = bool(kwargs.pop("use_host_staging", False))
+        self._os_staging_bytes: int = int(
+            kwargs.pop("os_staging_bytes", _DEFAULT_STAGING_BYTES)
+        )
+        self._staging_shapes = kwargs.pop("staging_shapes", None)
+        self._staging_dtypes = kwargs.pop("staging_dtypes", None)
+        self._staging_fmt: MemoryFormat = kwargs.pop(
+            "staging_fmt", MemoryFormat.KV_2LTD
+        )
+        self._staging_arena: Optional[MixedMemoryAllocator] = None
+        self._staging_lock = threading.Lock()
+        self._os_staging_copy_threads: int = max(
+            1, int(kwargs.pop("os_staging_copy_threads", 32))
+        )
+        self._staging_copy_pool: Optional[ThreadPoolExecutor] = None
+        if self._use_host_staging:
+            self._staging_copy_pool = ThreadPoolExecutor(
+                max_workers=self._os_staging_copy_threads,
+                thread_name_prefix="lmc-staging-copy",
+            )
+
         super().__init__(async_mode=async_mode, buffers=buffers, **kwargs)
 
         self.transport_stream = torch.npu.Stream(self.handle_device)
 
     def _register_buffers(self, buffers: list[BufferConfig]) -> None:
+        if self._use_host_staging:
+            buffers = self._build_staging_buffers(buffers)
         self.hccl_wrapper = HcclAgentWrapper(buffers=buffers)
         self.hccl_agent = self.hccl_wrapper.agent
         self.mem_handles = self.hccl_wrapper.mem_handles
+
+    def _build_staging_buffers(self, buffers: list[BufferConfig]) -> list[BufferConfig]:
+        """Allocate a bounded pinned host arena and register it instead of CPU KV."""
+        if self._staging_shapes is None or self._staging_dtypes is None:
+            raise ValueError(
+                "use_host_staging requires staging_shapes and staging_dtypes."
+            )
+
+        chunk_bytes = buffers[0].align_bytes
+        arena_bytes = (self._os_staging_bytes // chunk_bytes) * chunk_bytes
+        if arena_bytes < chunk_bytes:
+            raise ValueError(
+                f"os_staging_bytes ({self._os_staging_bytes}) is smaller than "
+                f"one chunk ({chunk_bytes})."
+            )
+
+        self._staging_arena = MixedMemoryAllocator(
+            arena_bytes,
+            use_paging=True,
+            shapes=self._staging_shapes,
+            dtypes=self._staging_dtypes,
+            fmt=self._staging_fmt,
+        )
+        logger.info(
+            "Host-staging arena: %d bytes, %d slots x %d-byte chunks",
+            arena_bytes,
+            arena_bytes // chunk_bytes,
+            chunk_bytes,
+        )
+
+        arena_cfg = BufferConfig(
+            ptr=self._staging_arena.buffer.data_ptr(),
+            size=arena_bytes,
+            device_id=buffers[0].device_id,
+            device_type=BufferType.CPU,
+            align_bytes=chunk_bytes,
+        )
+        return [arena_cfg] + [b for b in buffers if b.device_type != BufferType.CPU]
+
+    @property
+    def use_host_staging(self) -> bool:
+        return self._use_host_staging
+
+    def allocate_receiver_staging(self, mem_objs: list[MemoryObj]) -> list[MemoryObj]:
+        """Allocate registered CPU staging slots for receiver eager pull."""
+        if not self._use_host_staging or self._staging_arena is None:
+            raise RuntimeError(
+                "allocate_receiver_staging() called but host staging is not enabled"
+            )
+        if not mem_objs:
+            return []
+
+        arena_objs: list[MemoryObj] = []
+        with self._staging_lock:
+            for dst in mem_objs:
+                slot = self._staging_arena.allocate(
+                    dst.meta.shape, dst.meta.dtype, dst.meta.fmt
+                )
+                if slot is None:
+                    break
+                arena_objs.append(slot)
+        return arena_objs
+
+    async def copy_receiver_staging_to(
+        self,
+        staging_objs: list[MemoryObj],
+        dst_objs: list[MemoryObj],
+    ) -> None:
+        """Copy registered receiver staging slots into final CPU MemoryObjs."""
+        if len(staging_objs) != len(dst_objs):
+            raise ValueError(
+                "staging_objs and dst_objs must have the same length, "
+                f"got {len(staging_objs)} and {len(dst_objs)}"
+            )
+        await self._async_h2h_copy(
+            src_tensors=[obj.tensor for obj in staging_objs],
+            dst_tensors=[obj.tensor for obj in dst_objs],
+        )
+
+    async def _async_h2h_copy(
+        self,
+        src_tensors: list[torch.Tensor],
+        dst_tensors: list[torch.Tensor],
+    ) -> None:
+        """Copy host tensors off the event loop with a bounded copy pool."""
+        if len(src_tensors) != len(dst_tensors):
+            raise ValueError(
+                "src_tensors and dst_tensors must have the same length, "
+                f"got {len(src_tensors)} and {len(dst_tensors)}"
+            )
+        if not src_tensors:
+            return
+
+        def _copy_slice(dst_slice, src_slice) -> None:
+            torch._foreach_copy_(dst_slice, src_slice)
+
+        num_tensors = len(src_tensors)
+        loop = asyncio.get_running_loop()
+        executor = self._staging_copy_pool
+        n_slices = (
+            min(num_tensors, self._os_staging_copy_threads)
+            if executor is not None
+            else 1
+        )
+
+        if n_slices > 1:
+            base, rem = divmod(num_tensors, n_slices)
+            tasks = []
+            start = 0
+            for i in range(n_slices):
+                end = start + base + (1 if i < rem else 0)
+                tasks.append(
+                    loop.run_in_executor(
+                        executor,
+                        _copy_slice,
+                        dst_tensors[start:end],
+                        src_tensors[start:end],
+                    )
+                )
+                start = end
+            await asyncio.gather(*tasks)
+        else:
+            await loop.run_in_executor(executor, _copy_slice, dst_tensors, src_tensors)
+
+    async def stage(
+        self, mem_objs: list[MemoryObj]
+    ) -> tuple[list[str], list[int], list[MemoryObj]]:
+        """Copy a prefix of source chunks into the registered staging arena."""
+        if not self._use_host_staging or self._staging_arena is None:
+            raise RuntimeError("stage() called but host staging is not enabled")
+        if not mem_objs:
+            return [], [], []
+
+        arena_objs: list[MemoryObj] = []
+        with self._staging_lock:
+            for src in mem_objs:
+                slot = self._staging_arena.allocate(
+                    src.meta.shape, src.meta.dtype, src.meta.fmt
+                )
+                if slot is None:
+                    break
+                arena_objs.append(slot)
+        num_staged = len(arena_objs)
+        if num_staged == 0:
+            return [], [], []
+
+        try:
+            await self._async_h2h_copy(
+                src_tensors=[mem_objs[i].tensor for i in range(num_staged)],
+                dst_tensors=[a.tensor for a in arena_objs],
+            )
+        except Exception:
+            self.release_staged(arena_objs)
+            raise
+
+        buffer_uuids, mem_indexes = self.get_local_buffer_refs(arena_objs)
+        return buffer_uuids, mem_indexes, arena_objs
+
+    def release_staged(self, arena_objs: Optional[list[MemoryObj]]) -> None:
+        """Return staged arena pages to the arena free list."""
+        if not arena_objs:
+            return
+        for obj in arena_objs:
+            obj.ref_count_down()
 
     def _make_error_response(self) -> HcclErrorResponse:
         return HcclErrorResponse(ok=False)
@@ -644,3 +839,9 @@ class HcclChannel(BaseMultiBufferChannel):
             self.remote_index_addr_dict.clear()
         self._peer_ready_events.clear()
         self.hccl_wrapper.close()
+        if self._staging_copy_pool is not None:
+            self._staging_copy_pool.shutdown(wait=True)
+            self._staging_copy_pool = None
+        if self._staging_arena is not None:
+            self._staging_arena.close()
+            self._staging_arena = None
