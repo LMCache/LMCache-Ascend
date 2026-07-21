@@ -59,6 +59,11 @@ Delayed pull requires both `p2p_pull_mode: True` and `p2p_use_npu: True`.
 
 ## HostStaging for KV cache hits
 
+> **Performance recommendation:** Use `use_host_staging: False` whenever HCCL
+> can reliably register the full CPU KV cache. Enable HostStaging primarily to
+> avoid registration failures or device OS memory exhaustion, because staging
+> adds an extra producer-side CPU copy.
+
 With very large models, HCCL registration of the complete CPU KV cache can
 exhaust device OS memory. This can appear as error code `19`; consult the Ascend
 PLOG files under `$HOME/ascend/log` for the underlying registration error.
