@@ -471,8 +471,7 @@ class AscendP2PBackend(P2PBackend):
         assert pull_mode, "use_host_staging requires p2p_pull_mode=True"
         assert delay_pull or not use_npu, (
             "use_host_staging with p2p_delay_pull=False currently supports "
-            "p2p_use_npu=False only. p2p_use_npu=True eager host-staging "
-            "pull is deferred."
+            "p2p_use_npu=False only."
         )
 
     def _is_on_p2p_loop(self) -> bool:
