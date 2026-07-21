@@ -194,8 +194,24 @@ class AscendLMCacheEngine(LMCacheEngine):
         available = total_mem - allocated
         pool_budget = available // 4
 
+        if per_chunk_bytes <= 0:
+            raise RuntimeError(
+                f"Invalid per-chunk size {per_chunk_bytes} bytes; "
+                "cannot estimate broadcast_shard_size. "
+                "Check model config (shapes/dtypes)."
+            )
         max_shard = int(pool_budget // (2 * per_chunk_bytes))
-        recommended = max(1, min(max_shard, 16))
+        if max_shard <= 0:
+            raise RuntimeError(
+                f"NPU free memory insufficient for broadcast pool "
+                f"(available={available / 1024**3:.2f} GB, "
+                f"pool_budget={pool_budget / 1024**3:.2f} GB, "
+                f"per_chunk={per_chunk_bytes / 1024**2:.1f} MB; "
+                f"need at least {2 * per_chunk_bytes / 1024**2:.1f} MB "
+                f"pool budget for shard_size=1). "
+                "Consider reducing --gpu-memory-utilization or chunk_size."
+            )
+        recommended = min(max_shard, 16)
 
         logger.info(
             "Estimated broadcast_shard_size=%d "
