@@ -765,10 +765,6 @@ def multi_buffer_receiver_process(
         sys.exit(1)
 
 
-# ──────────────────────────────────────────────────────────
-# Handshake race (issue #263): delay after accept() before publish
-# ──────────────────────────────────────────────────────────
-
 # Delay *after* accept returns so connect() unblocks and MemReg can race
 # the receiver's conn_handles_dict publish.
 ACCEPT_POST_DELAY_S = 0.3
