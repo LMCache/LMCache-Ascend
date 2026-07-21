@@ -6,6 +6,7 @@ from ._version import __version__ as __version__  # noqa: F401  # isort:skip
 from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # isort:skip
 
 # Standard
+from typing import Any
 import sys
 
 # First Party
@@ -13,7 +14,7 @@ from lmcache_ascend import _build_info
 
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
-LMCACHE_UPSTREAM_TAG = "v0.4.4"
+LMCACHE_UPSTREAM_TAG = "v0.4.5"
 LMCACHE_ASCEND_PATCHED = False
 
 
@@ -23,6 +24,26 @@ def _is_sglang_runtime():
 
 def _is_vllm_runtime():
     return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
+
+def _patch_lmcache_global_variable():
+    def _detect_device() -> tuple[Any, str]:
+        try:
+            # Third Party
+            import torch
+        except ImportError:
+            return None, "cpu"  # fallback，CLI-only
+
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            return torch.npu, "npu"
+        else:
+            raise ValueError("Non Ascend Env!")
+
+    # Third Party
+    import lmcache
+
+    lmcache._detect_device = _detect_device
+    lmcache.torch_dev, lmcache.torch_device_type = _detect_device()
 
 
 def _patch_config():
@@ -229,6 +250,35 @@ def _patch_config():
         "memory growth. Default is 0 (unlimited).",
     }
 
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_flatten_multi_spec"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend flattens multi-spec per-layer KV entries "
+            "before NPU connector registration."
+        ),
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_bundle_multi_spec"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend keeps multi-spec KV planes bundled for "
+            "multi-plane NPU transfer. If False, multi-spec planes are exploded "
+            "into synthetic .subN layers for legacy/fallback handling."
+        ),
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["ascend_skip_state_groups"] = {
+        "type": bool,
+        "default": True,
+        "env_converter": _to_bool,
+        "description": (
+            "Whether LMCache-Ascend skips vLLM scheduler state-cache groups "
+            "at KV registration time."
+        ),
+    }
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,
@@ -271,6 +321,9 @@ def _patch_ops():
     if not hasattr(ascend_c_ops, "GPUKVFormat"):
 
         class GPUKVFormat(IntEnum):
+            # Keep numeric values in lockstep with ``csrc/mem_kernels.cuh``
+            # (CUDA ``lmcache.c_ops.GPUKVFormat``) so IntEnum comparisons stay
+            # consistent when upstream MP code passes raw ints.
             NB_NL_TWO_BS_NH_HS = 0
             NL_X_TWO_NB_BS_NH_HS = 1
             NL_X_NB_TWO_BS_NH_HS = 2
@@ -279,8 +332,17 @@ def _patch_ops():
             NL_X_NBBS_ONE_HS = 5
             NL_X_TWO_NB_NH_BS_HS = 6
             NL_X_NB_TWO_NH_BS_HS = 7
+            NB_NL_TWO_NH_BS_HS = 8
 
         ascend_c_ops.GPUKVFormat = GPUKVFormat
+
+    # PR #3171 PageBufferShapeDesc is CUDA pybind only; reuse the
+    # Python equivalent (same __slots__) for Ascend.
+    if not hasattr(ascend_c_ops, "PageBufferShapeDesc"):
+        # Third Party
+        from lmcache.non_cuda_equivalents import PageBufferShapeDesc
+
+        ascend_c_ops.PageBufferShapeDesc = PageBufferShapeDesc
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
@@ -297,6 +359,62 @@ def _patch_storage_backend_init():
     lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
 
 
+def _patch_memory_object_tensor():
+    """Patch ``TensorMemoryObj.tensor`` for multi-group flat byte views.
+
+    Upstream views the whole buffer via ``meta.dtype``/``meta.shape`` (group 0).
+    Multi-group objs keep real group-0 metadata and expose the full blob as
+    flat ``uint8`` here so disk/copy paths need no metadata mutation.
+    """
+    # Third Party
+    import torch
+    from lmcache.v1.memory_management import TensorMemoryObj
+
+    _orig_tensor_fget = TensorMemoryObj.tensor.fget
+
+    def _tensor(self):
+        if not self.valid:
+            return _orig_tensor_fget(self)
+        if len(getattr(self, "group_prefix_sum", (0,))) > 2:
+            return self.raw_data[: self.get_size()].view(torch.uint8)
+        return _orig_tensor_fget(self)
+
+    TensorMemoryObj.tensor = property(_tensor)
+
+
+def _patch_paged_allocator_sync_group_prefix():
+    """Refresh ``group_prefix_sum`` after paged allocate rewrites ``meta.shapes``.
+
+    Upstream ``PagedTensorMemoryAllocator.allocate`` / ``batched_allocate`` update
+    shapes on freelist objs but leave prefix sums from page init. Wrapping here
+    covers LocalCPU, PD, and any other path through that allocator.
+    """
+    # Third Party
+    from lmcache.v1.memory_management import PagedTensorMemoryAllocator
+
+    # First Party
+    from lmcache_ascend.v1.memory_management import sync_group_prefix_sum
+
+    _orig_allocate = PagedTensorMemoryAllocator.allocate
+    _orig_batched_allocate = PagedTensorMemoryAllocator.batched_allocate
+
+    def _allocate(self, *args, **kwargs):
+        mem_obj = _orig_allocate(self, *args, **kwargs)
+        if mem_obj is not None:
+            sync_group_prefix_sum(mem_obj)
+        return mem_obj
+
+    def _batched_allocate(self, *args, **kwargs):
+        mem_objs = _orig_batched_allocate(self, *args, **kwargs)
+        if mem_objs is not None:
+            for mem_obj in mem_objs:
+                sync_group_prefix_sum(mem_obj)
+        return mem_objs
+
+    PagedTensorMemoryAllocator.allocate = _allocate
+    PagedTensorMemoryAllocator.batched_allocate = _batched_allocate
+
+
 def _patch_storage_manager():
     # Rebind StorageManager.get / batched_get so the delay-pull proxy
     # write-back guard lives in the Ascend overlay instead of upstream LMCache.
@@ -304,19 +422,19 @@ def _patch_storage_manager():
     # between lookup-pin and touch_cache degrades the eviction-policy update to a
     # no-op instead of aborting the lookup (which dropped local hits and timed
     # out the lookup RPC). Prefetch all-done callback mirrors loaded tiers into
-    # the local hot cache when enabled. See lmcache_ascend.v1.storage_backend
-    # .storage_manager.
+    # the local hot cache when enabled. Multi-group disk save/load patches live
+    # in lmcache_ascend.v1.storage_backend.local_disk_backend.
     # Third Party
     import lmcache.v1.storage_backend.local_cpu_backend as lm_local_cpu_backend
     import lmcache.v1.storage_backend.local_disk_backend as lm_local_disk_backend
     import lmcache.v1.storage_backend.storage_manager as lm_storage_manager
 
     # First Party
+    from lmcache_ascend.v1.storage_backend import local_disk_backend as ascend_local_disk
     from lmcache_ascend.v1.storage_backend.storage_manager import (
+        allocate_and_copy_objects as ascend_allocate_and_copy_objects,
         batched_get as ascend_batched_get,
-    )
-    from lmcache_ascend.v1.storage_backend.storage_manager import get as ascend_get
-    from lmcache_ascend.v1.storage_backend.storage_manager import (
+        get as ascend_get,
         local_cpu_touch_cache,
         local_disk_touch_cache,
         patched_prefetch_all_done_callback,
@@ -330,10 +448,24 @@ def _patch_storage_manager():
     lm_local_cpu_backend.LocalCPUBackend.touch_cache = local_cpu_touch_cache
     lm_local_disk_backend.LocalDiskBackend.touch_cache = local_disk_touch_cache
 
+    ascend_local_disk._orig_async_save_bytes_to_disk = (
+        lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk = (
+        ascend_local_disk.local_disk_async_save_bytes_to_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.load_bytes_from_disk = (
+        ascend_local_disk.local_disk_load_bytes_from_disk
+    )
+    lm_local_disk_backend.LocalDiskBackend.batched_get_non_blocking = (
+        ascend_local_disk.local_disk_batched_get_non_blocking
+    )
+
+    lm_storage_manager.allocate_and_copy_objects = ascend_allocate_and_copy_objects
+
 
 def _patch_torch_capability():
     # Third Party
-    from torch_npu.contrib import transfer_to_npu  # noqa: F401
     import torch
 
     # Note: torch_npu do not support get_device_capability
@@ -427,21 +559,6 @@ def _patch_multi_process():
     lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
 
 
-def _patch_kv_layer_group():
-    # Third Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
-
-    # First Party
-    import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-
-    KVLayerGroupsManager.build_kv_layer_groups = (
-        ascend_kv_layer_groups.build_kv_layer_groups
-    )
-    KVLayerGroupInfo.hidden_dim_size = property(
-        ascend_kv_layer_groups.patched_hidden_dim_size
-    )
-
-
 def _patch_gpu_connector():
     """Patch CreateGPUConnector to return NPU connectors on Ascend.
 
@@ -487,23 +604,6 @@ def _patch_gpu_connector():
         _manager_mod.CreateGPUConnector = CreateNPUConnector
 
 
-def _patch_get_vllm_torch_dev():
-    """Patch get_vllm_torch_dev to return NPU device on Ascend.
-
-    The upstream function only supports CUDA and XPU. This patch adds
-    NPU support by replacing the function with our Ascend-specific version.
-    """
-    # Third Party
-    import lmcache.integration.vllm.utils as lm_utils
-
-    # First Party
-    from lmcache_ascend.integration.vllm.utils import (
-        get_vllm_torch_dev as ascend_get_vllm_torch_dev,
-    )
-
-    lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
-
-
 def _patch_vllm_v1_adapter():
     # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -512,10 +612,13 @@ def _patch_vllm_v1_adapter():
     import lmcache.integration.vllm.vllm_v1_adapter as lmc_vllm_v1_adapter
 
     # First Party
+    from lmcache_ascend.integration.vllm import multi_group_vllm_adapter as mg
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         LMCacheAscendConnectorV1Impl as ascend_LMCacheAscendConnectorV1Impl,
     )
 
+    lmc_vllm_v1_adapter.RequestTracker = mg.RequestTracker
+    lmc_vllm_v1_adapter.ReqMeta = mg.ReqMeta
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
     def handle_preemptions(self, preempted_req_ids):
@@ -524,6 +627,110 @@ def _patch_vllm_v1_adapter():
             method(preempted_req_ids)
 
     vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
+
+
+def _patch_vllm_ascend_connector():
+    """Use LMCache-Ascend's SupportsHMA connector for the vllm-ascend registry name.
+
+    vllm-ascend registers ``LMCacheAscendConnector`` against a stub module that
+    re-exports upstream ``LMCacheConnectorV1``. Wrap only
+    ``vllm_ascend.distributed.kv_transfer.register_connector`` so the factory
+    loader is swapped immediately after vllm-ascend registers connectors.
+    """
+    from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
+        LMCacheAscendConnector,
+    )
+
+    try:
+        import vllm_ascend.distributed.kv_transfer as vt
+        from vllm.distributed.kv_transfer.kv_connector.factory import (
+            KVConnectorFactory,
+        )
+    except ImportError:
+        return
+
+    _CONNECTOR_NAME = "LMCacheAscendConnector"
+
+    def _point_factory_at_ascend_connector() -> None:
+        if _CONNECTOR_NAME not in KVConnectorFactory._registry:
+            return
+        KVConnectorFactory._registry[_CONNECTOR_NAME] = (
+            lambda: LMCacheAscendConnector
+        )
+
+    if getattr(vt.register_connector, "_lmcache_ascend_patched", False):
+        _point_factory_at_ascend_connector()
+        return
+
+    _orig_register = vt.register_connector
+
+    def register_connector() -> None:
+        _orig_register()
+        _point_factory_at_ascend_connector()
+
+    register_connector._lmcache_ascend_patched = True
+    vt.register_connector = register_connector
+    _point_factory_at_ascend_connector()
+
+
+def _patch_metadata_get_shapes():
+    """Patch ``LMCacheMetadata.get_shapes`` for Ascend multi-group KV allocation.
+    Upstream sizes each group as ``[kv_size, nl, num_tokens, hidden_dim_size]``,
+    which is wrong for complex layouts. This patch fixes two cases:
+
+    1. Multi-plane row bytes (DSA / DSA-C8 / bundled planes): planes are packed
+       contiguously per layer with 32-byte alignment. The last dim must be
+       recomputed via ``_lmc_chunk_hidden_bytes`` at allocation time because
+       it depends on ``num_tokens`` (including partial last chunks).
+
+    2. Sliding-window / compress-ratio token dimension: single-plane groups use
+       ``physical_chunk_size`` (SW // CR) in the token dim to avoid overallocation;
+       multi-plane groups keep logical ``num_tokens`` because the NPU kernel packs
+       a full logical chunk across planes.
+    """
+    # Third Party
+    from typing import Optional
+
+    import torch
+    from lmcache.v1.metadata import LMCacheMetadata
+
+    from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
+
+    _orig_get_shapes = LMCacheMetadata.get_shapes
+
+    def _get_shapes(
+        self: LMCacheMetadata, num_tokens: Optional[int] = None
+    ) -> list[torch.Size]:
+        if num_tokens is None:
+            num_tokens = self.chunk_size
+        klg_manager = self.kv_layer_groups_manager
+        if klg_manager is not None and klg_manager.kv_layer_groups:
+            shapes: list[torch.Size] = []
+            for group in klg_manager.kv_layer_groups:
+                plane_bytes = getattr(group, "multi_plane_hidden_bytes", None)
+                physical = group.physical_chunk_size or num_tokens
+                if num_tokens != self.chunk_size and physical:
+                    physical = max(1, num_tokens * physical // self.chunk_size)
+                if plane_bytes is not None:
+                    token_dim = num_tokens
+                    hidden = _lmc_chunk_hidden_bytes(plane_bytes, token_dim)
+                else:
+                    token_dim = physical
+                    hidden = group.hidden_dim_size
+                shapes.append(
+                    torch.Size(
+                        [
+                            group.shape_desc.kv_size,
+                            group.num_layers,
+                            token_dim,
+                            hidden,
+                        ]
+                    )
+                )
+            return shapes
+        return _orig_get_shapes(self, num_tokens)
+
+    LMCacheMetadata.get_shapes = _get_shapes
 
 
 def _patch_cache_engine():
@@ -546,16 +753,8 @@ def _patch_cache_engine():
 
 
 def _patch_hash_token():
-    # On OpenEuler and python3.10,
-    # the _hash_tokens func hash(None) seems to run into
-    # ASLR lead to non-deterministic hashing for builtin hash
     # Third Party
     import lmcache.v1.token_database
-
-    # First Party
-    from lmcache_ascend.v1.tokens_hash import _hash_tokens
-
-    lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
 
     # First Party
     from lmcache_ascend.v1.token_database import TokenDatabase_process_tokens
@@ -612,17 +811,12 @@ def _patch_sgl():
     from lmcache_ascend.integration.sglang.sglang_adapter import (
         LMCacheConnector__init__,
         LMCacheLayerwiseConnector_global_min_tokens,
-        LMCacheLayerwiseConnector_start_load_kv,
     )
 
     lmc_sglang_adapter.LMCacheConnector.__init__ = LMCacheConnector__init__
 
     lmc_sglang_adapter.LMCacheLayerwiseConnector.global_min_tokens = (
         LMCacheLayerwiseConnector_global_min_tokens
-    )
-
-    lmc_sglang_adapter.LMCacheLayerwiseConnector.start_load_kv = (
-        LMCacheLayerwiseConnector_start_load_kv
     )
 
     # Third Party
@@ -701,6 +895,9 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    if _build_info.__framework_name__ == "pytorch":
+        _patch_lmcache_global_variable()
+
     _patch_config()
 
     is_sgl = _is_sglang_runtime()
@@ -716,15 +913,17 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_ops()
     if is_vllm:
-        _patch_get_vllm_torch_dev()
         _patch_gpu_connector()
 
     _patch_hash_token()
+    _patch_metadata_get_shapes()
 
     _patch_cachegen()
     _patch_remote_backend()
 
     if _build_info.__framework_name__ == "pytorch":
+        _patch_memory_object_tensor()
+        _patch_paged_allocator_sync_group_prefix()
         _patch_storage_backend_init()
         _patch_storage_manager()
         _patch_transfer_channel()
@@ -733,8 +932,6 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_lookup_client()
         _patch_cache_controller_worker()
         _patch_rpc_utils()
-
-    _patch_kv_layer_group()
 
     if is_sgl:
         _patch_sgl()
@@ -752,5 +949,8 @@ if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "mindspore":
         # First Party
         import lmcache_ascend.mindspore  # noqa: F401
+
+    # vllm-ascend connector registration (no-op if vllm/vllm-ascend not installed).
+    _patch_vllm_ascend_connector()
 
     LMCACHE_ASCEND_PATCHED = True

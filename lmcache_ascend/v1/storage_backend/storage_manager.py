@@ -9,7 +9,10 @@ These rebind:
   LRU bookkeeping strictly best-effort so a single evicted key can never abort a
   lookup (see "Why touch_cache must not raise" below),
 * ``StorageManager.prefetch_all_done_callback`` -- mirror prefetched tiers into
-  the local hot cache when enabled (see ``patched_prefetch_all_done_callback``).
+  the local hot cache when enabled (see ``patched_prefetch_all_done_callback``),
+* ``allocate_and_copy_objects`` -- allocate via plural ``get_shapes()`` /
+  ``get_dtypes()`` for multi-group objs when copying into a distinct allocator
+  backend (e.g. PD).
 
 so the fixes live in the Ascend overlay instead of mutating the upstream
 LMCache tree.
@@ -61,16 +64,72 @@ no-op for missing keys instead of aborting the lookup.
 """
 
 # Standard
-from typing import List, Optional, cast
+from typing import Any, List, Optional, Sequence, cast
 
 # Third Party
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.event_manager import EventStatus, EventType
 from lmcache.v1.memory_management import MemoryObj
+from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
+# First Party
+from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
+
 logger = init_logger(__name__)
+
+
+def allocate_and_copy_objects(
+    allocator_backend: AllocatorBackendInterface,
+    keys: Sequence[CacheEngineKey],
+    src_memory_objs: list[MemoryObj],
+    stream: Any,
+) -> tuple[Sequence[CacheEngineKey], list[MemoryObj]]:
+    """Allocate+copy preserving multi-group ``meta.shapes`` / ``meta.dtypes``.
+
+    Upstream uses singular ``get_shape()``/``get_dtype()``, which only cover
+    group 0 and under-allocate multi-group objs (dropping later groups).
+    """
+    allocated_objects = []
+    for key, src_memory_obj in zip(keys, src_memory_objs, strict=False):
+        if allocator_backend.contains(key):
+            continue
+
+        if is_multi_group_memory_obj(src_memory_obj):
+            alloc_shapes = src_memory_obj.get_shapes()
+            alloc_dtypes = src_memory_obj.get_dtypes()
+        else:
+            alloc_shapes = src_memory_obj.get_shape()
+            alloc_dtypes = src_memory_obj.get_dtype()
+
+        memory_obj = allocator_backend.allocate(
+            alloc_shapes,
+            alloc_dtypes,
+            fmt=src_memory_obj.meta.fmt,
+            eviction=True,
+            busy_loop=False,
+        )
+
+        if memory_obj is None:
+            break
+
+        if memory_obj.tensor is None:
+            logger.warning(
+                "Allocated MemoryObj has None tensor, this is unexpected. "
+                "Releasing the memory object."
+            )
+            memory_obj.ref_count_down()
+            break
+
+        with torch_dev.stream(stream):
+            memory_obj.tensor.copy_(src_memory_obj.tensor, non_blocking=True)
+        allocated_objects.append(memory_obj)
+
+    if stream is not None:
+        stream.synchronize()
+    return keys[: len(allocated_objects)], allocated_objects
 
 
 def get(

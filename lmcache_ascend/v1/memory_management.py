@@ -1,54 +1,32 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
-from contextlib import nullcontext
-from typing import Optional
-import threading
+"""Ascend helpers for multi-group ``MemoryObj`` metadata."""
 
 # Third Party
-from lmcache.logging import init_logger
-from lmcache.v1.memory_management import (
-    MemoryAllocatorInterface,
-    PagedTensorMemoryAllocator,
-    TensorMemoryAllocator,
-)
-import torch
-
-logger = init_logger(__name__)
+from lmcache.v1.memory_management import MemoryObj
 
 
-def GPUMemoryAllocator__init__(
-    self,
-    size: int,
-    device="npu",
-    align_bytes: Optional[int] = None,
-    use_paging: bool = False,
-    **kwargs,
-):
+def is_multi_group_memory_obj(memory_obj: MemoryObj) -> bool:
+    """Return True when ``memory_obj`` spans more than one KV layer group."""
+    return len(getattr(memory_obj, "group_prefix_sum", (0,))) > 2
+
+
+def sync_group_prefix_sum(memory_obj: MemoryObj) -> None:
+    """Rebuild ``group_prefix_sum`` from ``meta.shapes`` / ``meta.dtypes``.
+
+    Upstream ``PagedTensorMemoryAllocator.allocate`` updates ``meta.shapes``
+    when the request differs from the pool page layout but does not refresh
+    ``group_prefix_sum`` (computed only in ``TensorMemoryObj.__init__``).
+    Installed via ``_patch_paged_allocator_sync_group_prefix`` so every
+    freelist allocate path refreshes prefixes.
     """
-    :param int size: The size of the GPU memory in bytes.
-    :param Optional[int] align_bytes: The byte alignment for allocations.
-    """
-    # NOTE(niming): torch.cuda.is_available() is mocked to False by sglang.
-    if not torch.npu.is_available():
-        device = "cpu"
-
-    self.tensor = torch.empty(size, dtype=torch.uint8, device=device)
-
-    self.allocator: MemoryAllocatorInterface
-    if use_paging:
-        assert "shapes" in kwargs, "shapes must be specified for paged memory allocator"
-        assert "dtypes" in kwargs, "dtypes must be specified for paged memory allocator"
-        assert "fmt" in kwargs, "fmt must be specified for paged memory allocator"
-        self.allocator = PagedTensorMemoryAllocator(
-            tensor=self.tensor,
-            shapes=kwargs["shapes"],
-            dtypes=kwargs["dtypes"],
-            fmt=kwargs["fmt"],
-        )
-    else:
-        kwargs = {}
-        if align_bytes is not None:
-            kwargs["align_bytes"] = align_bytes
-        self.allocator = TensorMemoryAllocator(self.tensor, **kwargs)
-
-    self.device_mem_lock = threading.Lock() if not use_paging else nullcontext()
+    meta = memory_obj.meta
+    shapes = meta.shapes
+    dtypes = meta.dtypes
+    if shapes is None or dtypes is None:
+        return
+    prefix = [0]
+    nbytes = 0
+    for shape, dtype in zip(shapes, dtypes, strict=True):
+        nbytes += int(shape.numel()) * dtype.itemsize
+        prefix.append(nbytes)
+    memory_obj.group_prefix_sum = prefix

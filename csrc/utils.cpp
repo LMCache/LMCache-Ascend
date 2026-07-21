@@ -1,5 +1,6 @@
 #include "utils.h"
 #include "dcmi_management.h"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -20,6 +21,8 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
     return kvcache_ops::AscendType::INT64;
   } else if (scalarType == at::ScalarType::Int) {
     return kvcache_ops::AscendType::INT32;
+  } else if (scalarType == at::ScalarType::Byte || scalarType == at::ScalarType::Char) {
+    return kvcache_ops::AscendType::INT8;
   } else {
     TORCH_CHECK(false, "ScalarType not supported.");
   }
@@ -58,20 +61,22 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
 
   switch (config.kvcache_format) {
   case kvcache_ops::KVCacheFormat::MERGED_KV:
-    config.kv_size = 2;
+    config.kv_size = static_cast<int>(key_value.size(0));
     config.hidden_dims = key_value.size(-1);
     break;
   case kvcache_ops::KVCacheFormat::SEPARATE_KV:
-    config.kv_size = 2;
+    config.kv_size = static_cast<int>(key_value.size(0));
     config.hidden_dims = key_value.size(-1);
     break;
   case kvcache_ops::KVCacheFormat::MLA_KV:
     config.kv_size = 2;
-    config.hidden_dims = config.k_hidden_dims;
+    // LMC chunk is [*, layers, tokens, kv_lora_rank + qk_rope_head_dim] (planes per token).
+    config.hidden_dims = config.k_hidden_dims + config.v_hidden_dims;
     break;
   case kvcache_ops::KVCacheFormat::DSA_KV:
     config.kv_size = 3;
-    config.hidden_dims = config.k_hidden_dims;
+    config.hidden_dims =
+        config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims;
     break;
   default:
     TORCH_CHECK(false, "Unsupported KVCacheFormat: ", kvcache_format_raw);

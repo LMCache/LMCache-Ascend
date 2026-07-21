@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import List
-import uuid
 
 # Third Party
-from lmcache.integration.sglang.sglang_adapter import LoadMetadata
+from lmcache import torch_dev
 from lmcache.logging import init_logger
 from sglang.srt.configs.model_config import ModelConfig
 import torch
@@ -71,67 +70,8 @@ def LMCacheLayerwiseConnector_global_min_tokens(
     # NOTE(niming):Mandatory synchronization for TP > 1 on NPU/HCCL.
     # Under high request loads, the NPU task manager may experience race conditions
     # between compute kernels and HCCL all_reduce, leading to a permanent deadlock.
-    torch.cuda.synchronize()
+    torch_dev.synchronize()
 
     dist.all_reduce(t, op=dist.ReduceOp.MIN, group=tp_group)
 
     return int(t.item())
-
-
-def LMCacheLayerwiseConnector_start_load_kv(self, load_metadata: LoadMetadata) -> int:
-    token_ids = torch.tensor(load_metadata.token_ids, dtype=torch.int64).cuda()
-    slot_mapping = load_metadata.slot_mapping.cuda()
-    offset = load_metadata.offset
-
-    assert self.lmcache_engine is not None
-
-    load_mask = torch.ones_like(token_ids, dtype=torch.bool)
-    load_mask[:offset] = False
-
-    lookup_id = str(uuid.uuid4())
-    retrieve_token_num = self.lmcache_engine.lookup(
-        token_ids,
-        lookup_id=lookup_id,
-        pin=True,
-    )
-
-    retrieve_token_num = self.global_min_tokens(
-        retrieve_token_num, self.tp_group, torch.device(f"npu:{self.rank}")
-    )
-
-    # NOTE(niming): Handle edge cases where retrieve_token_num <= offset.
-    # This occurs when RadixCache already contains more tokens than LMCache returns,
-    # which would otherwise result in a negative start_load_kv value.
-    # TODO: Remove this workaround in the next release.
-    if retrieve_token_num <= offset:
-        self.lmcache_engine.lookup_unpin(lookup_id)
-        logger.info(
-            f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-            f"offset={offset}, no new tokens to retrieve"
-        )
-        return 0
-
-    layerwise_retriever = self.lmcache_engine.retrieve_layer(
-        token_ids[:retrieve_token_num],
-        mask=load_mask[:retrieve_token_num],
-        kvcaches=self.kvcaches,
-        slot_mapping=slot_mapping[:retrieve_token_num],
-        sync=False,
-    )
-
-    next(layerwise_retriever)
-    # Load First Layer
-    next(layerwise_retriever)
-
-    self.layerwise_retrievers.append(layerwise_retriever)
-    self.layer_load_layer.append(1)
-
-    self.lookup_id_list.append(lookup_id)
-
-    num_new_tokens = retrieve_token_num - offset
-    logger.info(
-        f"LMCache retrieve started: lookup={retrieve_token_num}, "
-        f"offset={offset}, retrieve {num_new_tokens} new tokens"
-    )
-
-    return num_new_tokens

@@ -2,6 +2,7 @@
 # Standard
 import importlib
 import os
+import sys
 
 # Third Party
 import pytest
@@ -17,11 +18,14 @@ collect_ignore_glob = ["v1/multiprocess/test_*.py"]
 # ==============================================================================
 # 1. RUN BOOTSTRAP
 # ==============================================================================
+_lmcache_path = os.environ.get("LMCACHEPATH")
+if _lmcache_path and _lmcache_path not in sys.path:
+    sys.path.insert(0, _lmcache_path)
+
 try:
     prepare_environment()
 except Exception as e:
     pytest.exit(f"❌ Bootstrap failed: {e}", returncode=1)
-
 
 # ==============================================================================
 # 2. NPU ENVIRONMENT SETUP
@@ -38,9 +42,11 @@ def setup_npu_backend():
             from torch_npu.contrib import transfer_to_npu  # noqa: F401
             import torch
 
-            # Sanity check
-            _ = torch.randn((10), device="npu")
-            print("   ✅ NPU Backend initialized successfully.")
+            if hasattr(torch, "npu") and torch.npu.is_available():
+                _ = torch.randn((10), device="npu")
+                print("   ✅ NPU Backend initialized successfully.")
+            else:
+                print("   ℹ️ CPU-only pytest: skipped NPU sanity check.")
 
     except ImportError as e:
         pytest.exit(f"❌ lmcache_ascend or torch_npu not found: {e}", returncode=1)
