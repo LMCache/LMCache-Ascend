@@ -6,6 +6,7 @@ from typing import Optional, Union
 from lmcache.logging import init_logger
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata, LMCBlendMetadata
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.trace_utils import emit_layer_timer
 import torch
 
 # First Party
@@ -66,6 +67,27 @@ class LMCBlender:
             attn_mask=None,
             positions=None,
         )
+        self._layer_topk_ms: dict[int, float] = {}
+        self._active_timer_req_id = None
+        self._active_timer_path = None
+        self._active_timer_load_mode = None
+
+    def _emit_timer(self, bucket: str, layer_id: int, duration_ms: float) -> None:
+        emit_layer_timer(
+            bucket,
+            req_id=self._active_timer_req_id,
+            layer_id=layer_id,
+            duration_ms=duration_ms,
+            path=self._active_timer_path,
+            load_mode=self._active_timer_load_mode,
+        )
+
+    def get_last_topk_ms(self, layer_id: int) -> float:
+        return float(self._layer_topk_ms.get(layer_id, 0.0))
+
+    def emit_blend_timer(self, layer_id: int, duration_ms: float) -> None:
+        blend_ms = max(float(duration_ms) - self.get_last_topk_ms(layer_id), 0.0)
+        self._emit_timer("blend", layer_id, blend_ms)
 
     def _get_recomp_ratio(self, layer_id: int) -> float:
         """Return the recomputation ratio for ``layer_id``.
@@ -194,7 +216,12 @@ class LMCBlender:
         # TODO(Jiayi): store is currently not included in this function
 
         layerwise_model_executor = self.layerwise_model.compute_layer(tokens, mask)
-        layerwise_retriever = self.cache_engine.retrieve_layer(tokens, mask, **kwargs)
+        layerwise_retriever = self.cache_engine.retrieve_layer(
+            tokens,
+            mask,
+            gpu_connector_override=self.gpu_connector,
+            **kwargs,
+        )
 
         next(layerwise_retriever)
         yield
@@ -220,7 +247,22 @@ class LMCBlender:
         """
         if isinstance(tokens, list):
             tokens = torch.tensor(tokens).npu()
+        req_id = kwargs.get("req_id")
+        self._active_timer_req_id = None if req_id is None else str(req_id)
+        timer_path = kwargs.pop("timer_path", None)
+        self._active_timer_path = None if timer_path is None else str(timer_path)
+        timer_load_mode = kwargs.pop("timer_load_mode", None)
+        self._active_timer_load_mode = (
+            None if timer_load_mode is None else str(timer_load_mode)
+        )
+        self._layer_topk_ms.clear()
         layerwise_blender = self.blend_layer(tokens, mask, **kwargs)
 
-        for i in range(self.num_layers + 2):
-            next(layerwise_blender)
+        try:
+            for i in range(self.num_layers + 2):
+                next(layerwise_blender)
+        finally:
+            self._active_timer_req_id = None
+            self._active_timer_path = None
+            self._active_timer_load_mode = None
+            self._layer_topk_ms.clear()
