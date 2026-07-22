@@ -1,0 +1,29 @@
+chunk_size: 256
+local_cpu: True
+max_local_cpu_size: 16
+enable_async_loading: False
+
+# P2P configuration
+enable_p2p: True
+p2p_host: "localhost" # Replace with this instance's host IP.
+p2p_init_ports: [9964, 9965] # One port per TP rank.
+p2p_lookup_ports: [9966, 9967] # One port per TP rank.
+transfer_channel: "hccl"
+p2p_use_npu: True
+p2p_pull_mode: True
+p2p_delay_pull: True
+p2p_npu_buffer_size: 134217728 # 128 MiB
+
+# Controller configuration
+enable_controller: True
+lmcache_instance_id: "lmcache_instance_2"
+controller_pull_url: "localhost:9800"
+controller_reply_url: "localhost:9900"
+lmcache_worker_ports: [9952, 9953] # One port per TP rank.
+
+extra_config:
+  lookup_backoff_time: 0.001
+  # Register a bounded host arena instead of the full local CPU KV cache.
+  use_host_staging: True
+  # Capacity per LMCache worker (TP rank); 8 GiB in this example.
+  os_staging_bytes: 8589934592
