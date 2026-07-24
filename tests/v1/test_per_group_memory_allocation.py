@@ -23,8 +23,10 @@ from lmcache.v1.memory_management import (
 )
 from lmcache.v1.metadata import LMCacheMetadata
 
+from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
+from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 from .conftest_ds4 import (
@@ -426,3 +428,84 @@ def test_single_group_connector_from_gpu_uses_tensor() -> None:
         ) as mock_xfer:
             connector.from_gpu(mem_obj, 0, num_tokens, **kwargs)
     assert mock_xfer.called
+
+
+def test_fill_shard_sender_receiver_preserve_multi_group_flat_raw_data():
+    """Sharded-broadcast fill must not reshape multi-group blobs to group-0.
+
+    Regression for RuntimeError: shape '[..., 129]' invalid for input of
+    size <full multi-group nbytes> in ``_fill_shard_sender`` / receiver.
+    """
+    shapes = [
+        torch.Size([1, 2, 256, 64]),
+        torch.Size([1, 2, 256, 128]),
+    ]
+    dtypes = [torch.bfloat16, torch.bfloat16]
+    mem_obj = _allocate_memory_obj(shapes, dtypes)
+    assert is_multi_group_memory_obj(mem_obj)
+    byte_size = mem_obj.get_size()
+    mem_obj.raw_data.fill_(7)
+
+    merged = torch.zeros(byte_size, dtype=torch.uint8)
+    layout = [(0, 0, byte_size)]
+    meta_table = [(0, 256, mem_obj.metadata.to_dict())]
+    reordered_chunks = [(None, mem_obj, 0, 256)]
+
+    engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)
+
+    objs, starts, ends = AscendLMCacheEngine._fill_shard_sender(
+        engine, merged, layout, meta_table, reordered_chunks
+    )
+    assert starts == [0] and ends == [256]
+    assert len(objs) == 1
+    assert is_multi_group_memory_obj(objs[0])
+    assert objs[0].get_shapes() == shapes
+    assert objs[0].get_dtypes() == dtypes
+    assert objs[0].raw_data.dtype == torch.uint8
+    assert objs[0].raw_data.numel() == byte_size
+    assert torch.equal(objs[0].raw_data, merged)
+
+    ret_mask = torch.zeros(256, dtype=torch.bool)
+    recv_objs, r_starts, r_ends = AscendLMCacheEngine._fill_shard_receiver(
+        engine, merged, layout, meta_table, ret_mask
+    )
+    assert r_starts == [0] and r_ends == [256]
+    assert len(recv_objs) == 1
+    assert is_multi_group_memory_obj(recv_objs[0])
+    assert recv_objs[0].get_shapes() == shapes
+    assert recv_objs[0].get_dtypes() == dtypes
+    assert recv_objs[0].raw_data.dtype == torch.uint8
+    assert recv_objs[0].raw_data.numel() == byte_size
+    assert ret_mask.all()
+
+
+def test_fill_shard_sender_receiver_single_group_still_reshapes():
+    """Single-group path keeps the existing dtype/shape view of the slice."""
+    shapes = [torch.Size([1, 2, 256, 64])]
+    dtypes = [torch.bfloat16]
+    mem_obj = _allocate_memory_obj(shapes, dtypes)
+    assert not is_multi_group_memory_obj(mem_obj)
+    byte_size = mem_obj.get_size()
+
+    merged = torch.zeros(byte_size, dtype=torch.uint8)
+    layout = [(0, 0, byte_size)]
+    meta_table = [(0, 256, mem_obj.metadata.to_dict())]
+    reordered_chunks = [(None, mem_obj, 0, 256)]
+
+    engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)
+
+    objs, _, _ = AscendLMCacheEngine._fill_shard_sender(
+        engine, merged, layout, meta_table, reordered_chunks
+    )
+    assert len(objs) == 1
+    assert objs[0].raw_data.dtype == torch.bfloat16
+    assert objs[0].raw_data.shape == shapes[0]
+
+    ret_mask = torch.zeros(256, dtype=torch.bool)
+    recv_objs, _, _ = AscendLMCacheEngine._fill_shard_receiver(
+        engine, merged, layout, meta_table, ret_mask
+    )
+    assert len(recv_objs) == 1
+    assert recv_objs[0].raw_data.dtype == torch.bfloat16
+    assert recv_objs[0].raw_data.shape == shapes[0]
+    assert ret_mask.all()
