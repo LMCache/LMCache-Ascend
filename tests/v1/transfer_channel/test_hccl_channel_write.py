@@ -765,6 +765,147 @@ def multi_buffer_receiver_process(
         sys.exit(1)
 
 
+# Delay *after* accept returns so connect() unblocks and MemReg can race
+# the receiver's conn_handles_dict publish.
+ACCEPT_POST_DELAY_S = 0.3
+
+
+class _SlowAcceptAgent:
+    """Proxy: real accept(), then sleep (pybind accept is read-only)."""
+
+    def __init__(self, agent: Any, delay_s: float) -> None:
+        self._agent = agent
+        self._delay_s = delay_s
+
+    def accept(self, client_meta: Any, server_meta: Any) -> Any:
+        handle = self._agent.accept(client_meta, server_meta)
+        time.sleep(self._delay_s)
+        return handle
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._agent, name)
+
+
+def race_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
+    """Sender: lazy_init only — stresses MemReg vs delayed accept publish."""
+    try:
+        faulthandler.enable()
+        warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        logger = init_logger(__name__)
+        torch.npu.set_device(config.send_device_id)
+
+        allocator = get_allocator(
+            config.send_device_id,
+            config.kv_shape,
+            config.dtype,
+            use_host=False,
+            gpu_buffer_pages=config.gpu_buffer_pages,
+        )
+        buf_ptrs, buf_sizes, buf_types, align_list = _build_channel_buffers(
+            allocator,
+            config.kv_shape,
+            config.dtype,
+            use_host=False,
+            use_multi_buffer=False,
+        )
+
+        local_url = f"0.0.0.0:378{config.send_device_id}"
+        remote_url = f"0.0.0.0:378{config.recv_device_id}"
+
+        wait_start = time.time()
+        while "receiver_ready" not in shared_dict:
+            time.sleep(0.05)
+            if time.time() - wait_start > 30:
+                raise TimeoutError("Sender timed out waiting for receiver")
+
+        channel = CreateTransferChannel(
+            channel_type="hccl",
+            async_mode=False,
+            role="sender",
+            buffer_ptr=buf_ptrs,
+            buffer_size=buf_sizes,
+            buffer_type=buf_types,
+            align_bytes=align_list,
+            tp_rank=0,
+            peer_init_url=local_url,
+        )
+
+        channel.lazy_init_peer_connection(
+            local_id=str(config.send_device_id),
+            peer_id=str(config.recv_device_id),
+            peer_init_url=remote_url,
+        )
+
+        if not channel.remote_xfer_handler_exists(str(config.recv_device_id)):
+            raise AssertionError("Sender missing peer conn_handle after handshake")
+
+        shared_dict["handshake_done"] = True
+        logger.info("Race sender: handshake complete")
+        channel.close()
+
+    except Exception as e:
+        logger.error(f"Race sender failed: {e}")
+        sys.exit(1)
+
+
+def race_receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> None:
+    """Receiver: wrap accept with post-return delay, wait for handshake."""
+    try:
+        faulthandler.enable()
+        warnings.filterwarnings("ignore", message=".*torch.Tensor.cuda.*")
+        logger = init_logger(__name__)
+        torch.npu.set_device(config.recv_device_id)
+
+        allocator = get_allocator(
+            config.recv_device_id,
+            config.kv_shape,
+            config.dtype,
+            use_host=False,
+            gpu_buffer_pages=config.gpu_buffer_pages,
+        )
+        buf_ptrs, buf_sizes, buf_types, align_list = _build_channel_buffers(
+            allocator,
+            config.kv_shape,
+            config.dtype,
+            use_host=False,
+            use_multi_buffer=False,
+        )
+
+        local_url = f"0.0.0.0:378{config.recv_device_id}"
+
+        channel = CreateTransferChannel(
+            channel_type="hccl",
+            async_mode=False,
+            role="receiver",
+            buffer_ptr=buf_ptrs,
+            buffer_size=buf_sizes,
+            buffer_type=buf_types,
+            align_bytes=align_list,
+            tp_rank=0,
+            peer_init_url=local_url,
+        )
+        channel.hccl_agent = _SlowAcceptAgent(channel.hccl_agent, ACCEPT_POST_DELAY_S)
+        shared_dict["receiver_ready"] = True
+
+        wait_start = time.time()
+        while "handshake_done" not in shared_dict:
+            time.sleep(0.05)
+            if time.time() - wait_start > config.timeout:
+                raise TimeoutError("Receiver timed out waiting for handshake")
+
+        if str(config.send_device_id) not in channel.conn_handles_dict:
+            raise AssertionError(
+                f"Receiver missing conn_handle for peer {config.send_device_id}"
+            )
+
+        logger.info("Race receiver: handshake verified")
+        channel.close()
+
+    except Exception as e:
+        logger.error(f"Race receiver failed: {e}")
+        sys.exit(1)
+
+
 # ──────────────────────────────────────────────────────────
 # Test runners
 # ──────────────────────────────────────────────────────────
@@ -1010,3 +1151,22 @@ def test_hccl_write_host_350gb_buffer():
         gpu_buffer_pages=0,
     )
     _run_two_process_test(config, write_sender_process, write_receiver_process)
+
+
+@pytest.mark.skipif(
+    not torch.npu.is_available() or torch.npu.device_count() < 2,
+    reason="Requires at least 2 NPU devices",
+)
+def test_hccl_mem_reg_waits_for_background_accept():
+    """lazy_init succeeds when accept→publish is delayed (issue #263).
+
+    Sleeps after accept() returns so MemReg can race conn_handles_dict publish.
+    """
+    config = HcclTestConfig(
+        num_objs=1,
+        kv_shape=(1, 2, 16, 1, 16),
+        timeout=60,
+        use_host_memory=False,
+        gpu_buffer_pages=4,
+    )
+    _run_two_process_test(config, race_sender_process, race_receiver_process)
