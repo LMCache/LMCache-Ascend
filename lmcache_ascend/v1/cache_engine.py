@@ -681,6 +681,12 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._pipelined_sharded_broadcast_and_load(
                     reordered_chunks, ret_mask, **kwargs
                 )
+        elif len(reordered_chunks) > 0:
+            with retrieve_stats.profile_to_gpu():
+                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                self.gpu_connector.batched_to_gpu(
+                    list(memory_objs), list(starts), list(ends), **kwargs
+                )
 
         # --- Cleanup ---
         # When save_only_first_rank is set, the sharded-broadcast pipeline
