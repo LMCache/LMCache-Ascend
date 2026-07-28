@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Ascend helpers for multi-group ``MemoryObj`` legacy metadata."""
+"""Ascend helpers for multi-group ``MemoryObj`` metadata."""
 
 # Third Party
-import torch
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -11,16 +10,23 @@ def is_multi_group_memory_obj(memory_obj: MemoryObj) -> bool:
     return len(getattr(memory_obj, "group_prefix_sum", (0,))) > 2
 
 
-def maybe_normalize_multi_group_metadata(memory_obj: MemoryObj) -> None:
-    """Rewrite legacy ``meta.shape``/``meta.dtype`` to a flat uint8 byte view.
+def sync_group_prefix_sum(memory_obj: MemoryObj) -> None:
+    """Rebuild ``group_prefix_sum`` from ``meta.shapes`` / ``meta.dtypes``.
 
-    Per-group structure remains in ``meta.shapes`` / ``meta.dtypes`` for
-    ``get_tensor(i)``. Idempotent for already-normalized objects.
+    Upstream ``PagedTensorMemoryAllocator.allocate`` updates ``meta.shapes``
+    when the request differs from the pool page layout but does not refresh
+    ``group_prefix_sum`` (computed only in ``TensorMemoryObj.__init__``).
+    Installed via ``_patch_paged_allocator_sync_group_prefix`` so every
+    freelist allocate path refreshes prefixes.
     """
-    if not is_multi_group_memory_obj(memory_obj):
-        return
     meta = memory_obj.meta
-    assert meta.shapes is not None and meta.dtypes is not None
-    num_bytes = memory_obj.get_size()
-    meta.shape = torch.Size([num_bytes])
-    meta.dtype = torch.uint8
+    shapes = meta.shapes
+    dtypes = meta.dtypes
+    if shapes is None or dtypes is None:
+        return
+    prefix = [0]
+    nbytes = 0
+    for shape, dtype in zip(shapes, dtypes, strict=True):
+        nbytes += int(shape.numel()) * dtype.itemsize
+        prefix.append(nbytes)
+    memory_obj.group_prefix_sum = prefix

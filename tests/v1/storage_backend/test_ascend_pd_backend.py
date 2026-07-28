@@ -114,6 +114,11 @@ def _make_pd_backend_stub(
     backend._fmt = MemoryFormat.KV_2LTD
     backend._kv_shapes = [DEFAULT_SHAPE]
     backend._kv_dtypes = [kv_dtype]
+    backend._metadata = MagicMock()
+    backend._metadata.get_num_groups.return_value = 1
+    backend._metadata.get_shapes.return_value = [DEFAULT_SHAPE]
+    backend._metadata.get_dtypes.return_value = [kv_dtype]
+    backend._peer_alloc_backoff_ttl = 0.01
 
     # Wire internal delegation methods to their real implementations so tests
     # that call e.g. AscendPDBackend.contains(backend, ...) actually exercise

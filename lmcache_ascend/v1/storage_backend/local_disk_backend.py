@@ -10,10 +10,7 @@ from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 
 # First Party
-from lmcache_ascend.v1.memory_management import (
-    is_multi_group_memory_obj,
-    maybe_normalize_multi_group_metadata,
-)
+from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 
 _orig_async_save_bytes_to_disk = None
 
@@ -28,22 +25,18 @@ def _allocate_from_disk_meta(
     shapes = getattr(disk_meta, "shapes", None)
     dtypes = getattr(disk_meta, "dtypes", None)
     if shapes and dtypes:
-        memory_obj = local_cpu_backend.allocate(
+        return local_cpu_backend.allocate(
             shapes,
             dtypes,
             fmt,
             busy_loop=busy_loop,
         )
-    else:
-        memory_obj = local_cpu_backend.allocate(
-            disk_meta.shape,
-            disk_meta.dtype,
-            fmt,
-            busy_loop=busy_loop,
-        )
-    if memory_obj is not None:
-        maybe_normalize_multi_group_metadata(memory_obj)
-    return memory_obj
+    return local_cpu_backend.allocate(
+        disk_meta.shape,
+        disk_meta.dtype,
+        fmt,
+        busy_loop=busy_loop,
+    )
 
 
 def local_disk_async_save_bytes_to_disk(

@@ -7,7 +7,7 @@ Extracts common patterns used by both ``pd_backend.py`` and
 """
 
 # Standard
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Union
 import time
 
 # Third Party
@@ -56,8 +56,8 @@ def release_memory_objects(
 
 def allocate_with_retry(
     allocate_fn: Callable[..., Optional[MemoryObj]],
-    shape: torch.Size,
-    dtype: torch.dtype,
+    shape: Union[torch.Size, list[torch.Size]],
+    dtype: Union[torch.dtype, list[torch.dtype]],
     fmt: MemoryFormat,
     poll_interval: float = 0.01,
     timeout: float = 5.0,
@@ -68,6 +68,7 @@ def allocate_with_retry(
     ----------
     allocate_fn:
         Callable with signature ``(shape, dtype, fmt) -> Optional[MemoryObj]``.
+        ``shape``/``dtype`` may be scalars or per-group lists (multi-group PD).
     shape, dtype, fmt:
         Arguments forwarded to *allocate_fn*.
     poll_interval:

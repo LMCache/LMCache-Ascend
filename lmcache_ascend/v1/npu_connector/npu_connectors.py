@@ -2,6 +2,7 @@
 # Standard
 from typing import Any, List, Optional, Sequence, Set, Tuple, Union
 import contextlib
+import threading
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -782,6 +783,9 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.metadata: Optional[LMCacheMetadata] = None
 
         super().__init__(hidden_dim_size, num_layers, use_gpu, **kwargs)
+
+        self._failed_load_req_ids: Set[str] = set()
+        self._failed_load_lock = threading.Lock()
 
         if is_310p():
             assert "num_kv_head" in kwargs, ("num_kv_head should be provided in 310p",)
@@ -1917,6 +1921,22 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                         self.to_gpu(memory_obj, start, end, **kwargs)
             self.load_stream.synchronize()
 
+    def _record_failed_load(self, req_id: Optional[str]) -> None:
+        if not req_id:
+            logger.error(
+                "P2P pull failed but no req_id was provided; cannot mark "
+                "blocks invalid for recompute."
+            )
+            return
+        with self._failed_load_lock:
+            self._failed_load_req_ids.add(req_id)
+
+    def drain_failed_load_req_ids(self) -> Set[str]:
+        with self._failed_load_lock:
+            failed = self._failed_load_req_ids
+            self._failed_load_req_ids = set()
+        return failed
+
     def _clear_proxy_batch(self, batch) -> None:
         """Clear the backing objects of the proxy batch."""
         for proxy, _, _ in batch:
@@ -2057,6 +2077,17 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
                         **kwargs,
                     )
                     self._clear_proxy_batch(prev_batch)
+            except Exception as exc:
+                req_id = kwargs.get("req_id")
+                logger.error(
+                    "P2P pull failed for req %s (%s): %s; treating KV as "
+                    "a cache miss for local recompute.",
+                    req_id,
+                    type(exc).__name__,
+                    exc,
+                    exc_info=True,
+                )
+                self._record_failed_load(req_id)
             finally:
                 # Guarantee ping-pong buffers are returned and the Done
                 # signal is sent even if the pipeline raises or

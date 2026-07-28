@@ -1,14 +1,13 @@
 ## 1. 环境准备与工作目录创建
 
-首先在宿主机上创建工作目录。请将 `xx` 替换为您自己的特定标识
+首先在宿主机上创建工作目录。请将 `<USER_ID>` 替换为您自己的特定标识：
 
 ```bash
-# 创建基础工作工作空间
-mkdir -p /mnt/sdb/xx
-
+# 创建基础工作空间
+mkdir -p /mnt/sdb/<USER_ID>
 ```
 
-> **注意**：该目录将被挂载到容器内的 `/mnt/sdb/xx`，用于存放 LMCache-Ascend 源码、配置文件、benchmark 仓库。
+> **注意**：该目录将被挂载到容器内的 `/mnt/sdb/<USER_ID>`，用于存放 LMCache-Ascend 源码、配置文件、benchmark 仓库。
 
 ---
 
@@ -22,14 +21,14 @@ mkdir -p /mnt/sdb/xx
 export DEVICE_LIST="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
 
 docker run -itd \
-  --name lmcache-ds-xx \
+  --name lmcache-ds-<USER_ID> \
   --privileged \
   --net=host \
   --shm-size 128g \
   --restart unless-stopped \
   --cap-add=SYS_RESOURCE \
   --cap-add=IPC_LOCK \
-  -w /mnt/sdb/xx/ds-workspace \
+  -w /mnt/sdb/<USER_ID>/ds-workspace \
   -e ASCEND_VISIBLE_DEVICES="${DEVICE_LIST}" \
   -e ASCEND_RT_VISIBLE_DEVICES="${DEVICE_LIST}" \
   -e ASCEND_TOTAL_MEMORY_GB=64 \
@@ -47,7 +46,7 @@ docker run -itd \
   -v /root/.cache:/root/.cache \
   -v /mnt/sdc/models:/mnt/sdc/models \
   -v /mnt/sdb/models:/mnt/sdb/models \
-  -v /mnt/sdb/xx:/mnt/sdb/xx \
+  -v /mnt/sdb/<USER_ID>:/mnt/sdb/<USER_ID> \
   quay.nju.edu.cn/ascend/vllm-ascend:v0.20.2rc1-openeuler \
   /bin/bash -c "echo \"export PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\\$ '\" >> ~/.bashrc && exec /bin/bash"
 ```
@@ -74,8 +73,9 @@ cd ..
 # 1.clone 指定仓库
 git clone --recurse-submodules -b dsv4_support https://github.com/larksudo/LMCache-Ascend.git
 
-# 2. 拷贝算子
-#将 LMCache-Ascend/new_kernels/multi_layer_mem_kernels_v2_multi_plane.cpp 复制到 LMCache-Ascend/third_party/kvcache-ops/kernels/multi_layer/ 目录下
+# 2. 拷贝自定义算子到编译依赖目录
+cp LMCache-Ascend/new_kernels/multi_layer_mem_kernels_v2_multi_plane.cpp \
+   LMCache-Ascend/third_party/kvcache-ops/kernels/multi_layer/
 
 # 3. 进入 LMCache-Ascend 根目录，执行安装：
 pip install -v --no-build-isolation -e .
@@ -86,7 +86,7 @@ pip install -v --no-build-isolation -e .
 
 ## 4. 服务启动配置与脚本
 
-### 5.1 创建 LMCache 配置文件
+### 4.1 创建 LMCache 配置文件
 在工作目录下创建 `lmcache-config-ddr.yaml`：
 
 ```yaml
@@ -96,14 +96,16 @@ max_local_cpu_size: 1
 
 extra_config:
     save_only_first_rank: true
-    first_rank_max_local_cpu_size: 500
+    first_rank_max_local_cpu_size: 150
     broadcast_shard_size: 16
 
 ```
 
-### 5.2 启动脚本对比
+### 4.2 启动脚本对比
 
-为了对比基线与集成 LMCache（不同后端）后的性能差异，提供以下三份启动脚本。在测试前，请确保在对应路径下创建了各自的配置文件。
+Base 方案（纯 HBM）和 DDR 方案的**唯一差异**在于：DDR 方案增加了 `LMCACHE_CONFIG_FILE` 环境变量和 `--kv-transfer-config` 参数，其余启动参数完全一致。
+
+为了对比基线与集成 LMCache（不同后端）后的性能差异，提供以下两份启动脚本。在测试前，请确保在对应路径下创建了各自的配置文件。
 
 #### Base方案：HBM（纯原生显存前缀缓存）
 ```bash
@@ -159,7 +161,7 @@ vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
 ```
 
 #### 对比方案 DDR：（仅开启系统内存缓存）
-> **注意**：需提前创建 `/mnt/sdb/xx/ds-workspace/lmcache-config-ddr.yaml`
+> **注意**：需提前创建 `/mnt/sdb/<USER_ID>/ds-workspace/lmcache-config-ddr.yaml`
 ```bash
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=True
@@ -180,7 +182,7 @@ export PYTHONHASHSEED=0
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 # 1. 注入专属的 DDR 配置文件路径，防物理文件冲突
-export LMCACHE_CONFIG_FILE="/mnt/sdb/xx/lmcache-config-ddr.yaml"
+export LMCACHE_CONFIG_FILE="/mnt/sdb/<USER_ID>/lmcache-config-ddr.yaml"
 # export LMCACHE_LOG_LEVEL=DEBUG
 
 vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
@@ -223,15 +225,15 @@ vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
 
 ---
 
-## 6. Benchmark 基准测试
+## 5. Benchmark 基准测试
 
 服务拉起后，可以使用以下两种压测手段对 KV 缓存的效果进行量化评估。
 
-### 测试 1：LMCache 多轮对话原生 Bench
+### 5.1 LMCache 多轮对话原生 Bench
 主要评估多轮长对话下外置缓存系统在内存/磁盘层面的增量提取和命中情况。
 
 ```bash
-python3 /LMCache/benchmarks/multi_round_qa/benmulti-round-qa.py \
+python3 /LMCache/benchmarks/multi_round_qa/multi-round-qa.py \
     --num-users 64 \
     --num-rounds 10 \
     --qps 0.8 \
@@ -244,13 +246,13 @@ python3 /LMCache/benchmarks/multi_round_qa/benmulti-round-qa.py \
     --time 1200
 ```
 
-### 测试 2：vLLM Prefix 前缀重复命中 Bench
+### 5.2 vLLM Prefix 前缀重复命中 Bench
 主要评估大并发、多重复前缀场景下的吞吐与延迟表现。
 
 ```bash
 vllm bench serve \
   --backend vllm \
-  --base-url [http://127.0.0.1:8900](http://127.0.0.1:8900) \
+  --base-url http://127.0.0.1:8900 \
   --served-model-name dsv4 \
   --num-prompts 1000 \
   --max-concurrency 64 \
@@ -262,8 +264,9 @@ vllm bench serve \
 ```
 
 ---
-## (Tips)
+## 6. Tips
 
 > **如何显现 LMCache 外置缓存优势**：
 > 1. **极限并发压测**：大幅提高测试脚本中的 `--num-users` (如增至 128/256) 或 `--max-concurrency`，直到自带的 HBM 显存写满发生冷换出 (Eviction)，此时 LMCache 磁盘/内存换入的优势便会显现。
 > 2. **关闭原生前缀缓存**：在启动脚本中加入 `--no-enable-prefix-caching`，强制关闭 vLLM 内部的显存前缀匹配，使所有前缀缓存的存储与检索压力全部下沉到 LMCache 外置连接器，从而精准测试 LMCache 的 IO 效率。
+

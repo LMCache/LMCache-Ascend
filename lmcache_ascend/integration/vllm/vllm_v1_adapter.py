@@ -155,6 +155,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         if self._num_kv_groups <= 1:
             super().start_load_kv(forward_context, **kwargs)
+            self._mark_failed_p2p_loads_for_recompute()
             return
 
         if len(self.kv_caches) == 0:
@@ -301,6 +302,56 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                         block_size=self._block_sizes_by_group[pg],
                     )
                     self._invalid_block_ids.update(missing_blocks)
+
+        self._mark_failed_p2p_loads_for_recompute()
+
+    def _mark_failed_p2p_loads_for_recompute(self) -> None:
+        gpu_connector = getattr(self.lmcache_engine, "gpu_connector", None)
+        drain = getattr(gpu_connector, "drain_failed_load_req_ids", None)
+        if drain is None:
+            return
+        failed_req_ids = drain()
+        if not failed_req_ids:
+            return
+
+        metadata = self._parent._get_connector_metadata()
+        if not isinstance(metadata, LMCacheConnectorMetadata):
+            return
+
+        for request in metadata.requests:
+            if request.req_id not in failed_req_ids:
+                continue
+            load_spec = request.load_spec
+            if load_spec is None or not load_spec.can_load:
+                continue
+
+            tokens = request.token_ids
+            slot_mapping = request.slot_mapping
+            token_mask = torch.ones(len(tokens), dtype=torch.bool)
+            masked_token_count = (
+                load_spec.vllm_cached_tokens
+                // self._lmcache_chunk_size
+                * self._lmcache_chunk_size
+            )
+            token_mask[:masked_token_count] = False
+
+            lmcache_cached_tokens = load_spec.lmcache_cached_tokens
+            expected_mask = token_mask[:lmcache_cached_tokens]
+            ret_mask = torch.zeros(lmcache_cached_tokens, dtype=torch.bool)
+
+            missing_blocks = self.record_failed_blocks(
+                request.req_id,
+                expected_mask,
+                ret_mask,
+                slot_mapping[:lmcache_cached_tokens],
+            )
+            self._invalid_block_ids.update(missing_blocks)
+            logger.error(
+                "Marked %d KV blocks invalid for req %s after P2P pull "
+                "failure; vLLM will recompute them locally.",
+                len(missing_blocks),
+                request.req_id,
+            )
 
     @_lmcache_nvtx_annotate
     def wait_for_save(self):
