@@ -1,23 +1,22 @@
-## 1. 环境准备与工作目录创建
+## 1. Environment Preparation
 
-首先在宿主机上创建工作目录。请将 `<USER_ID>` 替换为您自己的特定标识：
+Create the working directory on the host. Replace `<USER_ID>` with your identifier:
 
 ```bash
-# 创建基础工作空间
 mkdir -p /mnt/sdb/<USER_ID>
 ```
 
-> **注意**：该目录将被挂载到容器内的 `/mnt/sdb/<USER_ID>`，用于存放 LMCache-Ascend 源码、配置文件、benchmark 仓库。
+> This directory is mounted into the container for storing source code, configs, and benchmarks.
 
 ---
 
-## 2. Docker 容器启动脚本
+## 2. Docker Container Startup
 
-使用下述命令启动昇腾 NPU 适配版的 vLLM 容器。请根据实际情况确认宿主机的模型路径（如 `/mnt/sdc/models`）是否存在。
+Launch the Ascend NPU vLLM container:
 
 ```bash
 #!/bin/bash
-# 定义使用的 NPU 卡号（当前配置为 16 卡全开）
+# NPU card IDs (all 16 cards)
 export DEVICE_LIST="0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
 
 docker run -itd \
@@ -53,37 +52,30 @@ docker run -itd \
 
 ---
 
-## 3. 源码安装与编译（容器内执行）
+## 3. Install from Source (Inside the Container)
 
-进入容器后，依次源码安装 `LMCache` 与 `LMCache-Ascend` 插件。
-
-### 3.1 安装 LMCache
+### 3.1 Install LMCache
 ```bash
 git clone -b v0.4.5 https://github.com/LMCache/LMCache.git
 cd LMCache
-
 export NO_CUDA_EXT=1
-
 python3 -m pip install -v --no-build-isolation -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 cd ..
 ```
 
-### 3.2 安装 LMCache-Ascend
+### 3.2 Install LMCache-Ascend
 ```bash
-# 1.clone 指定仓库
-git clone --recurse-submodules -b dsv4_support https://github.com/larksudo/LMCache-Ascend.git
-
-# 2. 进入 LMCache-Ascend 根目录，执行安装：
+git clone --recurse-submodules -b dsv4_support_045 https://github.com/LMCache/LMCache-Ascend.git
+cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
 
 ---
 
+## 4. Service Startup Configuration
 
-## 4. 服务启动配置与脚本
-
-### 4.1 创建 LMCache 配置文件
-在工作目录下创建 `lmcache-config-ddr.yaml`：
+### 4.1 LMCache Config File
+Create `lmcache-config-ddr.yaml`:
 
 ```yaml
 chunk_size: 1024
@@ -94,16 +86,13 @@ extra_config:
     save_only_first_rank: true
     first_rank_max_local_cpu_size: 150
     broadcast_shard_size: 16
-
 ```
 
-### 4.2 启动脚本对比
+### 4.2 Startup Scripts
 
-Base 方案（纯 HBM）和 DDR 方案的**唯一差异**在于：DDR 方案增加了 `LMCACHE_CONFIG_FILE` 环境变量和 `--kv-transfer-config` 参数，其余启动参数完全一致。
+The Base (HBM) and DDR scripts are identical except the DDR version adds `LMCACHE_CONFIG_FILE` and `--kv-transfer-config`.
 
-为了对比基线与集成 LMCache（不同后端）后的性能差异，提供以下两份启动脚本。在测试前，请确保在对应路径下创建了各自的配置文件。
-
-#### Base方案：HBM（纯原生显存前缀缓存）
+#### Base: HBM (Native HBM Prefix Cache)
 ```bash
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=True
@@ -156,8 +145,8 @@ vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
     "multistream_overlap_shared_expert":true}' > ds_base.log 2>&1
 ```
 
-#### 对比方案 DDR：（仅开启系统内存缓存）
-> **注意**：需提前创建 `/mnt/sdb/<USER_ID>/ds-workspace/lmcache-config-ddr.yaml`
+#### DDR: System Memory Cache Only
+> Requires `/mnt/sdb/<USER_ID>/ds-workspace/lmcache-config-ddr.yaml`.
 ```bash
 #!/bin/sh
 export VLLM_USE_MODELSCOPE=True
@@ -177,9 +166,8 @@ export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export PYTHONHASHSEED=0
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
-# 1. 注入专属的 DDR 配置文件路径，防物理文件冲突
+# DDR config path
 export LMCACHE_CONFIG_FILE="/mnt/sdb/<USER_ID>/lmcache-config-ddr.yaml"
-# export LMCACHE_LOG_LEVEL=DEBUG
 
 vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
     --max_model_len 65536 \
@@ -216,17 +204,15 @@ vllm serve /workspace/models/DeepSeek-V4-Flash-w8a8-mtp \
         "kv_connector": "LMCacheAscendConnectorV1Dynamic",
         "kv_role": "kv_both",
         "kv_connector_module_path": "lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
-    }' > ds_lmcache_ddr.log 2>&1  # 2. 修改日志名称，防止被覆盖
+    }' > ds_lmcache_ddr.log 2>&1
 ```
 
 ---
 
-## 5. Benchmark 基准测试
+## 5. Benchmark Testing
 
-服务拉起后，可以使用以下两种压测手段对 KV 缓存的效果进行量化评估。
-
-### 5.1 LMCache 多轮对话原生 Bench
-主要评估多轮长对话下外置缓存系统在内存/磁盘层面的增量提取和命中情况。
+### 5.1 Multi-Round Conversation Bench
+Evaluates external cache retrieval and hit rate in multi-round long conversations.
 
 ```bash
 python3 /LMCache/benchmarks/multi_round_qa/multi-round-qa.py \
@@ -242,8 +228,8 @@ python3 /LMCache/benchmarks/multi_round_qa/multi-round-qa.py \
     --time 1200
 ```
 
-### 5.2 vLLM Prefix 前缀重复命中 Bench
-主要评估大并发、多重复前缀场景下的吞吐与延迟表现。
+### 5.2 Prefix Repetition Bench
+Evaluates throughput and latency under high concurrency with repeated prefixes.
 
 ```bash
 vllm bench serve \
@@ -262,7 +248,6 @@ vllm bench serve \
 ---
 ## 6. Tips
 
-> **如何显现 LMCache 外置缓存优势**：
-> 1. **极限并发压测**：大幅提高测试脚本中的 `--num-users` (如增至 128/256) 或 `--max-concurrency`，直到自带的 HBM 显存写满发生冷换出 (Eviction)，此时 LMCache 磁盘/内存换入的优势便会显现。
-> 2. **关闭原生前缀缓存**：在启动脚本中加入 `--no-enable-prefix-caching`，强制关闭 vLLM 内部的显存前缀匹配，使所有前缀缓存的存储与检索压力全部下沉到 LMCache 外置连接器，从而精准测试 LMCache 的 IO 效率。
-
+> **To reveal LMCache advantages**:
+> 1. **Increase concurrency**: Raise `--num-users` (e.g., 128/256) or `--max-concurrency` until HBM fills up and eviction occurs.
+> 2. **Disable native prefix cache**: Add `--no-enable-prefix-caching` to test LMCache IO efficiency in isolation.
