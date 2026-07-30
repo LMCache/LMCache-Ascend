@@ -73,11 +73,7 @@ cd ..
 # 1.clone 指定仓库
 git clone --recurse-submodules -b dsv4_support https://github.com/larksudo/LMCache-Ascend.git
 
-# 2. 拷贝自定义算子到编译依赖目录
-cp LMCache-Ascend/new_kernels/multi_layer_mem_kernels_v2_multi_plane.cpp \
-   LMCache-Ascend/third_party/kvcache-ops/kernels/multi_layer/
-
-# 3. 进入 LMCache-Ascend 根目录，执行安装：
+# 2. 进入 LMCache-Ascend 根目录，执行安装：
 pip install -v --no-build-isolation -e .
 ```
 
