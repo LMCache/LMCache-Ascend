@@ -600,7 +600,19 @@ def _patch_vllm_v1_adapter():
 
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
-    def handle_preemptions(self, preempted_req_ids):
+    def handle_preemptions(self, preemption_payload):
+        # vLLM 0.18 passes request IDs directly, while vLLM 0.23 carries
+        # them in connector metadata built by the scheduler-side adapter.
+        if isinstance(preemption_payload, set):
+            preempted_req_ids = set(preemption_payload)
+        else:
+            preempted_req_ids = set(
+                getattr(preemption_payload, "preempted_req_ids", None) or ()
+            )
+
+        if not preempted_req_ids:
+            return
+
         method = getattr(self._lmcache_engine, "handle_preemptions", None)
         if callable(method):
             method(preempted_req_ids)
