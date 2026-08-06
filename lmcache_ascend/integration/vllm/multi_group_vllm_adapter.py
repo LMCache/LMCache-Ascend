@@ -10,34 +10,34 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-# First Party
+# Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     LoadSpec,
-    logger,
 )
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    ReqMeta as UpstreamReqMeta,
-)
+from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta as UpstreamReqMeta
 from lmcache.integration.vllm.vllm_v1_adapter import (
     RequestTracker as UpstreamRequestTracker,
 )
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    logger,
+)
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-import torch
-
-from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
-
-# Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+import torch
+
+# First Party
+from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 if TYPE_CHECKING:
+    # Third Party
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import NewRequestData
 
@@ -226,7 +226,7 @@ def _build_slot_mappings_by_group(
         )
     mappings: list[torch.Tensor] = []
     for g, (group_block_ids, block_size) in enumerate(
-        zip(block_ids_by_group, block_sizes_by_group)
+        zip(block_ids_by_group, block_sizes_by_group, strict=False)
     ):
         ratio = compress_ratios[g] if compress_ratios else 1
         sw_size = swsbg[g] if swsbg is not None else None
@@ -359,6 +359,7 @@ class RequestTracker(UpstreamRequestTracker):
                 for old_group_ids, new_group_ids in zip(
                     old_block_ids_by_group,
                     new_block_ids_by_group,
+                    strict=False,
                 )
             )
         self._sync_primary_allocated_block_ids()
@@ -489,6 +490,9 @@ class ReqMeta(UpstreamReqMeta):
 
 class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     """Multi-group scheduler/worker plumbing layered on upstream LMCache."""
+
+    # Type declarations for upstream-inherited attributes (mypy has-type fix)
+    _block_size: int
 
     def __init__(
         self,
@@ -791,34 +795,25 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     f"(full_hit_adj={full_hit_adj})"
                 )
 
-            # When retrieve fail, vllm will call _handle_invalid_blocks to
-            # reset request.num_computed_tokens, this will lead to
-            # request_tracker.token_ids being not matched with vllm
+            # When retrieve fails, vLLM calls _handle_invalid_blocks to reset
+            # request.num_computed_tokens. This rollback boundary (in logical
+            # tokens) is authoritative — we must restore tracker state to
+            # exactly match it so subsequent update() appends from the correct
+            # position without creating a token history gap.
+            #
+            # Do NOT cap tokens_to_keep using len(block_ids) * block_size — that
+            # yields physical slot count which differs from logical token count
+            # by compress_ratio for compressed groups, causing silent truncation
+            # and a [tokens_to_keep, num_current_tokens) hole.
             if num_current_tokens < len(request_tracker.token_ids):
                 logger.warning(
                     "Request %s rolled back from %d to %d tokens; "
-                    "truncating tracker state.",
+                    "truncating tracker state to logical boundary.",
                     req_id,
                     len(request_tracker.token_ids),
                     num_current_tokens,
                 )
-                num_token_slots = min(
-                    len(group_block_ids) * bs
-                    for group_block_ids, bs in zip(
-                        request_tracker.allocated_block_ids_by_group,
-                        self._block_sizes_by_group,
-                    )
-                )
                 tokens_to_keep = num_current_tokens
-                if num_token_slots < num_current_tokens:
-                    logger.warning(
-                        "Request %s tracker has %d token slots but %d tokens; "
-                        "capping token_ids to slot capacity.",
-                        req_id,
-                        num_token_slots,
-                        num_current_tokens,
-                    )
-                    tokens_to_keep = num_token_slots
 
                 request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
                 request_tracker.num_saved_tokens = min(

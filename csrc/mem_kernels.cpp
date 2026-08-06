@@ -453,8 +453,9 @@ void reshape_and_cache_back_flash(
   return;
 };
 
-// Multi-plane KV transfer: per-plane slot pointers must reference dense mappings
-// (no -1). Starts/counts index the chunk slice within each plane's mapping.
+// Multi-plane KV transfer: per-plane slot pointers must reference dense
+// mappings (no -1). Starts/counts index the chunk slice within each plane's
+// mapping.
 void multi_layer_kv_transfer_multi_plane(
     torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping_ptrs,
@@ -475,7 +476,8 @@ void multi_layer_kv_transfer_multi_plane(
   TORCH_CHECK(slot_mapping_counts.dim() == 1 &&
                   slot_mapping_counts.size(0) == num_planes,
               "slot_mapping_counts length mismatch");
-  TORCH_CHECK(page_buffer_sizes.dim() == 1 && page_buffer_sizes.size(0) == num_planes,
+  TORCH_CHECK(page_buffer_sizes.dim() == 1 &&
+                  page_buffer_sizes.size(0) == num_planes,
               "page_buffer_sizes length mismatch");
   TORCH_CHECK(block_sizes.dim() == 1 && block_sizes.size(0) == num_planes,
               "block_sizes length mismatch");
@@ -488,20 +490,23 @@ void multi_layer_kv_transfer_multi_plane(
               "slot_mapping_starts must be int32");
   TORCH_CHECK(slot_mapping_counts.scalar_type() == torch::kInt32,
               "slot_mapping_counts must be int32");
-  TORCH_CHECK(lmc_row_offsets.dim() == 1 && lmc_row_offsets.size(0) == num_planes,
+  TORCH_CHECK(lmc_row_offsets.dim() == 1 &&
+                  lmc_row_offsets.size(0) == num_planes,
               "lmc_row_offsets length mismatch");
   TORCH_CHECK(lmc_row_offsets.scalar_type() == torch::kInt32,
               "lmc_row_offsets must be int32");
 
   const int64_t lmc_chunk_last_dim_bytes =
       key_value.size(-1) * key_value.element_size();
-  TORCH_CHECK(lmc_chunk_last_dim_bytes > 0, "lmc_chunk last dim must be positive");
+  TORCH_CHECK(lmc_chunk_last_dim_bytes > 0,
+              "lmc_chunk last dim must be positive");
   TORCH_CHECK(key_value_ptrs.size(0) % num_planes == 0,
               "key_value_ptrs length must be num_layers * num_planes");
   const int32_t num_layers =
       static_cast<int32_t>(key_value_ptrs.size(0) / num_planes);
 
-  TORCH_CHECK(max_hidden_dim_bytes > 0, "max_hidden_dim_bytes must be positive");
+  TORCH_CHECK(max_hidden_dim_bytes > 0,
+              "max_hidden_dim_bytes must be positive");
 
   const int32_t num_tokens_lmc_chunk =
       key_value.dim() >= 3 ? static_cast<int32_t>(key_value.size(2)) : 1;
@@ -531,14 +536,12 @@ void multi_layer_kv_transfer_multi_plane(
       platform_ascendc::PlatformAscendCManager::GetInstance(socName);
   uint64_t ubSize = 0;
   ascendcPlatform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
-  const uint32_t aiv_num =
-      static_cast<uint32_t>(std::min(num_layers, 4));
+  const uint32_t aiv_num = static_cast<uint32_t>(std::min(num_layers, 4));
   constexpr int32_t numBuffsOnDev = 2;
   const int64_t baseBuffSize = numBuffsOnDev * max_hidden_dim_bytes;
   TORCH_CHECK(ubSize >= static_cast<uint64_t>(baseBuffSize),
               "UB too small for multi-plane KV transfer");
-  int32_t maxTokensPerLoop =
-      static_cast<int32_t>(ubSize / baseBuffSize) - 1;
+  int32_t maxTokensPerLoop = static_cast<int32_t>(ubSize / baseBuffSize) - 1;
   maxTokensPerLoop = std::min(maxTokensPerLoop, num_tokens_lmc_chunk);
   const int64_t totalPerLoopBuffer =
       static_cast<int64_t>(maxTokensPerLoop) * baseBuffSize;

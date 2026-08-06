@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """DS4 production KV cache round-trip tests (bundled connector, real NPU kernels)."""
 
+# Future
 from __future__ import annotations
 
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache_ascend.integration.vllm.multi_spec_flatten import build_flat_kv_caches
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.slot_mapping_utils import multi_plane_slot_slice_bounds
 
+# Local
 from .conftest_ds4 import (
     DS4_PRODUCTION_CHUNK_TOKENS,
     build_bundled_ds4_connector,
@@ -29,8 +33,10 @@ from .test_layer_to_scheduler_group_mapping import L2, _make_ds4_kv_cache_config
 
 def test_ds4_multi_plane_slot_slice_bounds_768_tokens_chunk256() -> None:
     """768-token prefill, chunk ``[0, 256)``: per-plane slot counts for bundled L2."""
-    # Unique scope: pure CPU expectation test for slot slicing math before any kernel launch.
-    # Other DS4 tests execute kernels; this one guards index math regressions deterministically.
+    # Unique scope: pure CPU expectation test for slot slicing math
+    # before any kernel launch.
+    # Other DS4 tests execute kernels; this one guards index math
+    # regressions deterministically.
     ratios = compress_ratios_from_block_sizes()
     _, _, layer_to_groups, _ = build_flat_kv_caches(
         make_ds4_kv_caches_dict(torch.device("cpu"), num_blocks=4),
@@ -61,10 +67,13 @@ def test_ds4_l2_multi_plane_round_trip_various_chunk_sizes(
     chunk: int,
 ) -> None:
     """Bundled L2 eight-tuple: real multi-plane kernel round-trip at ``g_end=chunk``."""
-    # Unique scope: end-to-end kernel parity for L2 bundled 8-plane topology across chunk matrix.
-    # L3 test covers 4-plane topology; this one also enforces the production 656-slot concat check.
+    # Unique scope: end-to-end kernel parity for L2 bundled 8-plane
+    # topology across chunk matrix.
+    # L3 test covers 4-plane topology; this one also enforces the
+    # production 656-slot concat check.
     connector, _, _, dev = build_bundled_ds4_connector(monkeypatch)
     gi = npu_group_index_with_num_planes(connector, 8)
+    assert connector.per_group_params is not None
     g_params = connector.per_group_params[gi]
     sched_groups = list(g_params.get("scheduler_groups_per_plane") or [])
     prefill = prefill_tokens_for_chunk(chunk)
@@ -100,8 +109,10 @@ def test_ds4_l3_multi_plane_round_trip_various_chunk_sizes(
     chunk: int,
 ) -> None:
     """Bundled L3 four-tuple: real multi-plane kernel round-trip at ``g_end=chunk``."""
-    # Unique scope: end-to-end kernel parity for L3 4-plane topology across the same chunk matrix.
-    # L2 test has different scheduler-to-plane fan-out; this catches topology-specific routing/copies.
+    # Unique scope: end-to-end kernel parity for L3 4-plane topology
+    # across the same chunk matrix.
+    # L2 test has different scheduler-to-plane fan-out; this catches
+    # topology-specific routing/copies.
     connector, _, _, dev = build_bundled_ds4_connector(monkeypatch)
     gi = npu_group_index_with_num_planes(connector, 4)
     prefill = prefill_tokens_for_chunk(chunk)
@@ -129,7 +140,8 @@ def test_ds4_separate_kv_round_trip_various_chunk_sizes(
     chunk: int,
 ) -> None:
     """Round-trip each production SEPARATE_KV NPU group at ``g_end=chunk``."""
-    # Validates SEPARATE_KV groups (including num_planes=1 routed via multi-plane kernel).
+    # Validates SEPARATE_KV groups (including num_planes=1 routed
+    # via multi-plane kernel).
     # Bundled MULTI_PLANE_KV / DSA_C8 tuples are covered by L2/L3 tests.
     connector, _, _, dev = build_bundled_ds4_connector(monkeypatch)
     prefill = prefill_tokens_for_chunk(chunk)

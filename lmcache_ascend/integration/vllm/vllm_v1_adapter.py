@@ -6,19 +6,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-
-from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
-    LMCacheConnectorV1ImplMultiGroup,
-)
-
-# First Party
-from lmcache_ascend.integration.vllm.multi_spec_flatten import (
-    build_flat_kv_caches,
-    has_multiple_scheduler_groups,
-)
-from lmcache_ascend.integration.vllm.skip_state_groups import (
-    apply_skip_policy_from_env_to_flattened,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -26,6 +13,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.request import RequestStatus
 import torch
+
+# First Party
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    LMCacheConnectorV1ImplMultiGroup,
+)
+from lmcache_ascend.integration.vllm.multi_spec_flatten import (
+    build_flat_kv_caches,
+    has_multiple_scheduler_groups,
+)
+from lmcache_ascend.integration.vllm.skip_state_groups import (
+    apply_skip_policy_from_env_to_flattened,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -37,6 +36,9 @@ logger = init_logger(__name__)
 
 
 class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
+    # Type declarations for upstream-inherited attributes (mypy has-type fix)
+    kv_caches: dict[str, Any]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -744,8 +746,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache).
-        """
+        """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
         if not block_ids:
             return False, None
         if len(block_ids) > 1:

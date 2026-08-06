@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Env-only policy helpers for skipping scheduler groups at registration time."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, Union
 import os
 
+# Third Party
 from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 import torch
@@ -167,8 +170,7 @@ def apply_skip_filter_to_flattened(
     bundled: bool,
     policy: SkipStateGroupsPolicy | None,
 ) -> tuple[dict[str, _KVEntry], tuple[int, ...], dict[str, list[int]]]:
-    """Filter flattened registration artifacts so skipped groups never reach planning.
-    """
+    """Filter flattened artifacts so skipped groups never reach planning."""
     kept_layer_to_groups = {
         layer: [int(g) for g in groups]
         for layer, groups in layer_to_scheduler_groups.items()
@@ -205,7 +207,10 @@ def apply_skip_filter_to_flattened(
 
     # Unbundled path: one flat entry maps to exactly one scheduler group.
     if not bundled:
-        for (layer_name, entry), sched_g in zip(flat_kv.items(), sched_by_layer):
+        for (
+            (layer_name, entry),
+            sched_g,
+        ) in zip(flat_kv.items(), sched_by_layer, strict=False):
             if _drop_flat_layer(layer_name, int(sched_g)):
                 continue
             kept_flat[layer_name] = entry

@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generic KV cache / NPU kernel test helpers (format-agnostic)."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from contextlib import contextmanager
 from typing import Iterator, Sequence
 
+# Third Party
+from lmcache.v1.memory_management import PinMemoryAllocator, TensorMemoryObj
 import pytest
 import torch
 
-from lmcache.v1.memory_management import PinMemoryAllocator, TensorMemoryObj
+# First Party
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
@@ -146,7 +150,7 @@ def assert_multi_plane_round_trip_parity(
     slot_concat, offsets = slot_concat_and_offsets(
         sched_groups, slot_mappings, 0, chunk, compress_ratios
     )
-    for pi, (src, dst) in enumerate(zip(planes_src, planes_dst)):
+    for pi, (src, dst) in enumerate(zip(planes_src, planes_dst, strict=False)):
         slots = slot_concat[offsets[pi] : offsets[pi + 1]]
         flat_s = flatten_paged_slots(src)
         flat_d = flatten_paged_slots(dst)
@@ -303,8 +307,10 @@ def separate_kv_round_trip_via_connector(
 ) -> None:
     if chunk <= 0:
         return
+    # Third Party
     from lmcache.v1.memory_management import MemoryFormat
 
+    # Local
     from .conftest_ds4 import _get_multi_group_pinned_allocator
 
     assert connector.per_group_params is not None
@@ -349,6 +355,7 @@ def separate_kv_round_trip_via_connector(
 
         paged_src_list: list[torch.Tensor] = []
         paged_dst_list: list[torch.Tensor] = []
+        assert connector.group_kv_cache_pointers is not None
         ptrs_store = connector.group_kv_cache_pointers[gi].clone()
         ptrs_load = connector.group_kv_cache_pointers[gi].clone()
         assert connector.kvcaches is not None
@@ -393,13 +400,11 @@ def separate_kv_round_trip_via_connector(
     finally:
         mem_obj.ref_count_down()
 
-    for li, (src, dst) in enumerate(zip(paged_src_list, paged_dst_list)):
+    for li, (src, dst) in enumerate(zip(paged_src_list, paged_dst_list, strict=False)):
         flat_s = flatten_paged_slots(src)
         flat_d = flatten_paged_slots(dst)
         if not torch.equal(flat_s[sm_slice], flat_d[sm_slice]):
-            raise AssertionError(
-                f"{label}: SEPARATE_KV round-trip mismatch layer {li}"
-            )
+            raise AssertionError(f"{label}: SEPARATE_KV round-trip mismatch layer {li}")
 
 
 def standard_group_round_trip_via_connector(

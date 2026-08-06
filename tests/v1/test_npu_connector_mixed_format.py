@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for mixed-format KV cache handling in the NPU connector."""
 
+# Standard
 from unittest.mock import MagicMock, patch
 
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
@@ -15,6 +18,7 @@ from lmcache_ascend.v1.npu_connector.npu_connectors import (
     _materialize_mp_device_params,
 )
 
+# Local
 from .conftest_ds4 import (
     DS4_CHUNK_SIZE,
     allocate_multi_group_memory_obj,
@@ -261,10 +265,12 @@ def test_multi_group_store_dispatches_uint8_kernels() -> None:
 
 
 def test_bundled_multi_plane_kernel_routing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Bundled groups route through multi-plane: SEPARATE kv_size=1 (num_planes=1) and L2/L3."""
+    """Bundled groups route through multi-plane: SEPARATE
+    kv_size=1 (num_planes=1) and L2/L3."""
     # Routing-only: validates dispatch split and call cardinality (not data parity).
     if not npu_available():
         pytest.skip("NPU not available")
+    # First Party
     import lmcache_ascend.c_ops as lmc_ops
 
     connector, metadata, _, dev = build_bundled_ds4_connector(monkeypatch)
@@ -410,7 +416,8 @@ def test_materialize_mp_device_params_idempotent() -> None:
 
 
 def test_mp_device_materialized_at_pointer_init() -> None:
-    """mp_device tensors are created at per-group pointer init, not on first transfer."""
+    """mp_device tensors are created at per-group pointer init,
+    not on first transfer."""
     connector, metadata, kv_caches, dev = make_ds4_setup()
     num_tokens = 64
     mem_obj = allocate_multi_group_memory_obj(metadata, num_tokens)

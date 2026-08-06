@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """DS4 (DeepSeek V4) fixtures and helpers for multi-group connector tests."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from types import SimpleNamespace
 from typing import List
 from unittest.mock import MagicMock, patch
 import os
 
+# Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -18,6 +21,7 @@ from lmcache.v1.metadata import LMCacheMetadata
 import pytest
 import torch
 
+# First Party
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     ReqMeta,
     _build_slot_mapping_for_group,
@@ -30,6 +34,7 @@ from lmcache_ascend.v1.npu_connector.npu_connectors import (
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 import lmcache_ascend  # noqa: F401
 
+# Local
 from .conftest_kvcache import (
     LARGE_TOKEN_COPY_SIZE,
     device,
@@ -198,7 +203,7 @@ def slot_mappings_for_ds4_groups(
     block_ids = list(range(1, num_blocks))
     mappings: list[torch.Tensor] = []
     for ratio, block_size in zip(
-        compress_ratios_from_block_sizes(), DS4_BLOCK_SIZES_BY_GROUP
+        compress_ratios_from_block_sizes(), DS4_BLOCK_SIZES_BY_GROUP, strict=False
     ):
         sm = _build_slot_mapping_for_group(
             block_ids,
@@ -461,7 +466,10 @@ def ds4_roundtrip_num_blocks(*, max_chunk: int | None = None) -> int:
     if max_prefill <= 0:
         return 32
     need = 32
-    for ratio, block_size in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP):
+    for (
+        ratio,
+        block_size,
+    ) in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP, strict=False):
         tokens_compressed_max = (max_prefill - 1) // ratio
         block_idx_max = tokens_compressed_max // block_size
         # block_ids are 1..num_blocks-1; block_idx must stay <= num_blocks-2.
@@ -525,7 +533,10 @@ def make_ds4_slot_mappings_cpu(
 ) -> tuple[torch.Tensor, ...]:
     mappings: list[torch.Tensor] = []
     block_ids = list(range(1, 17))
-    for ratio, block_size in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP):
+    for (
+        ratio,
+        block_size,
+    ) in zip(DS4_COMPRESS_RATIOS, DS4_BLOCK_SIZES_BY_GROUP, strict=False):
         mappings.append(
             _build_slot_mapping_for_group(
                 block_ids,
@@ -541,6 +552,7 @@ def make_ds4_slot_mappings_cpu(
 
 def make_ascend_adapter_for_load(*, num_kv_groups: int = DS4_NUM_SCHEDULER_GROUPS):
     pytest.importorskip("vllm")
+    # First Party
     from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
         LMCacheAscendConnectorV1Impl,
     )

@@ -3,10 +3,8 @@
 from typing import List, Tuple, Union
 
 # Third Party
-import torch
-
-# First Party
 from lmcache.v1.gpu_connector.utils import attempt_permute_to_contiguous_view
+import torch
 
 _KVTupleTwoOrMore = Tuple[torch.Tensor, ...]
 _KVLayer = Union[torch.Tensor, _KVTupleTwoOrMore]

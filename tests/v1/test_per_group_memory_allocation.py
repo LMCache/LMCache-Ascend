@@ -8,11 +8,10 @@ This is the regression test for the DSv4 ``IndexError`` in
 crashed because the MemoryObj was allocated with a single flat shape.
 """
 
+# Standard
 from unittest.mock import patch
 
-import lmcache_ascend  # noqa: F401
-import pytest
-import torch
+# Third Party
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -22,13 +21,18 @@ from lmcache.v1.memory_management import (
     get_size_bytes,
 )
 from lmcache.v1.metadata import LMCacheMetadata
+import pytest
+import torch
 
+# First Party
 from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
 from lmcache_ascend.v1.kv_format import KVCacheFormat
 from lmcache_ascend.v1.kv_layer_groups import build_kv_layer_groups
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
+import lmcache_ascend  # noqa: F401
 
+# Local
 from .conftest_ds4 import (
     DS4_CHUNK_SIZE,
     DS4_PRODUCTION_CHUNK_TOKENS,
@@ -353,6 +357,7 @@ def test_multi_group_disk_save_load_roundtrip(tmp_path) -> None:
 
 def test_single_group_connector_from_gpu_uses_tensor() -> None:
     """Single-group MLA connector path still uses ``memory_obj.tensor`` unchanged."""
+    # Local
     from .conftest_kvcache import device, npu_available
 
     if not npu_available():

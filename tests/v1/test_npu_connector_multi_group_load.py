@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """NPU connector multi-group ``start_load_kv`` adapter tests."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from unittest.mock import patch
 
+# Third Party
+from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 import pytest
 import torch
 
-from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
-
+# Local
 from .conftest_ds4 import (
     DS4_NUM_SCHEDULER_GROUPS,
     DS4_VLLM_BLOCK_SIZE,
@@ -49,6 +52,7 @@ def test_start_load_kv_multi_group() -> None:
 
 def test_start_load_kv_single_group_delegates_to_super() -> None:
     pytest.importorskip("vllm")
+    # First Party
     from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
         LMCacheConnectorV1ImplMultiGroup,
     )

@@ -1,13 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for multi-spec flatten layer → scheduler group ordering."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from types import SimpleNamespace
 
+# Third Party
 import pytest
 import torch
 
+# First Party
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     _is_kernel_native_tuple,
     build_flat_kv_caches,
@@ -181,6 +185,7 @@ def test_flatten_single_tensor(ds4_config) -> None:
 def test_flatten_compress4_eight_subs(
     ds4_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Local
     from .conftest_ds4 import set_bundle_multi_spec_env
 
     set_bundle_multi_spec_env(monkeypatch, enabled=False)
@@ -195,6 +200,7 @@ def test_flatten_preserves_mla_tuple_when_bundle_disabled(
     ds4_config, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Kernel-native MLA tuples stay intact even when BUNDLE_MULTI_SPEC=0."""
+    # Local
     from .conftest_ds4 import set_bundle_multi_spec_env
 
     set_bundle_multi_spec_env(monkeypatch, enabled=False)
@@ -223,6 +229,7 @@ def test_flatten_preserves_dsa_c8_tuple(
     ds4_config, monkeypatch: pytest.MonkeyPatch, bundle_enabled: bool
 ) -> None:
     """DSA_C8 4-tuples stay intact for a single 4-plane kernel launch."""
+    # Local
     from .conftest_ds4 import set_bundle_multi_spec_env
 
     set_bundle_multi_spec_env(monkeypatch, enabled=bundle_enabled)
@@ -239,6 +246,7 @@ def test_flatten_preserves_dsa_c8_tuple(
 
 def test_compress128_l3_not_kernel_native(ds4_config) -> None:
     """DSv4 L3 compress128 tuple is MULTI_PLANE, not kernel-native MLA/DSA."""
+    # Local
     from .conftest_ds4 import make_ds4_kv_caches_dict
 
     dev = torch.device("cpu")
@@ -262,6 +270,7 @@ def test_build_layer_to_scheduler_groups(ds4_config) -> None:
 
 def test_bundle_flatten_preserves_multi_spec_layers(ds4_config) -> None:
     """Bundled flatten keeps L2 eight-tuple and L3 four-tuple (5 flat layers)."""
+    # Local
     from .conftest_ds4 import make_ds4_kv_caches_dict
 
     dev = torch.device("cpu")

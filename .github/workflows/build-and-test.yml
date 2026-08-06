@@ -6,6 +6,13 @@ on:
   workflow_run:
     workflows: ["Code Quality"]
     types: [completed]
+  pull_request:
+    branches: ['main', '*-dev', 'dsv4_support_045']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 permissions:
   contents: read

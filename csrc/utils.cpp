@@ -21,7 +21,8 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
     return kvcache_ops::AscendType::INT64;
   } else if (scalarType == at::ScalarType::Int) {
     return kvcache_ops::AscendType::INT32;
-  } else if (scalarType == at::ScalarType::Byte || scalarType == at::ScalarType::Char) {
+  } else if (scalarType == at::ScalarType::Byte ||
+             scalarType == at::ScalarType::Char) {
     return kvcache_ops::AscendType::INT8;
   } else {
     TORCH_CHECK(false, "ScalarType not supported.");
@@ -70,7 +71,8 @@ MultiLayerKVConfig prepare_multi_layer_kv_config(
     break;
   case kvcache_ops::KVCacheFormat::MLA_KV:
     config.kv_size = 2;
-    // LMC chunk is [*, layers, tokens, kv_lora_rank + qk_rope_head_dim] (planes per token).
+    // LMC chunk is [*, layers, tokens, kv_lora_rank + qk_rope_head_dim] (planes
+    // per token).
     config.hidden_dims = config.k_hidden_dims + config.v_hidden_dims;
     break;
   case kvcache_ops::KVCacheFormat::DSA_KV:

@@ -10,7 +10,7 @@ on:
       - 'LICENSE'
       - '.gitignore'
   pull_request:
-    branches: ['main', '*-dev']
+    branches: ['main', '*-dev', 'dsv4_support_045']
     paths-ignore:
       - '**.md'
       - 'docs/**'

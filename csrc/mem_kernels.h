@@ -34,12 +34,14 @@ void multi_layer_kv_transfer_kernel_v2(
     const int64_t dsaHiddenDims = 0);
 
 void multi_layer_kv_transfer_multi_plane_kernel_v2(
-    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches, uint8_t *dstCacheTensor,
-    int64_t *perPlaneSlotPtrs, int32_t *perPlaneSlotStarts, int32_t *perPlaneSlotCounts,
-    int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes, int32_t *perPlanePageBuffSizes,
-    int32_t *perPlaneLmcRowOffset, int32_t numPlanes, int32_t numLayers,
-    int64_t lmcChunkLastDimBytes, int32_t numTokensLmcChunk, int64_t perLoopBuffer,
-    int32_t maxTokensPerLoop, bool page2L);
+    uint32_t blockDim, void *stream, uint8_t *pagedKVCaches,
+    uint8_t *dstCacheTensor, int64_t *perPlaneSlotPtrs,
+    int32_t *perPlaneSlotStarts, int32_t *perPlaneSlotCounts,
+    int32_t *perPlaneHdBytes, int32_t *perPlaneBlockSizes,
+    int32_t *perPlanePageBuffSizes, int32_t *perPlaneLmcRowOffset,
+    int32_t numPlanes, int32_t numLayers, int64_t lmcChunkLastDimBytes,
+    int32_t numTokensLmcChunk, int64_t perLoopBuffer, int32_t maxTokensPerLoop,
+    bool page2L);
 
 void single_layer_kv_transfer_kernel_v2(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,

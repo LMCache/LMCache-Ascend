@@ -26,9 +26,6 @@ else:
 from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
 from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 
-# First Party
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import LMCacheAscendConnectorV1Impl
-
 logger = init_logger(__name__)
 
 
@@ -39,17 +36,15 @@ class LMCacheAscendConnectorV1Dynamic(LMCacheConnectorV1Dynamic, SupportsHMA):
         role: KVConnectorRole,
         kv_cache_config: Optional[Any] = None,
     ) -> None:
+        # Store kv_cache_config before super().__init__() so the patched impl
+        # can retrieve it via parent._kv_cache_config fallback during construction.
+        # This avoids the double-Manager problem: previously super().__init__()
+        # created Impl A / Manager A, then we recreated Impl B / Manager B here,
+        # leaving Manager A as an orphan with live IPC sockets and threads.
+        self._kv_cache_config = kv_cache_config
         super().__init__(
             vllm_config=vllm_config,
             role=role,
-            kv_cache_config=kv_cache_config,
-        )
-        # Upstream LMCacheConnectorV1Dynamic does not pass kv_cache_config to the
-        # impl; recreate with explicit config for multi-group discovery.
-        self._lmcache_engine = LMCacheAscendConnectorV1Impl(
-            vllm_config,
-            role,
-            self,
             kv_cache_config=kv_cache_config,
         )
 

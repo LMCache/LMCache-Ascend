@@ -743,6 +743,9 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
 
 class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
+    # Type declarations for upstream-inherited attributes (mypy has-type fix)
+    num_layers: int
+
     def __init__(
         self,
         hidden_dim_size: int,
@@ -1614,7 +1617,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self._initialize_pointers(kvcaches)
         if not self._has_per_group_transfer_infra():
             return
-        chunk_ranges = list(dict.fromkeys(zip(starts, ends)))
+        chunk_ranges = list(dict.fromkeys(zip(starts, ends, strict=False)))
         kwargs["mp_launch_meta"] = build_mp_launch_meta(
             self,
             chunk_ranges=chunk_ranges,
@@ -1724,7 +1727,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         n_memobj_groups = len(memory_obj.group_prefix_sum) - 1
         with torch.npu.stream(stream):
             for i, (group_ptrs, group_params) in enumerate(
-                zip(self.group_kv_cache_pointers, self.per_group_params)
+                zip(self.group_kv_cache_pointers, self.per_group_params, strict=False)
             ):
                 if i >= n_memobj_groups:
                     raise RuntimeError(
