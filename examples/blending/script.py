@@ -14,11 +14,10 @@ from vllm.engine.arg_utils import EngineArgs
 
 @contextlib.contextmanager
 def build_llm_with_lmcache(model: str, max_model_len: int = 32000, blend: bool = True):
-    lmcache_connector = "LMCacheAscendConnectorV1Dynamic"
+    lmcache_connector = "LMCacheAscendConnector"
     ktc = KVTransferConfig(
         kv_connector=lmcache_connector,
         kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
     )
 
     if blend:

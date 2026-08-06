@@ -6,6 +6,13 @@ on:
   workflow_run:
     workflows: ["Code Quality"]
     types: [completed]
+  pull_request:
+    branches: ['main', '*-dev', 'dsv4_support_045']
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
 
 permissions:
   contents: read
@@ -116,7 +123,7 @@ jobs:
           
           echo ">>> Installing LMCache Core..."
           # TODO (gingfung): use strategy matrix for different version tests
-          pip install lmcache==0.4.4
+          pip install lmcache==0.4.5
 
           echo ">>> Building LMCache-Ascend..."
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
@@ -329,7 +336,7 @@ jobs:
           
           echo ">>> Installing LMCache Core..."
           # TODO (gingfung): use strategy matrix for different version tests
-          pip install lmcache==0.4.4
+          pip install lmcache==0.4.5
 
           echo ">>> Building LMCache-Ascend..."
           export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH

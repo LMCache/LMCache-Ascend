@@ -187,8 +187,11 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
 
         paged_mem_allocator = PagedCpuGpuMemoryAllocator()
         fmt = resolve_memory_format(metadata.use_mla)
-        sizes = [torch.Size(metadata.kv_shape)]
-        dtypes = [metadata.kv_dtype]
+        # Multi-group models (e.g. DSv4): page size must cover all KV layer
+        # groups so allocate() keeps matching shapes and group_prefix_sum.
+        # Single-group: get_shapes()/get_dtypes() match kv_shape/kv_dtype.
+        sizes = metadata.get_shapes()
+        dtypes = metadata.get_dtypes()
         total_size = get_size_bytes(sizes, dtypes)
 
         if self.pd_config.buffer_device.startswith("npu"):

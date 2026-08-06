@@ -258,12 +258,77 @@ class AscendPDSenderMixin:
         receiver_init_port: int,
         receiver_alloc_port: int,
     ) -> None:
-        """Override to call parent and handle any Ascend-specific setup."""
-        super()._ensure_peer_connection(
-            receiver_id=receiver_id,
-            receiver_host=receiver_host,
-            receiver_init_port=receiver_init_port,
-            receiver_alloc_port=receiver_alloc_port,
+        """Connect to a decoder peer over HCCL (not upstream NIXL).
+
+        Upstream ``PDBackend._ensure_peer_connection`` serializes with
+        ``_nixl_agent_lock``, which Ascend backends do not create.  HCCL
+        already protects channel state via ``transfer_channel._state_lock``.
+        Fixes GitHub Issue #264: https://github.com/LMCache/LMCache-Ascend/issues/264
+        """
+        if receiver_id in self.initialized_peers:
+            return
+
+        receiver_init_url = f"{receiver_host}:{receiver_init_port}"
+        receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
+
+        self.transfer_channel.lazy_init_peer_connection(
+            local_id=self.local_id,
+            peer_id=receiver_id,
+            peer_init_url=receiver_init_url,
+        )
+
+        mem_alloc_socket = get_zmq_socket(
+            self.zmq_context,
+            receiver_mem_alloc_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
+        )
+        self.mem_alloc_sockets[receiver_id] = mem_alloc_socket
+        self.initialized_peers.add(receiver_id)
+
+    def _wire_shape_dtype_and_last_chunk_toks(
+        self, memory_objs: List[MemoryObj]
+    ) -> tuple[list[int], str, int]:
+        """Derive AllocRequest wire fields from MemoryObjs.
+
+        ``meta.shape``/``meta.dtype`` are the group-0 representative layout
+        (allocator default). Token dims may be physical (SW/CR); map the last
+        chunk back to logical ``last_chunk_toks`` via ``self._metadata.get_shapes``.
+        """
+        meta0 = memory_objs[0].meta
+        meta_last = memory_objs[-1].meta
+        fmt = meta0.fmt
+        token_dim = fmt.token_dim()
+        shape = list(meta0.shape)
+        dtype = TORCH_DTYPE_TO_STR_DTYPE[meta0.dtype]
+
+        full_shapes = self._metadata.get_shapes()
+        full_td = int(full_shapes[0][token_dim])
+        cur_td = int(meta_last.shape[token_dim])
+        if full_td == self.full_chunk_size:
+            last_chunk_toks = cur_td
+        elif cur_td == full_td:
+            last_chunk_toks = self.full_chunk_size
+        else:
+            last_chunk_toks = max(1, cur_td * self.full_chunk_size // full_td)
+
+        return shape, dtype, int(last_chunk_toks)
+
+    def _get_remote_alloc_request(
+        self, keys: Sequence[CacheEngineKey], mem_objs: List[MemoryObj]
+    ) -> AllocRequest:
+        """Build AllocRequest using multi-group-aware shape/token metadata."""
+        fmt = mem_objs[0].meta.fmt
+        shape, dtype, last_chunk_toks = self._wire_shape_dtype_and_last_chunk_toks(
+            mem_objs
+        )
+        return AllocRequest(
+            keys=[key.to_string() for key in keys],
+            fmt=fmt.value,
+            shape=shape,
+            dtype=dtype,
+            last_chunk_toks=last_chunk_toks,
         )
 
     def _remote_allocate(
@@ -462,10 +527,9 @@ class AscendPDSenderMixin:
 
         # Build PullReadyNotif with sender's buffer refs
         fmt = memory_objs[0].meta.fmt
-        shape = memory_objs[0].meta.shape
-        dtype = TORCH_DTYPE_TO_STR_DTYPE[memory_objs[0].meta.dtype]
-        token_dim = fmt.token_dim()
-        last_chunk_toks = memory_objs[-1].meta.shape[token_dim]
+        shape, dtype, last_chunk_toks = self._wire_shape_dtype_and_last_chunk_toks(
+            memory_objs
+        )
 
         pull_id = _uuid.uuid4().hex
 
@@ -481,7 +545,7 @@ class AscendPDSenderMixin:
             sender_id=self.local_id,
             sender_done_url=sender_done_url,
             fmt=fmt.value,
-            shape=list(shape),
+            shape=shape,
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
         )

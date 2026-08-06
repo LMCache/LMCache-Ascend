@@ -1434,6 +1434,128 @@ class TestAscendP2PBackendUnit:
         assert torch.equal(dst_tensors[0], src_tensors[0])
         assert torch.equal(dst_tensors[1], src_tensors[1])
 
+    def test_host_staging_stage_and_allocate_preserve_multi_group_shapes(
+        self, async_loop
+    ):
+        """Host staging must allocate arena slots with full multi-group shapes.
+
+        Passing only ``meta.shape``/``meta.dtype`` (group 0) makes the staging
+        slot single-group while the source stays multi-group. Ascend's
+        ``.tensor`` patch then returns mismatched views and H2H copy fails
+        with a shape RuntimeError (e.g. 129 vs full chunk bytes).
+        """
+        try:
+            # First Party
+            from lmcache_ascend.v1.transfer_channel.hccl_channel import HcclChannel
+        except (AttributeError, ImportError, OSError) as exc:
+            pytest.skip(f"HcclChannel is unavailable in this test env: {exc}")
+
+        # Third Party
+        from lmcache.v1.memory_management import (
+            MemoryObjMetadata,
+            TensorMemoryObj,
+            get_size_bytes,
+        )
+
+        # First Party
+        from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
+
+        shape_g0 = torch.Size([2, 4, 256, 64])
+        shape_g1 = torch.Size([2, 2, 256, 128])
+        shapes = [shape_g0, shape_g1]
+        dtypes = [torch.bfloat16, torch.bfloat16]
+        fmt = MemoryFormat.KV_2LTD
+
+        def _make_multi_group(fill: int = 0) -> TensorMemoryObj:
+            raw_size = get_size_bytes(shapes, dtypes)
+            raw_data = torch.full((raw_size,), fill, dtype=torch.uint8)
+            meta = MemoryObjMetadata(
+                shape=shapes[0],
+                dtype=dtypes[0],
+                address=0,
+                phy_size=raw_size,
+                ref_count=1,
+                fmt=fmt,
+                shapes=list(shapes),
+                dtypes=list(dtypes),
+            )
+            return TensorMemoryObj(raw_data, meta, parent_allocator=None)
+
+        class _RecordingArena:
+            def __init__(self) -> None:
+                self.allocate_calls: list[tuple] = []
+
+            def allocate(self, req_shapes, req_dtypes, req_fmt=None):
+                self.allocate_calls.append((req_shapes, req_dtypes, req_fmt))
+                if isinstance(req_shapes, torch.Size):
+                    shape_list = [req_shapes]
+                    dtype_list = [req_dtypes]
+                else:
+                    shape_list = list(req_shapes)
+                    dtype_list = list(req_dtypes)
+                raw_size = get_size_bytes(shape_list, dtype_list)
+                raw_data = torch.zeros(raw_size, dtype=torch.uint8)
+                meta = MemoryObjMetadata(
+                    shape=shape_list[0],
+                    dtype=dtype_list[0],
+                    address=len(self.allocate_calls),
+                    phy_size=raw_size,
+                    ref_count=1,
+                    fmt=req_fmt or fmt,
+                    shapes=shape_list,
+                    dtypes=dtype_list,
+                )
+                return TensorMemoryObj(raw_data, meta, parent_allocator=None)
+
+        channel = HcclChannel.__new__(HcclChannel)
+        channel._use_host_staging = True
+        channel._staging_lock = threading.Lock()
+        channel._staging_copy_pool = None
+        channel._os_staging_copy_threads = 1
+        arena = _RecordingArena()
+        channel._staging_arena = arena
+        channel.get_local_buffer_refs = MagicMock(return_value=(["uuid-0"], [0]))
+        channel.release_staged = MagicMock()
+
+        src = _make_multi_group(fill=7)
+        assert is_multi_group_memory_obj(src)
+
+        async def run_stage():
+            return await channel.stage([src])
+
+        buffer_uuids, mem_indexes, staged = _run_coroutine(async_loop, run_stage())
+        assert buffer_uuids == ["uuid-0"]
+        assert mem_indexes == [0]
+        assert len(staged) == 1
+        assert arena.allocate_calls == [(shapes, dtypes, fmt)]
+        assert staged[0].get_shapes() == shapes
+        assert staged[0].get_dtypes() == dtypes
+        assert is_multi_group_memory_obj(staged[0])
+        assert staged[0].tensor is not None
+        assert src.tensor is not None
+        assert staged[0].tensor.shape == src.tensor.shape
+        assert staged[0].tensor.dtype == src.tensor.dtype
+        assert torch.equal(staged[0].tensor, src.tensor)
+
+        dst = _make_multi_group(fill=0)
+        arena.allocate_calls.clear()
+        recv_slots = channel.allocate_receiver_staging([dst])
+        assert len(recv_slots) == 1
+        assert arena.allocate_calls == [(shapes, dtypes, fmt)]
+        assert recv_slots[0].get_shapes() == shapes
+        assert recv_slots[0].get_dtypes() == dtypes
+        assert is_multi_group_memory_obj(recv_slots[0])
+
+        # Reproduce the pre-fix failure mode: group-0-only allocate yields
+        # mismatched .tensor views that cannot be foreach-copied.
+        collapsed = _make_multi_group(fill=0)
+        collapsed.meta.shapes = [shape_g0]
+        collapsed.meta.dtypes = [dtypes[0]]
+        collapsed.group_prefix_sum = [0, shape_g0.numel() * dtypes[0].itemsize]
+        assert not is_multi_group_memory_obj(collapsed)
+        with pytest.raises(RuntimeError, match="size of tensor"):
+            torch._foreach_copy_([collapsed.tensor], [src.tensor])
+
     def test_handle_pull_mode_transfer_host_staging_lease_failure_sends_done(
         self, async_loop
     ):
