@@ -8,6 +8,7 @@ allocation, and key lookup/partitioning.
 """
 
 # Standard
+from dataclasses import dataclass, field
 from typing import Optional, Union
 import threading
 
@@ -37,6 +38,17 @@ from lmcache_ascend.v1.storage_backend.utils import resolve_memory_format
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class PDEntry:
+    """Receiver-side PD object plus request ownership metadata."""
+
+    base_obj: MemoryObj
+    owners: set[str] = field(default_factory=set)
+    # Request-local proxy clones used for delay-pull mode.
+    proxy_leases: dict[str, ProxyMemoryObj] = field(default_factory=dict)
+    pending_delete: bool = False
 
 
 class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
@@ -73,6 +85,8 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
 
         # Receiver-side KV store
         self.data: dict[CacheEngineKey, MemoryObj] = {}
+        self._pd_entries: dict[CacheEngineKey, PDEntry] = {}
+        self._pd_request_keys: dict[str, set[CacheEngineKey]] = {}
         self.data_lock = threading.Lock()
 
         self.memory_allocator = self.initialize_allocator(config, metadata)
@@ -270,12 +284,13 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         object when *pin* is ``True`` once the pin is no longer needed.
         """
         with self.data_lock:
-            mem_obj = self.data.get(key, None)
-            if mem_obj is None:
+            entry = self._pd_entries.get(key)
+            if entry is None:
                 return None
 
+            mem_obj = entry.base_obj
             if isinstance(mem_obj, ProxyMemoryObj) and mem_obj.consumed:
-                del self.data[key]
+                self._delete_pd_entry_locked(key, entry, release_obj=False)
                 return None
 
             if pin:
@@ -302,6 +317,188 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         Returns ``None`` when the key is absent or is a consumed proxy.
         """
         return self._lookup(key, pin=True)
+
+    def put(
+        self,
+        key: CacheEngineKey,
+        mem_obj: MemoryObj,
+    ):
+        with self.data_lock:
+            old_entry = self._pd_entries.get(key)
+            if old_entry is not None and old_entry.owners:
+                logger.warning(
+                    "PD receiver overwriting key %s with active owners: %s",
+                    key,
+                    sorted(old_entry.owners),
+                )
+            self.data[key] = mem_obj
+            self._pd_entries[key] = PDEntry(base_obj=mem_obj)
+
+    def get_blocking(self, key: CacheEngineKey) -> Optional[MemoryObj]:
+        with self.data_lock:
+            entry = self._pd_entries.get(key)
+            assert entry is not None, f"Key {key} not found in local data."
+            return entry.base_obj
+
+    def batched_get_blocking_for_request(
+        self,
+        keys: list[CacheEngineKey],
+        request_id: str,
+    ) -> list[Optional[MemoryObj]]:
+        memory_objs: list[Optional[MemoryObj]] = []
+        with self.data_lock:
+            for key in keys:
+                entry = self._pd_entries.get(key)
+                if entry is None:
+                    logger.warning(
+                        "PD request %s declared hit for missing key %s.",
+                        request_id,
+                        key,
+                    )
+                    memory_objs.append(None)
+                    continue
+
+                if request_id not in entry.owners:
+                    logger.debug(
+                        "PD request %s retrieves key %s without a prior lease; "
+                        "registering a lazy lease.",
+                        request_id,
+                        key,
+                    )
+                    self._ensure_request_lease_locked(key, entry, request_id)
+
+                base_obj = entry.base_obj
+                if isinstance(base_obj, ProxyMemoryObj):
+                    proxy = entry.proxy_leases.get(request_id)
+                    if proxy is None or proxy.consumed:
+                        logger.warning(
+                            "PD request %s has no usable proxy lease for key %s.",
+                            request_id,
+                            key,
+                        )
+                        memory_objs.append(None)
+                    else:
+                        memory_objs.append(proxy)
+                    continue
+
+                base_obj.ref_count_up()
+                memory_objs.append(base_obj)
+        return memory_objs
+
+    def batched_contains_and_lease(
+        self,
+        keys: list[CacheEngineKey],
+        request_id: str,
+    ) -> int:
+        hit_chunks = 0
+        with self.data_lock:
+            for key in keys:
+                entry = self._pd_entries.get(key)
+                if entry is None:
+                    break
+
+                base_obj = entry.base_obj
+                if isinstance(base_obj, ProxyMemoryObj) and base_obj.consumed:
+                    self._delete_pd_entry_locked(key, entry, release_obj=False)
+                    break
+
+                self._ensure_request_lease_locked(key, entry, request_id)
+
+                hit_chunks += 1
+        return hit_chunks
+
+    def _ensure_request_lease_locked(
+        self,
+        key: CacheEngineKey,
+        entry: PDEntry,
+        request_id: str,
+    ) -> None:
+        entry.owners.add(request_id)
+        self._pd_request_keys.setdefault(request_id, set()).add(key)
+
+        base_obj = entry.base_obj
+        if not isinstance(base_obj, ProxyMemoryObj):
+            return
+
+        if request_id in entry.proxy_leases:
+            return
+
+        entry.proxy_leases[request_id] = base_obj.clone_for_request(request_id)
+        transfer_context = base_obj.transfer_context
+        acquire_request = getattr(
+            transfer_context,
+            "acquire_request",
+            None,
+        )
+        if callable(acquire_request):
+            acquire_request(request_id)
+
+    def release_request_lease(self, request_id: str) -> None:
+        proxy_contexts = []
+        with self.data_lock:
+            keys = self._pd_request_keys.pop(request_id, set())
+            for key in list(keys):
+                entry = self._pd_entries.get(key)
+                if entry is None:
+                    continue
+
+                entry.owners.discard(request_id)
+                proxy = entry.proxy_leases.pop(request_id, None)
+                if proxy is not None:
+                    proxy_contexts.append(proxy.transfer_context)
+
+                entry.pending_delete = True
+                if not entry.owners:
+                    self._delete_pd_entry_locked(key, entry, release_obj=True)
+
+        for transfer_context in proxy_contexts:
+            release_request = getattr(
+                transfer_context,
+                "release_request",
+                None,
+            )
+            if callable(release_request):
+                release_request(request_id)
+
+    def remove(
+        self,
+        key: CacheEngineKey,
+        force: bool = True,
+    ) -> bool:
+        with self.data_lock:
+            entry = self._pd_entries.get(key)
+            if entry is None:
+                return False
+
+            entry.pending_delete = True
+            if entry.owners:
+                return True
+
+            self._delete_pd_entry_locked(key, entry, release_obj=True)
+            return True
+
+    def _delete_pd_entry_locked(
+        self,
+        key: CacheEngineKey,
+        entry: PDEntry,
+        release_obj: bool,
+    ) -> None:
+        self.data.pop(key, None)
+        self._pd_entries.pop(key, None)
+        for owner in list(entry.owners):
+            owned_keys = self._pd_request_keys.get(owner)
+            if owned_keys is not None:
+                owned_keys.discard(key)
+                if not owned_keys:
+                    self._pd_request_keys.pop(owner, None)
+        entry.owners.clear()
+        entry.proxy_leases.clear()
+
+        if release_obj:
+            try:
+                entry.base_obj.ref_count_down()
+            except Exception as e:
+                logger.warning("Failed to release PD entry for key %s: %s", key, e)
 
     def _partition_keys(
         self,
