@@ -65,21 +65,21 @@ from typing import List, Optional, Sequence, cast
 import contextvars
 
 # Third Party
-import torch
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.event_manager import EventStatus, EventType
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.storage_backend.abstract_backend import AllocatorBackendInterface
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+import torch
 
 logger = init_logger(__name__)
 
-_current_pd_lookup_id: contextvars.ContextVar[Optional[str]] = (
-    contextvars.ContextVar("current_pd_lookup_id", default=None)
+_current_pd_lookup_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_pd_lookup_id", default=None
 )
-_current_pd_retrieve_id: contextvars.ContextVar[Optional[str]] = (
-    contextvars.ContextVar("current_pd_retrieve_id", default=None)
+_current_pd_retrieve_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_pd_retrieve_id", default=None
 )
 
 
@@ -193,7 +193,7 @@ def batched_get(
             )
         else:
             memory_objs = storage_backend.batched_get_blocking(keys)
-            
+
         if memory_objs and any(m is not None for m in memory_objs):
             # Align with single-key `get()` logic:
             # auto-write remote data to local CPU cache, but skip deferred-fetch
