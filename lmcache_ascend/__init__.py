@@ -228,6 +228,7 @@ def _patch_config():
         "When exceeded, the oldest entry is evicted to prevent unbounded "
         "memory growth. Default is 0 (unlimited).",
     }
+
     def _ascend_validate_config(self):
         if not (self.enable_pd and self.enable_p2p):
             return lmcache.v1.config._validate_config(self)
@@ -235,7 +236,7 @@ def _patch_config():
         if self.pd_role != "sender":
             raise ValueError(
                 "Invalid LMCache-Ascend config: `enable_pd=true` and "
-                "`enable_p2p=true` are only supported for `pd_role=\"sender\"` "
+                '`enable_p2p=true` are only supported for `pd_role="sender"` '
                 f"in Phase 1, got pd_role={self.pd_role!r}."
             )
 
@@ -390,10 +391,10 @@ def _patch_storage_manager():
         allocate_and_copy_objects as ascend_allocate_and_copy_objects,
     )
     from lmcache_ascend.v1.storage_backend.storage_manager import (
-        batched_get as ascend_batched_get,
+        batched_contains as ascend_batched_contains,
     )
     from lmcache_ascend.v1.storage_backend.storage_manager import (
-        batched_contains as ascend_batched_contains,
+        batched_get as ascend_batched_get,
     )
     from lmcache_ascend.v1.storage_backend.storage_manager import get as ascend_get
     from lmcache_ascend.v1.storage_backend.storage_manager import (

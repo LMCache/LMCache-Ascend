@@ -220,7 +220,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
                     skip_leading_tokens = save_spec.skip_leading_tokens
                 else:
                     skip_leading_tokens = 0
-                
+
                 skip_leading_tokens = self._pd_producer_skip_leading_tokens(
                     skip_leading_tokens, request
                 )

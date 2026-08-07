@@ -609,7 +609,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                         pass
 
     @torch.inference_mode()
-    def retrieve(
+    def _retrieve_impl(
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
@@ -1054,6 +1054,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         with self._engine_state_lock:
             token = None
             if self._is_pd_receiver() and pin and lookup_id is not None:
+                # First Party
                 from lmcache_ascend.v1.storage_backend.storage_manager import (
                     set_current_pd_lookup_id,
                 )
@@ -1071,6 +1072,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 )
             finally:
                 if token is not None:
+                    # First Party
                     from lmcache_ascend.v1.storage_backend.storage_manager import (
                         reset_current_pd_lookup_id,
                     )
@@ -1094,6 +1096,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         req_id = self._get_req_id(kwargs)
         token = None
         if self._is_pd_receiver():
+            # First Party
             from lmcache_ascend.v1.storage_backend.storage_manager import (
                 set_current_pd_retrieve_id,
             )
@@ -1101,9 +1104,10 @@ class AscendLMCacheEngine(LMCacheEngine):
             token = set_current_pd_retrieve_id(req_id)
 
         try:
-            return super().retrieve(tokens, mask=mask, **kwargs)
+            return self._retrieve_impl(tokens, mask=mask, **kwargs)
         finally:
             if token is not None:
+                # First Party
                 from lmcache_ascend.v1.storage_backend.storage_manager import (
                     reset_current_pd_retrieve_id,
                 )

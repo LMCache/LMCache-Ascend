@@ -46,7 +46,8 @@ class PDEntry:
 
     base_obj: MemoryObj
     owners: set[str] = field(default_factory=set)
-    proxy_leases: dict[str, ProxyMemoryObj] = field(default_factory=dict) # used for delay-pull mode
+    # Request-local proxy clones used for delay-pull mode.
+    proxy_leases: dict[str, ProxyMemoryObj] = field(default_factory=dict)
     pending_delete: bool = False
 
 
