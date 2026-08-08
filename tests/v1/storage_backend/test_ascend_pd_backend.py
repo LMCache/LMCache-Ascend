@@ -307,6 +307,42 @@ class TestAscendPDBackend:
         assert new_idx == [1, 2]
         mock_obj0.ref_count_up.assert_called_once()
 
+    def test_partition_keys_proxy_pin_release_preserves_transfer_owner(self):
+        """Already-sent Proxy lookup release must not complete its transfer."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.utils import release_memory_objects
+
+        backend = _make_pd_backend_stub()
+        key = _make_key("proxy-key")
+        context = MagicMock()
+        proxy = ProxyMemoryObj(
+            backing_obj=None,
+            transfer_channel=MagicMock(),
+            target_peer_url="sender_1",
+            remote_buffer_uuid="suuid-0",
+            remote_mem_index=0,
+            transfer_context=context,
+            chunk_index=0,
+            shapes=[DEFAULT_SHAPE],
+            dtypes=[DEFAULT_DTYPE],
+            fmt=MemoryFormat.KV_2LTD,
+        )
+        backend.data[key] = proxy
+
+        already_sent_idx, already_sent_objs, new_idx = AscendPDBackend._partition_keys(
+            backend, [key.to_string()]
+        )
+        release_memory_objects(already_sent_objs)
+
+        assert already_sent_idx == [0]
+        assert already_sent_objs == [proxy]
+        assert new_idx == []
+        context.decref.assert_not_called()
+
+        proxy.ref_count_down()
+        context.decref.assert_called_once()
+
     def test_push_mode_allocate_and_put(self):
         """Push-mode allocate_and_put returns UUID-based refs."""
         # First Party
