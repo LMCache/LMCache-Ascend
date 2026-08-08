@@ -262,9 +262,10 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         Consumed :class:`ProxyMemoryObj` instances are evicted from the
         store and treated as absent.
 
-        Pinning is safe for both regular ``MemoryObj`` and proxies because
-        ``ProxyMemoryObj.ref_count_up/down`` are no-ops — the proxy
-        lifecycle is managed by its transfer context, not by ref counts.
+        Pinning is safe for both regular ``MemoryObj`` instances and proxies.
+        ``ProxyMemoryObj`` tracks temporary lookup pins as logical references
+        above its base transfer owner, so releasing a lookup pin does not
+        release the shared transfer context.
 
         The caller **must** call ``ref_count_down()`` on every returned
         object when *pin* is ``True`` once the pin is no longer needed.
