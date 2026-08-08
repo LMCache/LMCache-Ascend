@@ -48,6 +48,17 @@ def test_proxy_ref_count_down_decrefs_context_once():
     context.decref.assert_called_once()
 
 
+def test_proxy_temporary_pin_release_does_not_decref_context():
+    """Lookup pin/unpin should not consume the proxy's base transfer owner."""
+    context = MagicMock()
+    proxy = _make_proxy(context)
+
+    proxy.ref_count_up()
+    proxy.ref_count_down()
+
+    context.decref.assert_not_called()
+
+
 def test_proxy_mark_consumed_suppresses_later_ref_count_down():
     """Connector-consumed proxies should not later decref during cleanup."""
     context = MagicMock()

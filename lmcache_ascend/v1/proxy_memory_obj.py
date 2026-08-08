@@ -15,6 +15,7 @@ before scattering, enabling overlap of remote fetch and NPU scatter operations.
 # Standard
 from typing import Any, List, Optional
 import asyncio
+import threading
 
 # Third Party
 from lmcache.logging import init_logger
@@ -88,6 +89,11 @@ class ProxyMemoryObj(MemoryObj):
         self._resolved = False
         self._consumed = False  # True after data scattered into KV cache
         self._released = False
+        self._ref_lock = threading.Lock()
+        # One base owner represents the proxy's transfer-context ownership.
+        # Temporary lookup pins increment this count but must not consume the
+        # base owner when they are released.
+        self._ref_count = 1
 
         # Store allocation metadata for deferred buffer operations
         if backing_obj is not None:
@@ -133,8 +139,10 @@ class ProxyMemoryObj(MemoryObj):
         sender's pinned memory may be released, so the proxy's remote
         buffer references are no longer valid.
         """
-        self._consumed = True
-        self._released = True
+        with self._ref_lock:
+            self._consumed = True
+            self._released = True
+            self._ref_count = 0
 
     @property
     def backing_obj(self) -> Optional[MemoryObj]:
@@ -436,20 +444,27 @@ class ProxyMemoryObj(MemoryObj):
         return None
 
     def ref_count_up(self) -> None:
-        # No-op: proxy lifecycle is managed by the transfer context,
-        # not by the standard MemoryObj ref-count protocol.  Making
-        # this a no-op allows callers (cache engine, storage manager,
-        # PD backend pin/unpin) to use the same API without needing
-        # isinstance guards to skip proxies.
-        pass
+        with self._ref_lock:
+            if self._released:
+                return
+            self._ref_count += 1
 
     def ref_count_down(self) -> None:
         # When a proxy is discarded before the connector consumes it, notify
         # the shared context so the sender can release pending pull resources.
-        if self._released:
-            return
-        self._released = True
-        self._transfer_context.decref()
+        decref_context = False
+        with self._ref_lock:
+            if self._released:
+                return
+            if self._ref_count > 1:
+                self._ref_count -= 1
+                return
+            self._ref_count = 0
+            self._released = True
+            decref_context = True
+
+        if decref_context:
+            self._transfer_context.decref()
 
     def get_ref_count(self) -> int:
         # Always return 1 so the proxy looks "alive" to callers that
