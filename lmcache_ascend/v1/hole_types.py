@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
-
 Range = tuple[int, int]
 HoleMode = Literal["legacy", "pure_hit", "hole"]
 
@@ -41,9 +40,7 @@ class HoleLookupResult:
             segment_ranges=[tuple(item) for item in payload["segment_ranges"]],
             hit_flags=list(payload["hit_flags"]),
             hit_ranges=[tuple(item) for item in payload["hit_ranges"]],
-            prefix_miss_ranges=[
-                tuple(item) for item in payload["prefix_miss_ranges"]
-            ],
+            prefix_miss_ranges=[tuple(item) for item in payload["prefix_miss_ranges"]],
         )
 
 

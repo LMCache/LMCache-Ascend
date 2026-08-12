@@ -286,7 +286,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
             raise NotImplementedError
 
         layer_id = kwargs.get("layer_id")
-        req_id = kwargs.get("req_id")
         if trace_layer_enabled(layer_id):
             visible_counts = (~atten_mask[0, 0]).sum(dim=1).to(dtype=torch.long)
             mask_preview_rows = [
@@ -329,7 +328,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         )
 
         attention_out = result_tuple[0]
-        attention_out_view = attention_out.reshape(q_seq_len, num_heads, -1)
 
         # 7. Copy to output
         if output is not None:

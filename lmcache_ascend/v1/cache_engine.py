@@ -5,12 +5,23 @@ LMCacheEngine for Ascend NPU.
 """
 
 # Standard
-from typing import Any, Callable, Dict, Generator, Iterable, List, Optional, Tuple, Union
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generator,
+    Iterable,
+    List,
+    Optional,
+    Tuple,
+    Union,
+)
 import queue
 import threading
 import time
 
 # Third Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import (
     CacheEngineKey,
@@ -110,8 +121,9 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         self._device_id: Optional[int] = None
 
+        # None means auto-estimate in post_init based on available NPU memory.
         self._broadcast_shard_size = self.config.get_extra_config_value(
-            "broadcast_shard_size", 16
+            "broadcast_shard_size", None
         )
 
         if self.kv_events_enabled and self.is_store_async:
@@ -142,12 +154,86 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         # Override upstream broadcast_stream with a dedicated NPU stream
         # so broadcast and to_gpu can execute on separate streams.
-        if self.save_only_first_rank and hasattr(self.gpu_connector, "load_stream"):
+        if self.save_only_first_rank:
+            if not hasattr(self.gpu_connector, "load_stream"):
+                raise RuntimeError(
+                    "gpu_connector must have 'load_stream' when "
+                    "save_only_first_rank is True"
+                )
+            # Auto-estimate or validate shard_size now that model weights
+            # are loaded and NPU memory state is stable.
+            if self._broadcast_shard_size is None:
+                self._broadcast_shard_size = self._estimate_shard_size()
+            else:
+                estimated = self._estimate_shard_size()
+                if self._broadcast_shard_size > estimated:
+                    logger.warning(
+                        "broadcast_shard_size=%d (user-set) may cause NPU OOM "
+                        "(estimated safe max=%d). Suggestions: "
+                        "(1) reduce broadcast_shard_size to <= %d; "
+                        "(2) or increase --gpu-memory-utilization appropriately "
+                        "(note: KV cache also uses free memory, do not set too high)",
+                        self._broadcast_shard_size,
+                        estimated,
+                        estimated,
+                    )
+                    self._broadcast_shard_size = estimated
+
             self.broadcast_stream = torch.npu.Stream()
             logger.info(
                 "Ascend broadcast stream initialized: shard_size=%d",
                 self._broadcast_shard_size,
             )
+
+    def _estimate_shard_size(self) -> int:
+        """Estimate a safe ``broadcast_shard_size`` from available NPU memory.
+
+        Uses 1/4 of the free memory as the pool budget so the remainder
+        is reserved for KV-cache growth and temporary buffers.
+
+        Returns the estimated shard size, clamped to [1, 16].
+        """
+        chunk_size = self.metadata.chunk_size
+        shapes = self.metadata.get_shapes(chunk_size)
+        dtypes = self.metadata.get_dtypes()
+        per_chunk_bytes = get_size_bytes(shapes, dtypes)
+
+        device = self.metadata.worker_id
+        props = torch.npu.get_device_properties(device)
+        total_mem = props.total_memory
+        allocated = torch.npu.memory_allocated(device)
+        available = total_mem - allocated
+        pool_budget = available // 4
+
+        if per_chunk_bytes <= 0:
+            raise RuntimeError(
+                f"Invalid per-chunk size {per_chunk_bytes} bytes; "
+                "cannot estimate broadcast_shard_size. "
+                "Check model config (shapes/dtypes)."
+            )
+        max_shard = int(pool_budget // (2 * per_chunk_bytes))
+        if max_shard <= 0:
+            raise RuntimeError(
+                f"NPU free memory insufficient for broadcast pool "
+                f"(available={available / 1024**3:.2f} GB, "
+                f"pool_budget={pool_budget / 1024**3:.2f} GB, "
+                f"per_chunk={per_chunk_bytes / 1024**2:.1f} MB; "
+                f"need at least {2 * per_chunk_bytes / 1024**2:.1f} MB "
+                f"pool budget for shard_size=1). "
+                "Consider reducing --gpu-memory-utilization or chunk_size."
+            )
+        recommended = min(max_shard, 16)
+
+        logger.info(
+            "Estimated broadcast_shard_size=%d "
+            "(per_chunk=%.1f MB, available=%.2f GB, "
+            "pool_budget=%.2f GB)",
+            recommended,
+            per_chunk_bytes / 1024**2,
+            available / 1024**3,
+            pool_budget / 1024**3,
+        )
+        return recommended
 
     def _build_shard_plan(
         self,
@@ -200,8 +286,6 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self.gpu_connector.to_gpu(obj, s, e, **kwargs)
             ev_togpu = torch.npu.Event()
             ev_togpu.record()
-        # Record scatter completion so the next broadcast reusing
-        # this slot waits for it.
         self._pool_scatter_ev[slot].record(load_stream)
         pending.append((objs, ev_togpu))
         self._try_release_pending(pending)
@@ -446,7 +530,12 @@ class AscendLMCacheEngine(LMCacheEngine):
         shard_plan = plan["shard_plan"]
         shard_layouts = plan["shard_layouts"]
         device = f"npu:{self.metadata.worker_id}"
-        self._ensure_merged_pool(plan["max_shard_bytes"], device)
+        if not self._ensure_merged_pool(plan["max_shard_bytes"], device):
+            raise RuntimeError(
+                f"Failed to allocate merged broadcast pool on {device} "
+                f"({plan['max_shard_bytes']} bytes/slot). "
+                "Consider reducing broadcast_shard_size."
+            )
 
         pending: List[Tuple[List[MemoryObj], torch.npu.Event]] = []
 
@@ -602,6 +691,12 @@ class AscendLMCacheEngine(LMCacheEngine):
             with retrieve_stats.profile_broadcast():
                 self._pipelined_sharded_broadcast_and_load(
                     reordered_chunks, ret_mask, **kwargs
+                )
+        elif len(reordered_chunks) > 0:
+            with retrieve_stats.profile_to_gpu():
+                _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
+                self.gpu_connector.batched_to_gpu(
+                    list(memory_objs), list(starts), list(ends), **kwargs
                 )
 
         # --- Cleanup ---

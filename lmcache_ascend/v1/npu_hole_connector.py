@@ -11,30 +11,31 @@ hole positions that will be filled by fresh computation during layer-0 forward.
 See `docs/hole-feature-overview.md` for the maintainer-facing overview of how
 this connector participates in the worker load path.
 """
+
 # Standard
+from typing import List, cast
 import os
 import time
-from typing import List
 
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-from lmcache.v1.memory_management import MemoryFormat
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.trace_utils import (
     emit_layer_timer,
     mask_to_string,
     summarize_kv_tensor_stats,
     summarize_slot_mapping,
     tensor_to_list,
-    trace_layer_enabled,
     trace_flow,
     trace_flow_enabled,
+    trace_layer_enabled,
 )
 import torch
 
 # First Party
-import lmcache_ascend.c_ops as lmc_ops
 from lmcache_ascend.v1.npu_connector import VLLMBufferLayerwiseNPUConnector
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
@@ -60,6 +61,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
     See `docs/hole-feature-overview.md` for the higher-level request flow and
     how this connector fits into the worker-side load path.
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.current_hit_positions = torch.empty((0,), dtype=torch.long)
@@ -120,7 +122,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 load_mode=load_mode,
             )
 
-    def _emit_reuse_timer(
+    def _emit_hole_reuse_timer(
         self,
         bucket: str,
         *,
@@ -166,10 +168,12 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
         gap_k_all_finite = bool(torch.isfinite(gap_k).all().item())
         gap_v_all_finite = bool(torch.isfinite(gap_v).all().item())
 
-        if gap_k_all_finite and gap_v_all_finite and not (
-            gap_k_all_zero and gap_v_all_zero
+        if (
+            gap_k_all_finite
+            and gap_v_all_finite
+            and not (gap_k_all_zero and gap_v_all_zero)
         ):
-            self._emit_reuse_timer(
+            self._emit_hole_reuse_timer(
                 "reuse_gap_assert",
                 layer_id=layer_id,
                 duration_ms=(time.perf_counter() - assert_start) * 1000.0,
@@ -200,7 +204,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 gap_v_all_finite=gap_v_all_finite,
             )
         if semantics == "legacy":
-            self._emit_reuse_timer(
+            self._emit_hole_reuse_timer(
                 "reuse_gap_assert",
                 layer_id=layer_id,
                 duration_ms=(time.perf_counter() - assert_start) * 1000.0,
@@ -221,7 +225,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
             )
             return
 
-        self._emit_reuse_timer(
+        self._emit_hole_reuse_timer(
             "reuse_gap_assert",
             layer_id=layer_id,
             duration_ms=(time.perf_counter() - assert_start) * 1000.0,
@@ -234,7 +238,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
             f"gap_v_all_finite={gap_v_all_finite}"
         )
 
-    def _wait_for_loaded_buffer(self, layer_id: int) -> None:
+    def _wait_for_hole_loaded_buffer(self, layer_id: int) -> None:
         use_fine_grained = (
             self._hole_fine_grained_sync_enabled
             and not self._hole_fine_grained_sync_runtime_disabled
@@ -246,7 +250,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 current_stream.wait_stream(self.load_stream)
                 if self._reuse_timer_force_sync_enabled:
                     current_stream.synchronize()
-                self._emit_reuse_timer(
+                self._emit_hole_reuse_timer(
                     "reuse_sync",
                     layer_id=layer_id,
                     duration_ms=(time.perf_counter() - sync_start) * 1000.0,
@@ -278,7 +282,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
 
         sync_start = time.perf_counter()
         torch.cuda.synchronize()
-        self._emit_reuse_timer(
+        self._emit_hole_reuse_timer(
             "reuse_sync",
             layer_id=layer_id,
             duration_ms=(time.perf_counter() - sync_start) * 1000.0,
@@ -333,7 +337,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
             )
             flush_event = torch.npu.Event()
             flush_event.record(self.flush_stream)
-        self._emit_reuse_timer(
+        self._emit_hole_reuse_timer(
             "reuse_flush",
             layer_id=layer_id,
             duration_ms=(time.perf_counter() - flush_start) * 1000.0,
@@ -341,7 +345,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
         self._buffer_flush_events[id(buffer_obj)] = flush_event
         logger.debug("Enqueued loading hole layer %d into paged memory", layer_id)
 
-    def _wait_buffer_reusable(self, *, layer_id: int, buffer_obj) -> None:
+    def _wait_hole_buffer_reusable(self, *, layer_id: int, buffer_obj) -> None:
         flush_event = self._buffer_flush_events.pop(id(buffer_obj), None)
         if flush_event is None:
             return
@@ -349,7 +353,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
         self.load_stream.wait_event(flush_event)
         if self._reuse_timer_force_sync_enabled:
             self.load_stream.synchronize()
-        self._emit_reuse_timer(
+        self._emit_hole_reuse_timer(
             "reuse_flush_reuse_wait",
             layer_id=layer_id,
             duration_ms=(time.perf_counter() - wait_start) * 1000.0,
@@ -421,14 +425,13 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
 
         self.current_gap_positions = torch.where(gap_mask)[0]
         self.current_hit_positions = torch.where(~gap_mask)[0]
-        self._emit_reuse_timer(
+        self._emit_hole_reuse_timer(
             "reuse_gap_mask",
             layer_id=0,
             duration_ms=(time.perf_counter() - gap_mask_start) * 1000.0,
         )
         skip_gap_zeroing_for_request = (
-            self._hole_skip_gap_zeroing_enabled
-            and self._gap_buffer_semantics == "hole"
+            self._hole_skip_gap_zeroing_enabled and self._gap_buffer_semantics == "hole"
         )
         if trace_flow_enabled():
             trace_flow(
@@ -450,10 +453,12 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
             )
 
         buffer_alloc_start = time.perf_counter()
-        compute_gpu_buffer_obj, load_gpu_buffer_obj = self._allocate_gpu_buffers(
-            num_all_tokens, count=2
+        allocated_buffers = cast(
+            list[MemoryObj],
+            self._allocate_gpu_buffers(num_all_tokens, count=2),
         )
-        self._emit_reuse_timer(
+        compute_gpu_buffer_obj, load_gpu_buffer_obj = allocated_buffers
+        self._emit_hole_reuse_timer(
             "reuse_buffer_alloc",
             layer_id=0,
             duration_ms=(time.perf_counter() - buffer_alloc_start) * 1000.0,
@@ -477,7 +482,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 return
             total_ms = (time.perf_counter() - send_step_start) * 1000.0
             other_ms = max(total_ms - send_step_timed_ms, 0.0)
-            self._emit_reuse_timer(
+            self._emit_hole_reuse_timer(
                 "reuse_send_other",
                 layer_id=send_step_layer_id,
                 duration_ms=other_ms,
@@ -494,9 +499,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                     buffer_obj=self.buffer_mapping[layer_id - 2],
                     slot_mapping_full=slot_mapping_full,
                 )
-                send_step_timed_ms += (
-                    time.perf_counter() - flush_step_start
-                ) * 1000.0
+                send_step_timed_ms += (time.perf_counter() - flush_step_start) * 1000.0
                 del self.buffer_mapping[layer_id - 2]
 
             if layer_id > 0 and layer_id <= self.num_layers:
@@ -517,7 +520,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                             id(load_gpu_buffer_obj), None
                         )
                         sync_start = time.perf_counter()
-                        self._emit_reuse_timer(
+                        self._emit_hole_reuse_timer(
                             "reuse_sync",
                             layer_id=layer_id - 1,
                             duration_ms=(time.perf_counter() - sync_start) * 1000.0,
@@ -555,7 +558,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                     # finishes; rope_stream needs no explicit wait afterwards.
                     sync_start = time.perf_counter()
                     torch.cuda.synchronize()
-                    self._emit_reuse_timer(
+                    self._emit_hole_reuse_timer(
                         "reuse_sync",
                         layer_id=layer_id - 1,
                         duration_ms=(time.perf_counter() - sync_start) * 1000.0,
@@ -569,9 +572,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                             runtime_disabled=self._hole_fine_grained_sync_runtime_disabled,
                         )
 
-                send_step_timed_ms += (
-                    time.perf_counter() - sync_step_start
-                ) * 1000.0
+                send_step_timed_ms += (time.perf_counter() - sync_step_start) * 1000.0
 
                 # ── Phase 2: swap buffers (Python reference swap only) ────
                 compute_gpu_buffer_obj, load_gpu_buffer_obj = (
@@ -604,9 +605,9 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                         self.current_gap_positions.numel()
                         and not skip_gap_zeroing_for_request
                     ):
-                        compute_gpu_buffer_obj.tensor[
-                            :, self.current_gap_positions
-                        ] = 0.0
+                        compute_gpu_buffer_obj.tensor[:, self.current_gap_positions] = (
+                            0.0
+                        )
 
                     rope_ready = torch.npu.Event()
                     rope_ready.record(self.rope_stream)
@@ -617,7 +618,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                     self.rope_stream.synchronize()
                 rope_zero_ms = (time.perf_counter() - rope_start) * 1000.0
                 if self.cache_positions:
-                    self._emit_reuse_timer(
+                    self._emit_hole_reuse_timer(
                         "reuse_rope",
                         layer_id=layer_id - 1,
                         duration_ms=rope_zero_ms,
@@ -626,7 +627,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                     self.current_gap_positions.numel()
                     and not skip_gap_zeroing_for_request
                 ):
-                    self._emit_reuse_timer(
+                    self._emit_hole_reuse_timer(
                         "reuse_zero_gap",
                         layer_id=layer_id - 1,
                         duration_ms=rope_zero_ms,
@@ -654,7 +655,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
 
                 self.buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
 
-            # @ddd: we roped on the compute_gpu. Now we pre-load from the memobj to the next load_buffer
+            # RoPE is complete on the compute buffer; preload the next buffer.
             if layer_id < self.num_layers:
                 finalize_send_other()
                 memory_objs_layer = yield
@@ -662,13 +663,11 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 send_step_timed_ms = 0.0
                 send_step_layer_id = layer_id
                 reuse_wait_start = time.perf_counter()
-                self._wait_buffer_reusable(
+                self._wait_hole_buffer_reusable(
                     layer_id=layer_id,
                     buffer_obj=load_gpu_buffer_obj,
                 )
-                send_step_timed_ms += (
-                    time.perf_counter() - reuse_wait_start
-                ) * 1000.0
+                send_step_timed_ms += (time.perf_counter() - reuse_wait_start) * 1000.0
                 with torch.cuda.stream(self.load_stream):
                     copy_start = time.perf_counter()
                     for chunk_idx, (start, end, memory_obj) in enumerate(
@@ -723,7 +722,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                     self._record_load_buffer_ready(buffer_obj=load_gpu_buffer_obj)
                     self._maybe_force_sync_reuse_timer(use_load_stream=True)
                     copy_ms = (time.perf_counter() - copy_start) * 1000.0
-                    self._emit_reuse_timer(
+                    self._emit_hole_reuse_timer(
                         "reuse_copy_enqueue",
                         layer_id=layer_id,
                         duration_ms=copy_ms,

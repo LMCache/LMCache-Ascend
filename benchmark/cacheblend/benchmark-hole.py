@@ -1,51 +1,53 @@
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import torch
-import json
-from transformers import AutoTokenizer, PreTrainedTokenizerBase, DynamicCache
-import pandas as pd
-import numpy as np
-import gc
-from hydra.core.hydra_config import HydraConfig
-import tqdm
-import traceback
-import os
-import contextlib
+# SPDX-License-Identifier: Apache-2.0
+# Standard
 from dataclasses import asdict
-import torch.distributed as dist
-import pathlib
-import shutil
-import os
-import csv
-import sys
 from typing import Any, Iterable, Optional
-from vllm import LLM, SamplingParams
-# Note: TokensPrompt is not used in the final implementation, but kept as per original imports
-from vllm.inputs import TokensPrompt 
-from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
-from lmcache.logging import init_logger
+import contextlib
+import csv
+import gc
+import json
+import os
+import sys
 import time
+
+# Third Party
+# TokensPrompt is unused in the final implementation but retained from the
+# original benchmark imports.
+from absl import logging
 from hole_probe_utils import (
     DEFAULT_LAYER_TIMER_LAYERS,
     aggregate_layer_timer_file,
     build_empty_layer_timer_metrics,
 )
+from hydra.core.hydra_config import HydraConfig
+from lmcache.logging import init_logger
+from omegaconf import DictConfig
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from vllm import LLM, SamplingParams
+from vllm.config import KVTransferConfig
+from vllm.engine.arg_utils import EngineArgs
+import hydra
+import numpy as np
+import pandas as pd
+import torch
+import tqdm
 
 os.environ.setdefault("PYTHONHASHSEED", "2026")
 
 logger = init_logger(__name__)
 try:
+    # Third Party
     from lmcache.v1.trace_utils import trace_flow, trace_request_selected
 except Exception:  # pragma: no cover - tracing is optional
+
     def trace_flow(*args, **kwargs):
         return None
 
     def trace_request_selected(*args, **kwargs) -> bool:
         return False
 
-from absl import logging
-# get rid of [absl][INFO] - Using default tokenizer.    
+
+# get rid of [absl][INFO] - Using default tokenizer.
 logging.set_verbosity(logging.WARNING)
 # --- Utility Context Managers and Classes (Kept as is) ---
 
@@ -110,29 +112,30 @@ def build_llm_with_lmcache(
 ):
     connector_name, connector_module_path = get_lmcache_connector_spec(enable_holes)
     ktc = KVTransferConfig(
-            kv_connector=connector_name,
-            kv_role="kv_both",
-            kv_connector_module_path=connector_module_path,
-            )
+        kv_connector=connector_name,
+        kv_role="kv_both",
+        kv_connector_module_path=connector_module_path,
+    )
 
     llm_args = EngineArgs(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=max_model_len,
-            gpu_memory_utilization=0.6,
-            enable_prefix_caching=False,
-            enable_chunked_prefill=False,
-            enforce_eager=True,
-            tensor_parallel_size=tp_size,
-            max_num_seqs=bs,
-            trust_remote_code=True,
-            )
+        model=model,
+        kv_transfer_config=ktc,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=0.6,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        tensor_parallel_size=tp_size,
+        max_num_seqs=bs,
+        trust_remote_code=True,
+    )
 
     llm = LLM(**asdict(llm_args))
     try:
         yield llm
     finally:
         _shutdown_llm_instance(llm)
+
 
 @contextlib.contextmanager
 def build_llm_with_vllm(
@@ -145,16 +148,16 @@ def build_llm_with_vllm(
     # Vanilla vLLM does not require KVTransferConfig
 
     llm_args = EngineArgs(
-            model=model,
-            max_model_len=max_model_len,
-            gpu_memory_utilization=0.6,
-            enable_prefix_caching=False,
-            enable_chunked_prefill=False,
-            enforce_eager=True,
-            tensor_parallel_size=tp_size,
-            max_num_seqs=bs,
-            trust_remote_code=True,
-            )
+        model=model,
+        max_model_len=max_model_len,
+        gpu_memory_utilization=0.6,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        enforce_eager=True,
+        tensor_parallel_size=tp_size,
+        max_num_seqs=bs,
+        trust_remote_code=True,
+    )
 
     llm = LLM(**asdict(llm_args))
     try:
@@ -191,21 +194,24 @@ def _shutdown_llm_instance(llm: Optional[LLM]) -> None:
     if shutdown_wait_s > 0:
         time.sleep(shutdown_wait_s)
 
+
 def loadmqa(data_path: str):
     data_path_l = data_path.lower()
 
-    if data_path_l.endswith('.parquet'):
+    if data_path_l.endswith(".parquet"):
         # code not ready
         df = pd.read_parquet(data_path)
         ds = []
-        for item in df.to_dict('records'):
-            ds.append({
-                'ctxs': list(item['ctxs']),
-                'question': item['question'],
-                'answers': list(item['answers']),
-                })
+        for item in df.to_dict("records"):
+            ds.append(
+                {
+                    "ctxs": list(item["ctxs"]),
+                    "question": item["question"],
+                    "answers": list(item["answers"]),
+                }
+            )
         return ds
-    if data_path_l.endswith('.jsonl'):
+    if data_path_l.endswith(".jsonl"):
         ds = []
         with open(data_path, encoding="utf-8") as fs:
             for line_no, line in enumerate(fs, start=1):
@@ -262,6 +268,7 @@ def plot_query_latency_hit_rate(phase_results: list[tuple[str, list]]) -> str | 
     output_dir = HydraConfig.get().run.dir
     out_path = os.path.join(output_dir, "phase2_query_latency_hit_rate.png")
     try:
+        # Third Party
         import matplotlib.pyplot as plt
     except Exception as exc:
         logger.warning("Skipping plot generation (matplotlib unavailable): %s", exc)
@@ -325,6 +332,7 @@ def plot_query_latency_hit_rate(phase_results: list[tuple[str, list]]) -> str | 
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
     return os.path.abspath(out_path)
+
 
 def get_all_str(d):
     if isinstance(d, list):
@@ -487,8 +495,7 @@ def _resolve_submit_mode(raw_value: object, key_name: str) -> str:
     if mode in ("one_by_one", "onebyone", "one"):
         return "one_by_one"
     raise ValueError(
-        f"Unsupported {key_name}={raw_value}. "
-        "Expected one of: all_at_once, one_by_one."
+        f"Unsupported {key_name}={raw_value}. Expected one of: all_at_once, one_by_one."
     )
 
 
@@ -595,7 +602,9 @@ def _load_request_layer_timer_metrics(
             layers=DEFAULT_LAYER_TIMER_LAYERS,
         )
     except OSError as exc:
-        logger.warning("Failed to load layer timer metrics from %s: %s", _STREAM_TEE_PATH, exc)
+        logger.warning(
+            "Failed to load layer timer metrics from %s: %s", _STREAM_TEE_PATH, exc
+        )
         return {}
 
 
@@ -610,11 +619,15 @@ def _run_hole_mode_preflight(
     logger.info("Running hole-mode preflight probe.")
 
     def tokenize1(prompt: str):
-        return tokenizer(
-            prompt,
-            add_special_tokens=False,
-            return_tensors="pt",
-        )["input_ids"].to(torch.long).reshape(1, -1)
+        return (
+            tokenizer(
+                prompt,
+                add_special_tokens=False,
+                return_tensors="pt",
+            )["input_ids"]
+            .to(torch.long)
+            .reshape(1, -1)
+        )
 
     def make_doc_tokens(doc_idx: int, min_tokens: int) -> torch.Tensor:
         repeats = max(min_tokens, 32)
@@ -652,8 +665,7 @@ def _run_hole_mode_preflight(
         prefill_requests.append(
             {
                 "prompt_token_ids": (
-                    doc_ids[doc_idx].reshape(-1).tolist()
-                    + sep.reshape(-1).tolist()
+                    doc_ids[doc_idx].reshape(-1).tolist() + sep.reshape(-1).tolist()
                 )
             }
         )
@@ -714,7 +726,7 @@ def _prepare_query_docs(
 ) -> tuple[list[str], str]:
     doc_prompts, suffix_prompt = build_qa_prompt_fn(ex, query_prompt)
     if cfg.cap_ndocs >= 0:
-        doc_prompts = doc_prompts[:cfg.cap_ndocs]
+        doc_prompts = doc_prompts[: cfg.cap_ndocs]
     cap_doc_chars = int(getattr(cfg, "cap_doc_chars", -1))
     if cap_doc_chars >= 0:
         doc_prompts = [str(doc)[:cap_doc_chars] for doc in doc_prompts]
@@ -744,7 +756,8 @@ def _resolve_hole_id(hole_id: int, native_doc_count: int) -> int:
         resolved_hole_id = native_doc_count // 2
     if resolved_hole_id >= native_doc_count:
         raise ValueError(
-            f"hole_id={hole_id} out of range for native query docs len={native_doc_count}"
+            f"hole_id={hole_id} out of range for native query docs "
+            f"len={native_doc_count}"
         )
     return resolved_hole_id
 
@@ -785,17 +798,13 @@ def _resolve_hole_specs(
     total_doc_count: int,
 ) -> tuple[list[int], list[int]]:
     resolved_hole_ids = [
-        _resolve_hole_id(hole_id, native_doc_count)
-        for hole_id in hole_ids
+        _resolve_hole_id(hole_id, native_doc_count) for hole_id in hole_ids
     ]
     resolved_hole_positions = [
-        _resolve_hole_pos(hole_pos, total_doc_count)
-        for hole_pos in hole_positions
+        _resolve_hole_pos(hole_pos, total_doc_count) for hole_pos in hole_positions
     ]
     if len(set(resolved_hole_ids)) != len(resolved_hole_ids):
-        raise ValueError(
-            f"Resolved hole_ids contain duplicates: {resolved_hole_ids}"
-        )
+        raise ValueError(f"Resolved hole_ids contain duplicates: {resolved_hole_ids}")
     if len(set(resolved_hole_positions)) != len(resolved_hole_positions):
         raise ValueError(
             f"Resolved hole_positions contain duplicates: {resolved_hole_positions}"
@@ -815,8 +824,11 @@ def _build_selected_entries(
     selected_entries: list[dict[str, Any]] = []
     select_cnt = 0
 
-    for idx, ex in enumerate(eval_dataset[:cfg.until]):
-        if not (len(cfg.only_s) == 0 or any(s in cfg.only_s for s in get_all_str(ex["answers"]))):
+    for idx, ex in enumerate(eval_dataset[: cfg.until]):
+        if not (
+            len(cfg.only_s) == 0
+            or any(s in cfg.only_s for s in get_all_str(ex["answers"]))
+        ):
             continue
         if len(cfg.only_s) > 0:
             if select_cnt == 1:
@@ -843,9 +855,7 @@ def _build_selected_entries(
         )
 
     all_doc_refs = [
-        doc_ref
-        for row in selected_entries
-        for doc_ref in row["native_doc_refs"]
+        doc_ref for row in selected_entries for doc_ref in row["native_doc_refs"]
     ]
     reserved_hole_refs: set[tuple[int, int, str]] = set()
 
@@ -859,13 +869,14 @@ def _build_selected_entries(
             total_doc_count=total_doc_count,
         )
         hole_doc_refs = [
-            native_doc_refs[resolved_hole_id]
-            for resolved_hole_id in resolved_hole_ids
+            native_doc_refs[resolved_hole_id] for resolved_hole_id in resolved_hole_ids
         ]
         row["resolved_hole_ids"] = resolved_hole_ids
         row["resolved_hole_positions"] = resolved_hole_positions
         row["hole_doc_refs"] = hole_doc_refs
-        row["resolved_hole_id"] = resolved_hole_ids[0] if len(resolved_hole_ids) == 1 else None
+        row["resolved_hole_id"] = (
+            resolved_hole_ids[0] if len(resolved_hole_ids) == 1 else None
+        )
         row["resolved_hole_pos"] = (
             resolved_hole_positions[0] if len(resolved_hole_positions) == 1 else None
         )
@@ -876,9 +887,7 @@ def _build_selected_entries(
         row_idx = int(row["idx"])
         native_doc_refs = list(row["native_doc_refs"])
         resolved_hole_ids = [int(item) for item in row["resolved_hole_ids"]]
-        resolved_hole_positions = [
-            int(item) for item in row["resolved_hole_positions"]
-        ]
+        resolved_hole_positions = [int(item) for item in row["resolved_hole_positions"]]
         hole_doc_refs = list(row["hole_doc_refs"])
         candidate_extra_refs = [
             doc_ref
@@ -888,16 +897,21 @@ def _build_selected_entries(
         if len(candidate_extra_refs) < inflate:
             raise ValueError(
                 f"inflate={inflate} requires {inflate} non-hole extra docs "
-                f"for query idx={row_idx}, but only {len(candidate_extra_refs)} are available"
+                f"for query idx={row_idx}, but only "
+                f"{len(candidate_extra_refs)} are available"
             )
 
         extra_doc_refs = list(candidate_extra_refs[:inflate])
         base_final_doc_refs = native_doc_refs + extra_doc_refs
         hole_doc_ref_set = set(hole_doc_refs)
         remaining_doc_refs = [
-            doc_ref for doc_ref in base_final_doc_refs if doc_ref not in hole_doc_ref_set
+            doc_ref
+            for doc_ref in base_final_doc_refs
+            if doc_ref not in hole_doc_ref_set
         ]
-        final_doc_refs: list[tuple[int, int, str] | None] = [None] * len(base_final_doc_refs)
+        final_doc_refs: list[tuple[int, int, str] | None] = [None] * len(
+            base_final_doc_refs
+        )
         for resolved_hole_pos, hole_doc_ref in zip(
             resolved_hole_positions,
             hole_doc_refs,
@@ -910,13 +924,15 @@ def _build_selected_entries(
                 final_doc_refs[i] = next(remaining_iter)
         if any(doc_ref is None for doc_ref in final_doc_refs):
             raise AssertionError("final_doc_refs contains unfilled entries")
-        final_doc_refs = [doc_ref for doc_ref in final_doc_refs if doc_ref is not None]
+        resolved_final_doc_refs = [
+            doc_ref for doc_ref in final_doc_refs if doc_ref is not None
+        ]
 
         row["doc_prompts"] = [doc_ref[2] for doc_ref in native_doc_refs]
-        row["extra_doc_refs"] = list(final_doc_refs[len(native_doc_refs):])
+        row["extra_doc_refs"] = list(resolved_final_doc_refs[len(native_doc_refs) :])
         row["extra_doc_prompts"] = [doc_ref[2] for doc_ref in row["extra_doc_refs"]]
-        row["final_doc_refs"] = final_doc_refs
-        row["final_doc_prompts"] = [doc_ref[2] for doc_ref in final_doc_refs]
+        row["final_doc_refs"] = resolved_final_doc_refs
+        row["final_doc_prompts"] = [doc_ref[2] for doc_ref in resolved_final_doc_refs]
 
     return selected_entries
 
@@ -941,6 +957,7 @@ def _format_hole_summary(selected_entries: list[dict[str, Any]]) -> str:
 
 # --- Prefill Function (Fixed input format for batched generation) ---
 
+
 def prefill_chunks(
     llm: LLM,
     eval_dataset: list,
@@ -955,26 +972,40 @@ def prefill_chunks(
     build_qa_prompt_fn,
 ):
     """
-    Step 1: Pre-populate the KV caches for all document chunks across all queries in a single batch.
+    Step 1: Pre-populate KV caches for all document chunks in one batch.
     """
     logger.info("Starting batched document prefilling...")
 
     # Define tokenization helper (using CPU tensors for batch preparation)
     def tokenize1(prompt: str):
-        return tokenizer(prompt, add_special_tokens=False, return_tensors="pt")['input_ids'].to(torch.long).reshape(1, -1)
+        return (
+            tokenizer(prompt, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"
+            ]
+            .to(torch.long)
+            .reshape(1, -1)
+        )
 
     sep = tokenize1(cfg.sep).cpu()
-    s_start_full = torch.cat((preinst_ids.cpu(), tokenize1(prefix_prompt).cpu()), dim=1).to(torch.long)
+    s_start_full = torch.cat(
+        (preinst_ids.cpu(), tokenize1(prefix_prompt).cpu()), dim=1
+    ).to(torch.long)
     nosink = bool(getattr(cfg, "nosink", False))
 
     # Shared prefix for Golem/CacheBlend (if configured)
     def build_shared_prefix(b):
-        if b == 0: return None
+        if b == 0:
+            return None
         shared_prompt_s = "You are a Q&A assistant. "
-        if b == -1: return tokenize1(shared_prompt_s)
-        return tokenize1(' ' * b)
+        if b == -1:
+            return tokenize1(shared_prompt_s)
+        return tokenize1(" " * b)
 
-    shared_prefix_t = build_shared_prefix(int(cfg.golem_prefix)).cpu() if int(cfg.golem_prefix) != 0 else None
+    shared_prefix_t = (
+        build_shared_prefix(int(cfg.golem_prefix)).cpu()
+        if int(cfg.golem_prefix) != 0
+        else None
+    )
 
     all_prefill_prompts = []
     inflate = int(getattr(cfg, "inflate", 1))
@@ -992,7 +1023,7 @@ def prefill_chunks(
         for row in selected_entries
         for hole_doc_ref in row.get("hole_doc_refs", [])
     }
-    # Iterate through all queries and all their documents to create batched prefill tasks
+    # Build batched prefill tasks from every query and document.
     for row in tqdm.tqdm(selected_entries, desc="Preparing prefill prompts"):
         idx = int(row["idx"])
         doc_prompts = list(row["doc_prompts"])
@@ -1050,10 +1081,8 @@ def prefill_chunks(
     )
 
     prefill_sampling_params = SamplingParams(
-            max_tokens=1,
-            temperature=0.0,
-            extra_args={'temperature': 1., 'prefix': 0}
-            )
+        max_tokens=1, temperature=0.0, extra_args={"temperature": 1.0, "prefix": 0}
+    )
 
     # FIX: Use list of request dictionaries for vLLM batch input
     request_inputs = [{"prompt_token_ids": tokens} for tokens in all_prefill_prompts]
@@ -1069,7 +1098,8 @@ def prefill_chunks(
 
     avg_prefill_kv_cache_s = prefill_t.duration / len(all_prefill_prompts)
     logger.info(
-        "Document prefilling completed in %.2f seconds (avg %.4f s per KV cache over %d prefills).",
+        "Document prefilling completed in %.2f seconds "
+        "(avg %.4f s per KV cache over %d prefills).",
         prefill_t.duration,
         avg_prefill_kv_cache_s,
         len(all_prefill_prompts),
@@ -1081,7 +1111,9 @@ def prefill_chunks(
         "avg_prefill_kv_cache_s": float(avg_prefill_kv_cache_s),
     }
 
+
 # --- Updated run_batched_queries function with Latency Metrics ---
+
 
 def run_batched_queries(
     llm: LLM,
@@ -1099,7 +1131,7 @@ def run_batched_queries(
     phase_label: str = "phase2",
 ) -> list:
     """
-    Step 2: Run all final query generations in a single batch and collect latency metrics.
+    Step 2: Run final query generation and collect latency metrics.
     """
     logger.info("Starting query generation for %s...", phase_label)
     latency_warn = False
@@ -1110,12 +1142,20 @@ def run_batched_queries(
 
     # Define tokenization helper (using cpu tensors for batch preparation)
     def tokenize1(prompt: str):
-        return tokenizer(prompt, add_special_tokens=False, return_tensors="pt")['input_ids'].to(torch.long).reshape(1, -1)
+        return (
+            tokenizer(prompt, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"
+            ]
+            .to(torch.long)
+            .reshape(1, -1)
+        )
 
     all_query_prompts = []
     metadata_list = []
 
-    s_start_full = torch.cat((preinst_ids.cpu(), tokenize1(prefix_prompt).cpu()), dim=1).to(torch.long)
+    s_start_full = torch.cat(
+        (preinst_ids.cpu(), tokenize1(prefix_prompt).cpu()), dim=1
+    ).to(torch.long)
     sep = tokenize1(cfg.sep).cpu()
 
     selected_entries = _build_selected_entries(
@@ -1144,7 +1184,9 @@ def run_batched_queries(
 
         try:
             docs_ids = [tokenize1(doc).cpu() for doc in final_doc_prompts]
-            q_ids = torch.cat((tokenize1(suffix_prompt).cpu(), postinst_ids.cpu()), dim=1).to(torch.long)
+            q_ids = torch.cat(
+                (tokenize1(suffix_prompt).cpu(), postinst_ids.cpu()), dim=1
+            ).to(torch.long)
 
             # Build the sequence:
             # S_START_FULL + SEP + final inflated docs + SEP + Q_IDS
@@ -1161,15 +1203,17 @@ def run_batched_queries(
             all_query_prompts.append(all_ids)
 
             # Store metadata for post-processing
-            metadata_list.append({
-                'idx': idx,
-                'answers': answers,
-                'question': suffix_prompt,
-                's_start_full_len': s_start_full.numel(),
-                'resolved_hole_ids': list(row["resolved_hole_ids"]),
-                'resolved_hole_positions': list(row["resolved_hole_positions"]),
-                'final_doc_count': len(final_doc_prompts),
-                })
+            metadata_list.append(
+                {
+                    "idx": idx,
+                    "answers": answers,
+                    "question": suffix_prompt,
+                    "s_start_full_len": s_start_full.numel(),
+                    "resolved_hole_ids": list(row["resolved_hole_ids"]),
+                    "resolved_hole_positions": list(row["resolved_hole_positions"]),
+                    "final_doc_count": len(final_doc_prompts),
+                }
+            )
 
         except Exception as e:
             logger.error(f"Error preparing query {idx}: {e}")
@@ -1177,7 +1221,6 @@ def run_batched_queries(
     if not all_query_prompts:
         logger.warning("No final query prompts generated. Skipping generation.")
         return []
-
 
     logger.info(
         "Total %d queries to generate (submit_mode=%s).",
@@ -1187,10 +1230,13 @@ def run_batched_queries(
 
     # 2. Run batched generation
     sampling_params = SamplingParams(
-            max_tokens=10,
-            temperature=0.0,
-            extra_args={'temperature': cfg.golem_temperature, 'prefix': s_start_full.numel()}
-            )
+        max_tokens=10,
+        temperature=0.0,
+        extra_args={
+            "temperature": cfg.golem_temperature,
+            "prefix": s_start_full.numel(),
+        },
+    )
 
     query_inputs = [{"prompt_token_ids": tokens} for tokens in all_query_prompts]
 
@@ -1221,7 +1267,10 @@ def run_batched_queries(
     exported_metrics_samples = 0
 
     if len(outputs) != len(metadata_list):
-        logger.error(f"Mismatch between number of outputs ({len(outputs)}) and metadata ({len(metadata_list)}).")
+        logger.error(
+            f"Mismatch between outputs ({len(outputs)}) and metadata "
+            f"({len(metadata_list)})."
+        )
         return []
 
     layer_timer_metrics_by_req = _load_request_layer_timer_metrics(
@@ -1229,7 +1278,9 @@ def run_batched_queries(
     )
     timer_rows: list[dict[str, Any]] = []
 
-    for output_idx, (output, meta) in enumerate(zip(outputs, metadata_list)):
+    for output_idx, (output, meta) in enumerate(
+        zip(outputs, metadata_list, strict=False)
+    ):
         req_id = getattr(output, "request_id", None)
         timer_metrics = (
             layer_timer_metrics_by_req.get(
@@ -1247,7 +1298,7 @@ def run_batched_queries(
             )
             continue
         output_str = output.outputs[0].text
-        answers = meta['answers']
+        answers = meta["answers"]
 
         e2e_time = extract_request_e2e_s(output)
         ttft = extract_request_ttft_s(output)
@@ -1274,7 +1325,11 @@ def run_batched_queries(
         exported_hit_tokens = extract_request_hit_tokens(output)
         exported_prompt_tokens = extract_request_prompt_tokens(output)
         req_hit_rate = extract_request_hit_rate(output)
-        prompt_tokens = len(all_query_prompts[output_idx]) if output_idx < len(all_query_prompts) else 0
+        prompt_tokens = (
+            len(all_query_prompts[output_idx])
+            if output_idx < len(all_query_prompts)
+            else 0
+        )
         per_query_hit_rate = None
         if exported_hit_tokens is not None and exported_prompt_tokens is not None:
             exported_hit_tokens_total += max(0, int(exported_hit_tokens))
@@ -1308,23 +1363,27 @@ def run_batched_queries(
 
         # --- Output Dictionary ---
         d = {
-                'idx': meta['idx'],
-                'request_id': req_id,
-                'f1': f1,
-                'rl': rl,
-                'ground truth': answers,
-                'generated': output_str,
-                'question': meta['question'],
-                'latency_e2e_s': e2e_time,
-                'latency_ttft_s': ttft,
-                'latency_tbt_s': tbt,
-                'prompt_tokens': int(prompt_tokens),
-                'cached_tokens': int(cached_tokens) if cached_tokens is not None else None,
-                'hit_tokens': int(exported_hit_tokens) if exported_hit_tokens is not None else None,
-                'hit_prompt_tokens': int(exported_prompt_tokens) if exported_prompt_tokens is not None else None,
-                'req_hit_rate': req_hit_rate,
-                'cache_hit_rate': per_query_hit_rate,
-                }
+            "idx": meta["idx"],
+            "request_id": req_id,
+            "f1": f1,
+            "rl": rl,
+            "ground truth": answers,
+            "generated": output_str,
+            "question": meta["question"],
+            "latency_e2e_s": e2e_time,
+            "latency_ttft_s": ttft,
+            "latency_tbt_s": tbt,
+            "prompt_tokens": int(prompt_tokens),
+            "cached_tokens": int(cached_tokens) if cached_tokens is not None else None,
+            "hit_tokens": int(exported_hit_tokens)
+            if exported_hit_tokens is not None
+            else None,
+            "hit_prompt_tokens": int(exported_prompt_tokens)
+            if exported_prompt_tokens is not None
+            else None,
+            "req_hit_rate": req_hit_rate,
+            "cache_hit_rate": per_query_hit_rate,
+        }
         d.update(timer_metrics)
         output_res.append(d)
 
@@ -1370,32 +1429,29 @@ def run_batched_queries(
         avg_e2e = gen_t.duration / len(all_query_prompts)
 
     summary_metrics = {
-            'total_generation_time': gen_t.duration,
-            'num_queries': len(all_query_prompts),
-            'mean_f1': np.mean(f1_list) if f1_list else 0,
-            'mean_rl': np.mean(rl_list) if rl_list else 0,
-
-            'avg_e2e_s': avg_e2e,
-            'p90_e2e_s': _safe_percentile(e2e_times, 90),
-
-            'avg_ttft_s': _safe_mean(ttft_times),
-            'p90_ttft_s': _safe_percentile(ttft_times, 90),
-
-            'avg_tbt_s': _safe_mean(tbt_times),
-            'p90_tbt_s': _safe_percentile(tbt_times, 90),
-            'cache_hit_rate': cache_hit_rate,
-            'cache_hit_rate_source': cache_hit_rate_source,
-            'cached_tokens_total': cached_tokens_total,
-            'cached_prompt_tokens_total': cached_prompt_tokens_total,
-            'cached_metrics_samples': cached_metrics_samples,
-            'exported_hit_tokens_total': exported_hit_tokens_total,
-            'exported_prompt_tokens_total': exported_prompt_tokens_total,
-            'exported_metrics_samples': exported_metrics_samples,
-            'phase_label': phase_label,
-            'timed_requests_e2e': len(e2e_times),
-            'timed_requests_ttft': len(ttft_times),
-            'timed_requests_tbt': len(tbt_times),
-            }
+        "total_generation_time": gen_t.duration,
+        "num_queries": len(all_query_prompts),
+        "mean_f1": np.mean(f1_list) if f1_list else 0,
+        "mean_rl": np.mean(rl_list) if rl_list else 0,
+        "avg_e2e_s": avg_e2e,
+        "p90_e2e_s": _safe_percentile(e2e_times, 90),
+        "avg_ttft_s": _safe_mean(ttft_times),
+        "p90_ttft_s": _safe_percentile(ttft_times, 90),
+        "avg_tbt_s": _safe_mean(tbt_times),
+        "p90_tbt_s": _safe_percentile(tbt_times, 90),
+        "cache_hit_rate": cache_hit_rate,
+        "cache_hit_rate_source": cache_hit_rate_source,
+        "cached_tokens_total": cached_tokens_total,
+        "cached_prompt_tokens_total": cached_prompt_tokens_total,
+        "cached_metrics_samples": cached_metrics_samples,
+        "exported_hit_tokens_total": exported_hit_tokens_total,
+        "exported_prompt_tokens_total": exported_prompt_tokens_total,
+        "exported_metrics_samples": exported_metrics_samples,
+        "phase_label": phase_label,
+        "timed_requests_e2e": len(e2e_times),
+        "timed_requests_ttft": len(ttft_times),
+        "timed_requests_tbt": len(tbt_times),
+    }
 
     empty_timer_metrics = build_empty_layer_timer_metrics(DEFAULT_LAYER_TIMER_LAYERS)
     for bucket in ("wait_reuse", "topk_l1", "blend", "save"):
@@ -1417,6 +1473,7 @@ def run_batched_queries(
 
 
 # --- Main Function (Kept as is) ---
+
 
 @hydra.main(config_path="config", config_name="config-hole.yaml", version_base="1.3")
 def main(cfg: DictConfig):
@@ -1478,19 +1535,21 @@ def main(cfg: DictConfig):
 
     # IMPORTANT: lmcache_ascend import must happen after hole-mode env setup,
     # otherwise hole monkey patches are decided with default env values.
+    # First Party
     from lmcache_ascend.utils import build_qa_prompt, compute_f1, compute_rl
 
     method2builder = {
-            'cacheblend': build_llm_with_lmcache,
-            'reuse': build_llm_with_lmcache,
-            'full': build_llm_with_vllm
-            }
+        "cacheblend": build_llm_with_lmcache,
+        "reuse": build_llm_with_lmcache,
+        "full": build_llm_with_vllm,
+    }
 
     os.environ["LMCACHE_ENABLE_BLENDING"] = (
         "True" if cfg.method == "cacheblend" else "False"
     )
     logger.warning(
-        "[LMC-DEBUG][bench][mode] cfg.method=%s hole_mode=%s hole_ids=%s hole_positions=%s -> LMCACHE_ENABLE_BLENDING=%s",
+        "[LMC-DEBUG][bench][mode] cfg.method=%s hole_mode=%s hole_ids=%s "
+        "hole_positions=%s -> LMCACHE_ENABLE_BLENDING=%s",
         cfg.method,
         hole_mode,
         hole_ids,
@@ -1505,27 +1564,55 @@ def main(cfg: DictConfig):
 
     # Define tokenization helper for local tensors
     def tokenize1(prompt: str):
-        return tokenizer(prompt, add_special_tokens=False, return_tensors="pt")['input_ids'].to(torch.long).reshape(1, -1)
+        return (
+            tokenizer(prompt, add_special_tokens=False, return_tensors="pt")[
+                "input_ids"
+            ]
+            .to(torch.long)
+            .reshape(1, -1)
+        )
 
     # --- Pre-calculate fixed prompt tokens ---
     def get_inst_prefix_suffix_tokens() -> tuple[torch.Tensor, torch.Tensor]:
         user_content = "998244353"
         messages = [{"role": "user", "content": user_content}]
         # Use CPU for preparation
-        full_encoded = tokenizer.apply_chat_template(messages, tokenize=True, add_special_tokens=True, add_generation_prompt=True, enable_thinking=False, return_tensors="pt").to(torch.long).reshape(1, -1)
+        full_encoded = (
+            tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_special_tokens=True,
+                add_generation_prompt=True,
+                enable_thinking=False,
+                return_tensors="pt",
+            )
+            .to(torch.long)
+            .reshape(1, -1)
+        )
         instruction_tokens = tokenize1(user_content)
 
         for i in range(full_encoded.shape[1] - instruction_tokens.shape[1] + 1):
-            if (full_encoded[:, i:i+instruction_tokens.shape[1]] == instruction_tokens).all():
+            if (
+                full_encoded[:, i : i + instruction_tokens.shape[1]]
+                == instruction_tokens
+            ).all():
                 prefix = full_encoded[:, :i]
-                suffix = full_encoded[:, i+instruction_tokens.shape[1]:]
+                suffix = full_encoded[:, i + instruction_tokens.shape[1] :]
                 return prefix, suffix
         raise ValueError("Instruction tokens not found in templated token sequence.")
 
     preinst_ids, postinst_ids = get_inst_prefix_suffix_tokens()
 
-    prefix_prompt = "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n"
-    query_prompt = f"\n\nAnswer the question based on the given passages. Answer the question within 5 words. Do NOT repeat the question or output any other words. Question: "
+    prefix_prompt = (
+        "Answer the question based on the given passages. Only give me the "
+        "answer and do not output any other words.\n\nThe following are given "
+        "passages.\n"
+    )
+    query_prompt = (
+        "\n\nAnswer the question based on the given passages. Answer the question "
+        "within 5 words. Do NOT repeat the question or output any other words. "
+        "Question: "
+    )
     phase_query_suffix_enabled = _env_enabled(
         "LMCACHE_APPEND_PASS_QUESTION_MARKS",
     )
@@ -1554,7 +1641,7 @@ def main(cfg: DictConfig):
 
             # 1. Batched Document Prefilling (Only for 'cacheblend')
             prefill_summary = None
-            if cfg.method == 'cacheblend' or cfg.method == "reuse":
+            if cfg.method == "cacheblend" or cfg.method == "reuse":
                 prefill_summary = prefill_chunks(
                     llm,
                     eval_dataset,
@@ -1579,7 +1666,7 @@ def main(cfg: DictConfig):
                 pass_query_prompt = query_prompt
                 if phase_query_suffix_enabled:
                     pass_query_prompt += "?" * (phase_idx + 1)
-                # Keep LMCache connector cache across passes; clear only local vLLM prefix state.
+                # Keep LMCache state; clear only the local vLLM prefix cache.
                 llm.reset_prefix_cache(
                     reset_running_requests=True, reset_connector=False
                 )
@@ -1628,7 +1715,8 @@ def main(cfg: DictConfig):
                     f"{_fmt_metric(prefill_summary.get('avg_prefill_kv_cache_s'))} | "
                     f"Total prefill time: "
                     f"{_fmt_metric(prefill_summary.get('total_prefill_time_s'))} | "
-                    f"Num KV caches: {int(prefill_summary.get('num_prefill_kv_caches', 0))}"
+                    "Num KV caches: "
+                    f"{int(prefill_summary.get('num_prefill_kv_caches', 0))}"
                 )
             for phase_name, phase_output in phase_outputs:
                 if not phase_output:
@@ -1644,15 +1732,18 @@ def main(cfg: DictConfig):
                 print(f"[{phase_name}] Average hit rate = {hit_rate_str}")
                 print(f"[{phase_name}] --- Latency Metrics (Seconds) ---")
                 print(
-                    f"[{phase_name}] Average E2E: {_fmt_metric(summary.get('avg_e2e_s'))} | "
+                    f"[{phase_name}] Average E2E: "
+                    f"{_fmt_metric(summary.get('avg_e2e_s'))} | "
                     f"P90 E2E: {_fmt_metric(summary.get('p90_e2e_s'))}"
                 )
                 print(
-                    f"[{phase_name}] Average TTFT: {_fmt_metric(summary.get('avg_ttft_s'))} | "
+                    f"[{phase_name}] Average TTFT: "
+                    f"{_fmt_metric(summary.get('avg_ttft_s'))} | "
                     f"P90 TTFT: {_fmt_metric(summary.get('p90_ttft_s'))}"
                 )
                 print(
-                    f"[{phase_name}] Average TBT: {_fmt_metric(summary.get('avg_tbt_s'))} | "
+                    f"[{phase_name}] Average TBT: "
+                    f"{_fmt_metric(summary.get('avg_tbt_s'))} | "
                     f"P90 TBT: {_fmt_metric(summary.get('p90_tbt_s'))}"
                 )
 

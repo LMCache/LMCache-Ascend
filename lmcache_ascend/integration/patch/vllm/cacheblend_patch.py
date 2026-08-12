@@ -166,8 +166,7 @@ class CacheBlendPatcher(BasePatcher):
             # Logic: Find indentation of the function body
             indent = "        "  # Default for vLLM class methods
             reg_msg = (
-                "VLLMModelTracker.register_model(ENGINE_NAME, "
-                "self.model_runner.model)"
+                "VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)"
             )
             snippet = [
                 "\n",

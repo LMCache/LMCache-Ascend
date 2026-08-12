@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-import time
 from typing import Optional
+import time
 
 # Third Party
 import torch
@@ -139,7 +139,7 @@ class LMCQwen3Model(LMCModel):
                 req_id=req_id,
                 layer_id=idx,
             )
-            # Record that the scatter is done after attention finishes reading the buffer
+            # Attention has finished reading the scatter buffer.
             self.blender.gpu_connector.record_scatter_done(idx)
             if hasattr(self.blender, "emit_blend_component"):
                 self.blender.emit_blend_component(

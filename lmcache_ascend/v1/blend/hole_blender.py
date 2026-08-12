@@ -12,11 +12,12 @@ later layers.
 See `docs/hole-feature-overview.md` for the maintainer-facing overview of how
 this blender fits into the connector and worker flow.
 """
+
 # Standard
 from dataclasses import dataclass
+from typing import Optional, Union
 import os
 import time
-from typing import Optional, Union
 
 # Third Party
 from lmcache.logging import init_logger
@@ -27,23 +28,17 @@ from lmcache.v1.trace_utils import (
     mask_to_string,
     summarize_key,
     summarize_kv_tensor_stats,
-    summarize_prefix_kv_tensor_stats,
     summarize_ranges,
     tensor_to_list,
-    trace_compare_prefix_len,
-    trace_flow_enabled,
-    trace_layer_enabled,
     trace_flow,
-    trace_probe_positions,
-    trace_request_selected,
+    trace_flow_enabled,
 )
 import torch
 
 # First Party
-from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
-from lmcache_ascend.v1.hole_types import HoleLoadSpec
-from lmcache_ascend.v1.npu_hole_connector import VLLMBufferLayerwiseNPUHoleConnector
 from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
+from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
+from lmcache_ascend.v1.npu_hole_connector import VLLMBufferLayerwiseNPUHoleConnector
 
 logger = init_logger(__name__)
 
@@ -91,6 +86,7 @@ class LMCBlenderHole:
     request-flow description and the relationship to the standard nohole
     blender.
     """
+
     def __init__(
         self,
         cache_engine,
@@ -160,9 +156,9 @@ class LMCBlenderHole:
         layer_id: int,
         duration_ms: float,
     ) -> None:
-        self._layer_blend_accounted_ms[layer_id] = (
-            self._layer_blend_accounted_ms.get(layer_id, 0.0) + float(duration_ms)
-        )
+        self._layer_blend_accounted_ms[layer_id] = self._layer_blend_accounted_ms.get(
+            layer_id, 0.0
+        ) + float(duration_ms)
         self._emit_timer(bucket, layer_id, float(duration_ms))
 
     def emit_blend_timer(self, layer_id: int, duration_ms: float) -> None:
@@ -187,9 +183,13 @@ class LMCBlenderHole:
             return tensor_to_list(positions, dtype=torch.long, max_items=max_items)
 
         flat_positions = positions.reshape(-1)
-        prefix_positions = flat_positions[:max_items].detach().to(
-            device="cpu",
-            dtype=torch.long,
+        prefix_positions = (
+            flat_positions[:max_items]
+            .detach()
+            .to(
+                device="cpu",
+                dtype=torch.long,
+            )
         )
         if offset:
             prefix_positions = prefix_positions + int(offset)
@@ -207,10 +207,7 @@ class LMCBlenderHole:
     ) -> None:
         if not (self.trace_blend or trace_flow_enabled()):
             return
-        if (
-            gap_positions is not None
-            and self._active_trace_gap_positions_local is None
-        ):
+        if gap_positions is not None and self._active_trace_gap_positions_local is None:
             self._active_trace_gap_positions_local = self._trace_position_list(
                 gap_positions
             )
@@ -218,10 +215,7 @@ class LMCBlenderHole:
                 gap_positions,
                 offset=num_falses,
             )
-        if (
-            hit_positions is not None
-            and self._active_trace_hit_positions_local is None
-        ):
+        if hit_positions is not None and self._active_trace_hit_positions_local is None:
             self._active_trace_hit_positions_local = self._trace_position_list(
                 hit_positions
             )
@@ -252,7 +246,9 @@ class LMCBlenderHole:
             return 0
         return max(prefix_hit_ends)
 
-    def _get_effective_hit_ranges(self, load_spec) -> tuple[list[tuple[int, int]], bool]:
+    def _get_effective_hit_ranges(
+        self, load_spec
+    ) -> tuple[list[tuple[int, int]], bool]:
         hit_ranges = list(getattr(load_spec, "hit_ranges", []) or [])
         return hit_ranges, self._get_test_hole_miss_start(load_spec) is not None
 
@@ -616,10 +612,9 @@ class LMCBlenderHole:
         if torch.equal(actual_k, expected_k) and torch.equal(actual_v, expected_v):
             return
 
-        mismatch_mask = (
-            (actual_k != expected_k).reshape(actual_k.shape[0], -1).any(dim=1)
-            | (actual_v != expected_v).reshape(actual_v.shape[0], -1).any(dim=1)
-        )
+        mismatch_mask = (actual_k != expected_k).reshape(actual_k.shape[0], -1).any(
+            dim=1
+        ) | (actual_v != expected_v).reshape(actual_v.shape[0], -1).any(dim=1)
         mismatch_local = gap_positions[mismatch_mask]
         mismatch_abs = mismatch_local + num_falses
         self._raise_gap_assertion(
@@ -706,10 +701,9 @@ class LMCBlenderHole:
         if torch.equal(actual_k, expected_k) and torch.equal(actual_v, expected_v):
             return
 
-        mismatch_mask = (
-            (actual_k != expected_k).reshape(actual_k.shape[0], -1).any(dim=1)
-            | (actual_v != expected_v).reshape(actual_v.shape[0], -1).any(dim=1)
-        )
+        mismatch_mask = (actual_k != expected_k).reshape(actual_k.shape[0], -1).any(
+            dim=1
+        ) | (actual_v != expected_v).reshape(actual_v.shape[0], -1).any(dim=1)
         mismatch_local = dense_gap_positions[mismatch_mask]
         mismatch_abs = mismatch_local + num_falses
         self._raise_gap_assertion(
@@ -1043,7 +1037,8 @@ class LMCBlenderHole:
                 self._emit_timer("topk_l1", layer_id, topk_ms)
 
             logger.info(
-                "old_k.shape = %s num_falses (F mask) = %d hits = %d topk_candidates = %d "
+                "old_k.shape = %s num_falses (F mask) = %d hits = %d "
+                "topk_candidates = %d "
                 "forced_gaps = %d total_gaps = %d ratio=%f top_k_in_prefix %d "
                 "test_hole_miss_start=%s test_hole_prefix_end=%s adaptive_topk=%s "
                 "adaptive_sections=%s",
@@ -1333,7 +1328,9 @@ class LMCBlenderHole:
         req_id = kwargs.get("req_id")
         self._active_timer_req_id = None if req_id is None else str(req_id)
         self._active_timer_path = str(kwargs.get("timer_path", "hole"))
-        timer_load_mode = kwargs.get("timer_load_mode", getattr(load_spec, "mode", None))
+        timer_load_mode = kwargs.get(
+            "timer_load_mode", getattr(load_spec, "mode", None)
+        )
         self._active_timer_load_mode = (
             None if timer_load_mode is None else str(timer_load_mode)
         )

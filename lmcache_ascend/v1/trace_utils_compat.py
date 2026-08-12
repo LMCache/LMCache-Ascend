@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Iterable
 from functools import lru_cache
+from typing import Any
 import json
 import os
 import sys
 import time
-from typing import Any
 
 try:
+    # Third Party
     import torch
 except Exception:  # pragma: no cover - optional in some test contexts
     torch = None
@@ -227,7 +230,8 @@ def trace_flow(component: str, event: str, **fields: Any) -> None:
     for key, value in fields.items():
         payload[key] = _normalize(value)
     print(
-        "[LMCACHE_TRACE_FLOW] " + json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        "[LMCACHE_TRACE_FLOW] "
+        + json.dumps(payload, ensure_ascii=True, sort_keys=True),
         file=sys.stderr,
         flush=True,
     )
@@ -259,7 +263,8 @@ def emit_layer_timer(
         payload["load_mode"] = str(load_mode)
 
     print(
-        "[LMCACHE_LAYER_TIMER] " + json.dumps(payload, ensure_ascii=True, sort_keys=True),
+        "[LMCACHE_LAYER_TIMER] "
+        + json.dumps(payload, ensure_ascii=True, sort_keys=True),
         file=sys.stderr,
         flush=True,
     )

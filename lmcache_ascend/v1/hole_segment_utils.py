@@ -114,8 +114,6 @@ def derive_lookup_result(
     if not segment_ranges:
         return HoleLookupResult(mode="legacy", covered_tokens=0, tail_start=0)
 
-    contiguous_prefix_end = leading_hit_end(segment_ranges, hit_flags)
-
     if not hit_flags[0]:
         return HoleLookupResult(
             mode="legacy",

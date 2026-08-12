@@ -704,9 +704,11 @@ def _patch_vllm_service_factory_hole():
         if not _is_hole(self):
             return _orig_get_engine(self)
 
-        # First Party
+        # Third Party
         from lmcache.integration.vllm.utils import ENGINE_NAME
         from lmcache.v1.cache_engine import LMCacheEngineBuilder
+
+        # First Party
         from lmcache_ascend.integration.vllm.vllm_v1_adapter_hole import (
             init_lmcache_engine_hole,
         )
@@ -720,7 +722,7 @@ def _patch_vllm_service_factory_hole():
             self.role == "scheduler"
             and not self.lmcache_config.enable_scheduler_bypass_lookup
         ):
-            # First Party
+            # Third Party
             from lmcache.observability import PrometheusLogger
 
             PrometheusLogger.GetOrCreate(

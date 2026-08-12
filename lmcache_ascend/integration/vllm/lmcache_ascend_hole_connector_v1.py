@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Third Party
+from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -9,7 +10,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 
 # First Party
-from lmcache.integration.vllm.lmcache_connector_v1 import LMCacheConnectorV1Dynamic
 from lmcache_ascend import _build_info
 
 if _build_info.__framework_name__ == "pytorch":

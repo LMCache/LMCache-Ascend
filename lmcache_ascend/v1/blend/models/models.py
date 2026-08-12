@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from typing import Optional, Union
 
 # Third Party
 from torch import nn

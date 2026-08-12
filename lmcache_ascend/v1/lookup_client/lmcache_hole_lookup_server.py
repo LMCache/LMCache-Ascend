@@ -4,13 +4,13 @@ import json
 import threading
 
 # Third Party
+from lmcache.logging import init_logger
+from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache, get_zmq_socket
+from lmcache.v1.trace_utils import summarize_key, summarize_ranges, trace_flow
 import msgspec
 import zmq
 
 # First Party
-from lmcache.logging import init_logger
-from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache, get_zmq_socket
-from lmcache.v1.trace_utils import summarize_key, summarize_ranges, trace_flow
 from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper, derive_lookup_result
 from lmcache_ascend.v1.hole_types import HoleLookupResult
 
@@ -70,13 +70,21 @@ class LMCacheHoleLookupServer:
         self.thread = threading.Thread(target=process_request, daemon=True)
         self.thread.start()
 
-    def _segment_hit(self, tokens, token_range, lookup_id: str, request_configs: dict | None):
+    def _segment_hit(
+        self,
+        tokens,
+        token_range,
+        lookup_id: str,
+        request_configs: dict | None,
+    ):
         key = self.segment_helper.make_cache_key(tokens, token_range, request_configs)
         key_all_layers = key.split_layers(self.lmcache_engine.num_layers)
-        hit_chunks, block_mapping = self.lmcache_engine.storage_manager.batched_contains(
-            key_all_layers,
-            None,
-            True,
+        hit_chunks, block_mapping = (
+            self.lmcache_engine.storage_manager.batched_contains(
+                key_all_layers,
+                None,
+                True,
+            )
         )
         if hit_chunks != self.lmcache_engine.num_layers or len(block_mapping) != 1:
             trace_flow(
@@ -102,6 +110,35 @@ class LMCacheHoleLookupServer:
         )
         return True, location
 
+    def _finish_lookup(
+        self,
+        *,
+        lookup_id: str,
+        segment_ranges,
+        hit_flags: list[bool],
+        location=None,
+        speculative_tail_segments: int = 0,
+        speculative_fallback: bool = False,
+    ) -> HoleLookupResult:
+        result = derive_lookup_result(
+            segment_ranges,
+            hit_flags,
+            location=location,
+        )
+        trace_flow(
+            "hole_lookup",
+            "lookup_finish",
+            lookup_id=lookup_id,
+            hit_flags=hit_flags,
+            mode=result.mode,
+            covered_tokens=result.covered_tokens,
+            hit_ranges=summarize_ranges(result.hit_ranges),
+            prefix_miss_ranges=summarize_ranges(result.prefix_miss_ranges),
+            speculative_tail_segments=speculative_tail_segments,
+            speculative_fallback=speculative_fallback,
+        )
+        return result
+
     def _lookup_tokens(
         self,
         tokens,
@@ -117,7 +154,11 @@ class LMCacheHoleLookupServer:
             segment_ranges=summarize_ranges(segment_ranges),
         )
         if not segment_ranges:
-            return HoleLookupResult(mode="legacy", covered_tokens=0, tail_start=0)
+            return self._finish_lookup(
+                lookup_id=lookup_id,
+                segment_ranges=segment_ranges,
+                hit_flags=[],
+            )
 
         hit_flags: list[bool] = []
         first_hit_location = None
@@ -131,9 +172,9 @@ class LMCacheHoleLookupServer:
             is_hit, location = self._segment_hit(
                 tokens,
                 token_range,
-                    lookup_id,
-                    request_configs,
-                )
+                lookup_id,
+                request_configs,
+            )
             if is_hit and first_hit_location is None:
                 first_hit_location = location
             elif is_hit and first_hit_location != location:
@@ -151,68 +192,38 @@ class LMCacheHoleLookupServer:
 
         if location_conflict:
             hit_flags.extend([False] * (len(segment_ranges) - len(hit_flags)))
-            result = derive_lookup_result(
-                segment_ranges,
-                hit_flags,
+            return self._finish_lookup(
+                lookup_id=lookup_id,
+                segment_ranges=segment_ranges,
+                hit_flags=hit_flags,
                 location=first_hit_location,
             )
-            trace_flow(
-                "hole_lookup",
-                "lookup_finish",
-                lookup_id=lookup_id,
-                hit_flags=hit_flags,
-                mode=result.mode,
-                covered_tokens=result.covered_tokens,
-                hit_ranges=summarize_ranges(result.hit_ranges),
-                prefix_miss_ranges=summarize_ranges(result.prefix_miss_ranges),
-                speculative_tail_segments=0,
-                speculative_fallback=False,
-            )
-            return result
 
         if first_miss_idx is not None:
             if first_miss_idx == 0:
+                # Hole mode materializes a covered prefix anchored at token 0.
+                # Without a cached first segment, later hits cannot be exposed
+                # as a valid prefix to the scheduler. Avoid lookups and pins for
+                # entries that this request cannot consume.
                 hit_flags.extend([False] * (len(segment_ranges) - len(hit_flags)))
-                result = derive_lookup_result(
-                    segment_ranges,
-                    hit_flags,
-                    location=first_hit_location,
-                )
-                trace_flow(
-                    "hole_lookup",
-                    "lookup_finish",
+                return self._finish_lookup(
                     lookup_id=lookup_id,
+                    segment_ranges=segment_ranges,
                     hit_flags=hit_flags,
-                    mode=result.mode,
-                    covered_tokens=result.covered_tokens,
-                    hit_ranges=summarize_ranges(result.hit_ranges),
-                    prefix_miss_ranges=summarize_ranges(result.prefix_miss_ranges),
+                    location=first_hit_location,
                     speculative_tail_segments=len(segment_ranges) - 1,
-                    speculative_fallback=False,
                 )
-                return result
 
             remaining_tail_segments = len(segment_ranges) - first_miss_idx - 1
             if remaining_tail_segments < 2:
                 hit_flags.extend([False] * (len(segment_ranges) - len(hit_flags)))
-                result = derive_lookup_result(
-                    segment_ranges,
-                    hit_flags,
-                    location=first_hit_location,
-                )
-                trace_flow(
-                    "hole_lookup",
-                    "lookup_finish",
+                return self._finish_lookup(
                     lookup_id=lookup_id,
+                    segment_ranges=segment_ranges,
                     hit_flags=hit_flags,
-                    mode=result.mode,
-                    covered_tokens=result.covered_tokens,
-                    hit_ranges=summarize_ranges(result.hit_ranges),
-                    prefix_miss_ranges=summarize_ranges(result.prefix_miss_ranges),
+                    location=first_hit_location,
                     speculative_tail_segments=remaining_tail_segments,
-                    speculative_fallback=False,
                 )
-                return result
 
             for token_range in segment_ranges[first_miss_idx + 1 :]:
                 is_hit, location = self._segment_hit(
@@ -221,7 +232,11 @@ class LMCacheHoleLookupServer:
                     lookup_id,
                     request_configs,
                 )
-                if is_hit and first_hit_location is not None and first_hit_location != location:
+                if (
+                    is_hit
+                    and first_hit_location is not None
+                    and first_hit_location != location
+                ):
                     logger.warning(
                         "hole lookup detected multi-location request for %s; "
                         "stopping coverage at the previous location",
@@ -230,26 +245,18 @@ class LMCacheHoleLookupServer:
                     is_hit = False
                 hit_flags.append(is_hit)
 
-        result = derive_lookup_result(
-            segment_ranges,
-            hit_flags,
-            location=first_hit_location,
-        )
-        trace_flow(
-            "hole_lookup",
-            "lookup_finish",
+        return self._finish_lookup(
             lookup_id=lookup_id,
+            segment_ranges=segment_ranges,
             hit_flags=hit_flags,
-            mode=result.mode,
-            covered_tokens=result.covered_tokens,
-            hit_ranges=summarize_ranges(result.hit_ranges),
-            prefix_miss_ranges=summarize_ranges(result.prefix_miss_ranges),
+            location=first_hit_location,
             speculative_tail_segments=(
-                0 if first_miss_idx is None else len(segment_ranges) - first_miss_idx - 1
+                0
+                if first_miss_idx is None
+                else len(segment_ranges) - first_miss_idx - 1
             ),
             speculative_fallback=first_miss_idx is not None,
         )
-        return result
 
     def __enter__(self):
         return self

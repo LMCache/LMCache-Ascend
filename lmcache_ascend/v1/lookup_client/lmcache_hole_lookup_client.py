@@ -5,17 +5,17 @@ from typing import Optional, Union
 import json
 
 # Third Party
-import msgspec
-import torch
-import zmq
-
-# First Party
 from lmcache.logging import init_logger
 from lmcache.v1.rpc_utils import (
     get_zmq_context,
     get_zmq_rpc_path_lmcache,
     get_zmq_socket,
 )
+import msgspec
+import torch
+import zmq
+
+# First Party
 from lmcache_ascend.v1.hole_segment_utils import merge_hit_flags
 from lmcache_ascend.v1.hole_types import HoleLookupResult
 
