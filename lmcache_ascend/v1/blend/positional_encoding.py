@@ -119,29 +119,46 @@ class FusedRope:
         return self.fused_encode(old_positions, new_positions, k)
 
 
-def validate_fused_correctness(rope, fused_rope, head_size: int) -> bool:
-    hidden_dim = head_size * 8
-    num_tokens = 10
-
-    dumb_q = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
-    dumb_k = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
-
-    old_positions = torch.arange(num_tokens, device="npu")
-    new_positions = torch.arange(100, 100 + num_tokens, device="npu")
-
-    q_no_pos = dumb_q.clone()
-    k_no_pos = dumb_k.clone()
+def _validate_fused_relocation(
+    rope,
+    fused_rope,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+) -> bool:
+    """Validate that fused RoPE relocation matches direct encoding."""
+    q_no_pos = q.clone()
+    k_no_pos = k.clone()
     _, k_new_ref = rope(new_positions, q_no_pos, k_no_pos)
 
-    q_no_pos = dumb_q.clone()
-    k_no_pos = dumb_k.clone()
+    q_no_pos = q.clone()
+    k_no_pos = k.clone()
     _, k_old = rope(old_positions, q_no_pos, k_no_pos)
     k_new_fused = fused_rope(old_positions, new_positions, k_old.clone())
 
     max_k_error_fused = (k_new_ref - k_new_fused).abs().max()
     logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
 
-    return max_k_error_fused < 0.1
+    return bool(max_k_error_fused < 0.1)
+
+
+def validate_fused_correctness(rope, fused_rope, head_size: int) -> bool:
+    hidden_dim = head_size * 8
+    num_tokens = 10
+    dumb_q = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    dumb_k = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    old_positions = torch.arange(num_tokens, device="npu")
+    new_positions = torch.arange(100, 100 + num_tokens, device="npu")
+
+    return _validate_fused_relocation(
+        rope,
+        fused_rope,
+        dumb_q,
+        dumb_k,
+        old_positions,
+        new_positions,
+    )
 
 
 def validate_rope_params(
@@ -190,20 +207,19 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     logger.info(f"Max Q error: {max_q_error.item()}")
     logger.info(f"Max K error: {max_k_error.item()}")
 
-    q_no_pos = dumb_q.clone()
-    k_no_pos = dumb_k.clone()
     positions2 = torch.arange(100, 100 + num_tokens, device="npu")
-    _, k_pos2 = rope(positions2, q_no_pos, k_no_pos)
-
-    k_no_pos = dumb_k.clone()
-    _, k_pos1 = rope(positions, q_no_pos, k_no_pos)
-    k_pos2_fused = fused_rope(positions, positions2, k_pos1)
-
-    max_k_error_fused = (k_pos2 - k_pos2_fused).abs().max()
-
-    logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
-
-    return max_q_error < 0.1 and max_k_error < 0.1 and max_k_error_fused < 0.1
+    return (
+        bool(max_q_error < 0.1)
+        and bool(max_k_error < 0.1)
+        and _validate_fused_relocation(
+            rope,
+            fused_rope,
+            dumb_q,
+            dumb_k,
+            positions,
+            positions2,
+        )
+    )
 
 
 # Main interface

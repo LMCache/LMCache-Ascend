@@ -24,7 +24,6 @@ from lmcache.logging import init_logger
 from lmcache.v1.compute.blend.metadata import LMCBlendCommonMetadata
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.trace_utils import (
-    emit_layer_timer,
     mask_to_string,
     summarize_key,
     summarize_kv_tensor_stats,
@@ -36,9 +35,10 @@ from lmcache.v1.trace_utils import (
 import torch
 
 # First Party
-from lmcache_ascend.v1.blend.models.utils import infer_model_from_vllm
+from lmcache_ascend.v1.blend.models.hole import infer_hole_model_from_vllm
 from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
 from lmcache_ascend.v1.npu_hole_connector import VLLMBufferLayerwiseNPUHoleConnector
+from lmcache_ascend.v1.timer import emit_timer as emit_trace_timer
 
 logger = init_logger(__name__)
 
@@ -96,7 +96,7 @@ class LMCBlenderHole:
     ):
         self.cache_engine = cache_engine
         self.gpu_connector = gpu_connector
-        self.layerwise_model = infer_model_from_vllm(vllm_model, self)
+        self.layerwise_model = infer_hole_model_from_vllm(vllm_model, self)
         self.num_layers = len(vllm_model.model.layers)
         self.common_metadata = LMCBlendCommonMetadata(
             check_layers=config.blend_check_layers,
@@ -134,8 +134,29 @@ class LMCBlenderHole:
             default=False,
         )
 
-    def _emit_timer(self, bucket: str, layer_id: int, duration_ms: float) -> None:
-        emit_layer_timer(
+    def get_last_topk_ms(self, layer_id: int) -> float:
+        return float(self._layer_topk_ms.get(layer_id, 0.0))
+
+    def get_accounted_blend_ms(self, layer_id: int) -> float:
+        return float(self._layer_blend_accounted_ms.get(layer_id, 0.0))
+
+    def emit_timer(
+        self,
+        bucket: str,
+        layer_id: int,
+        duration_ms: float,
+    ) -> None:
+        duration_ms = float(duration_ms)
+        if bucket == "blend":
+            duration_ms = max(
+                duration_ms - self.get_accounted_blend_ms(layer_id),
+                0.0,
+            )
+        elif bucket.startswith("blend_"):
+            self._layer_blend_accounted_ms[layer_id] = (
+                self._layer_blend_accounted_ms.get(layer_id, 0.0) + duration_ms
+            )
+        emit_trace_timer(
             bucket,
             req_id=self._active_timer_req_id,
             layer_id=layer_id,
@@ -143,27 +164,6 @@ class LMCBlenderHole:
             path=self._active_timer_path,
             load_mode=self._active_timer_load_mode,
         )
-
-    def get_last_topk_ms(self, layer_id: int) -> float:
-        return float(self._layer_topk_ms.get(layer_id, 0.0))
-
-    def get_accounted_blend_ms(self, layer_id: int) -> float:
-        return float(self._layer_blend_accounted_ms.get(layer_id, 0.0))
-
-    def emit_blend_component(
-        self,
-        bucket: str,
-        layer_id: int,
-        duration_ms: float,
-    ) -> None:
-        self._layer_blend_accounted_ms[layer_id] = self._layer_blend_accounted_ms.get(
-            layer_id, 0.0
-        ) + float(duration_ms)
-        self._emit_timer(bucket, layer_id, float(duration_ms))
-
-    def emit_blend_timer(self, layer_id: int, duration_ms: float) -> None:
-        blend_ms = max(float(duration_ms) - self.get_accounted_blend_ms(layer_id), 0.0)
-        self._emit_timer("blend", layer_id, blend_ms)
 
     def _count_num_falses(self, mask: Optional[torch.Tensor]) -> int:
         if mask is None:
@@ -298,28 +298,28 @@ class LMCBlenderHole:
             topk_num = int(candidate_positions.numel() * ratio)
             topk_num = max(topk_num, 1)
             topk_num = min(topk_num, candidate_positions.numel())
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_prepare",
                 layer_id,
                 (time.perf_counter() - topk_prepare_start) * 1000.0,
             )
             topk_kernel_start = time.perf_counter()
             rel_top = torch.topk(diff_k, k=topk_num).indices
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_kernel",
                 layer_id,
                 (time.perf_counter() - topk_kernel_start) * 1000.0,
             )
             topk_gather_start = time.perf_counter()
             top_positions = candidate_positions[rel_top]
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_gather",
                 layer_id,
                 (time.perf_counter() - topk_gather_start) * 1000.0,
             )
             topk_sort_start = time.perf_counter()
             top_positions, _ = torch.sort(top_positions)
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_sort",
                 layer_id,
                 (time.perf_counter() - topk_sort_start) * 1000.0,
@@ -349,14 +349,14 @@ class LMCBlenderHole:
                     right=False,
                 ).item()
             )
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_section_mask",
                 layer_id,
                 (time.perf_counter() - topk_mask_start) * 1000.0,
             )
             topk_gather_start = time.perf_counter()
             section_candidates = candidate_positions[section_lo:section_hi]
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_gather",
                 layer_id,
                 (time.perf_counter() - topk_gather_start) * 1000.0,
@@ -376,7 +376,7 @@ class LMCBlenderHole:
 
             topk_gather_start = time.perf_counter()
             section_diff = diff_k[section_lo:section_hi]
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_gather",
                 layer_id,
                 (time.perf_counter() - topk_gather_start) * 1000.0,
@@ -385,21 +385,21 @@ class LMCBlenderHole:
             section_topk_num = int(section_candidates.numel() * ratio)
             section_topk_num = max(section_topk_num, 1)
             section_topk_num = min(section_topk_num, section_candidates.numel())
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_prepare",
                 layer_id,
                 (time.perf_counter() - topk_prepare_start) * 1000.0,
             )
             topk_kernel_start = time.perf_counter()
             rel_top = torch.topk(section_diff, k=section_topk_num).indices
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_kernel",
                 layer_id,
                 (time.perf_counter() - topk_kernel_start) * 1000.0,
             )
             topk_gather_start = time.perf_counter()
             section_top = section_candidates[rel_top]
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_gather",
                 layer_id,
                 (time.perf_counter() - topk_gather_start) * 1000.0,
@@ -428,7 +428,7 @@ class LMCBlenderHole:
         if top_positions.numel() > 1:
             topk_sort_start = time.perf_counter()
             top_positions, _ = torch.sort(top_positions)
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_topk_sort",
                 layer_id,
                 (time.perf_counter() - topk_sort_start) * 1000.0,
@@ -486,7 +486,7 @@ class LMCBlenderHole:
             if pos != "..."
             if 0 <= int(pos) < int(self._trace_tokens_cpu.shape[0])
         ]
-        logger.info(
+        logger.debug(
             "Hole blend recompute layer=%d req_id=%s hit_positions=%s "
             "gap_positions=%s top_hit_positions=%s recomputed_positions=%s "
             "recomputed_token_ids=%s",
@@ -498,7 +498,7 @@ class LMCBlenderHole:
             recompute_trace,
             token_ids[:50],
         )
-        logger.info(
+        logger.debug(
             "#recomp_ids=%d #hit_positions=%d #gap_positions=%d",
             int(recompute_positions.numel()),
             int(hit_positions.numel()),
@@ -786,7 +786,7 @@ class LMCBlenderHole:
             chunk_tags.append(summarize_key(key))
 
         if not keys:
-            self._emit_timer(
+            self.emit_timer(
                 "reuse_plan_lookup",
                 0,
                 (time.perf_counter() - plan_lookup_start) * 1000.0,
@@ -809,7 +809,7 @@ class LMCBlenderHole:
             location = self.cache_engine.storage_manager.contains(keys[0][0])
         if location is None:
             raise ValueError("Unable to resolve storage location for hole retrieval.")
-        self._emit_timer(
+        self.emit_timer(
             "reuse_plan_lookup",
             0,
             (time.perf_counter() - plan_lookup_start) * 1000.0,
@@ -829,7 +829,7 @@ class LMCBlenderHole:
         )
         consumer_prime_start = time.perf_counter()
         next(mem_obj_consumer)
-        self._emit_timer(
+        self.emit_timer(
             "reuse_consumer_prime",
             0,
             (time.perf_counter() - consumer_prime_start) * 1000.0,
@@ -839,7 +839,7 @@ class LMCBlenderHole:
         for _layer_id in range(self.num_layers):
             task_next_start = time.perf_counter()
             task = next(get_generator)
-            self._emit_timer(
+            self.emit_timer(
                 "reuse_task_next",
                 _layer_id,
                 (time.perf_counter() - task_next_start) * 1000.0,
@@ -847,14 +847,14 @@ class LMCBlenderHole:
             yield None
             storage_wait_start = time.perf_counter()
             mem_objs_layer = task.result()
-            self._emit_timer(
+            self.emit_timer(
                 "reuse_storage_wait",
                 _layer_id,
                 (time.perf_counter() - storage_wait_start) * 1000.0,
             )
             consumer_send_start = time.perf_counter()
             mem_obj_consumer.send(mem_objs_layer)
-            self._emit_timer(
+            self.emit_timer(
                 "reuse_consumer_send",
                 _layer_id,
                 (time.perf_counter() - consumer_send_start) * 1000.0,
@@ -864,7 +864,7 @@ class LMCBlenderHole:
         ref_count_down_start = time.perf_counter()
         for mem_obj in to_count_down:
             mem_obj.ref_count_down()
-        self._emit_timer(
+        self.emit_timer(
             "reuse_ref_count_down",
             self.num_layers - 1,
             (time.perf_counter() - ref_count_down_start) * 1000.0,
@@ -873,7 +873,7 @@ class LMCBlenderHole:
         yield None
         consumer_finalize_start = time.perf_counter()
         next(mem_obj_consumer)
-        self._emit_timer(
+        self.emit_timer(
             "reuse_consumer_finalize",
             self.num_layers - 1,
             (time.perf_counter() - consumer_finalize_start) * 1000.0,
@@ -906,7 +906,7 @@ class LMCBlenderHole:
         self._layer_blend_accounted_ms[layer_id] = 0.0
         kv_fetch_start = time.perf_counter()
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
-        self.emit_blend_component(
+        self.emit_timer(
             "blend_kv_fetch",
             layer_id,
             (time.perf_counter() - kv_fetch_start) * 1000.0,
@@ -925,7 +925,7 @@ class LMCBlenderHole:
             self.metadata.positions = torch.arange(
                 q.shape[0], device=q.device, dtype=torch.int64
             )
-        self.emit_blend_component(
+        self.emit_timer(
             "blend_positions_init",
             layer_id,
             (time.perf_counter() - positions_init_start) * 1000.0,
@@ -940,7 +940,7 @@ class LMCBlenderHole:
             )
         else:
             q, k = attn_layer.rotary_emb(self.metadata.positions, q, k)
-        self.emit_blend_component(
+        self.emit_timer(
             "blend_qk_post",
             layer_id,
             (time.perf_counter() - qk_post_start) * 1000.0,
@@ -956,7 +956,7 @@ class LMCBlenderHole:
             gap_positions=gap_positions,
             num_falses=num_falses,
         )
-        self.emit_blend_component(
+        self.emit_timer(
             "blend_gap_positions",
             layer_id,
             (time.perf_counter() - gap_positions_start) * 1000.0,
@@ -969,7 +969,7 @@ class LMCBlenderHole:
                 hit_positions=hit_positions,
                 num_falses=num_falses,
             )
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_hit_positions",
                 layer_id,
                 (time.perf_counter() - hit_positions_start) * 1000.0,
@@ -1009,7 +1009,7 @@ class LMCBlenderHole:
                     ** 2,
                     dim=[1],
                 )
-                self.emit_blend_component(
+                self.emit_timer(
                     "blend_topk_diff",
                     layer_id,
                     (time.perf_counter() - topk_diff_start) * 1000.0,
@@ -1027,16 +1027,16 @@ class LMCBlenderHole:
                     num_falses=num_falses,
                     device=q.device,
                 )
-                self.emit_blend_component(
+                self.emit_timer(
                     "blend_topk_select",
                     layer_id,
                     (time.perf_counter() - topk_select_start) * 1000.0,
                 )
                 topk_ms = (time.perf_counter() - topk_start) * 1000.0
                 self._layer_topk_ms[layer_id] = topk_ms
-                self._emit_timer("topk_l1", layer_id, topk_ms)
+                self.emit_timer("topk_l1", layer_id, topk_ms)
 
-            logger.info(
+            logger.debug(
                 "old_k.shape = %s num_falses (F mask) = %d hits = %d "
                 "topk_candidates = %d "
                 "forced_gaps = %d total_gaps = %d ratio=%f top_k_in_prefix %d "
@@ -1066,7 +1066,7 @@ class LMCBlenderHole:
                 # sorted for downstream query ordering, but we do not need the
                 # dedup work from torch.unique(..., sorted=True).
                 recompute_local, _ = torch.sort(recompute_local)
-                self.emit_blend_component(
+                self.emit_timer(
                     "blend_recompute_sort",
                     layer_id,
                     (time.perf_counter() - recompute_sort_start) * 1000.0,
@@ -1135,7 +1135,7 @@ class LMCBlenderHole:
             v = v[recompute_abs]
             residual = residual[recompute_abs]
             attn_output = attn_output[: len(recompute_abs)]
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_recompute_gather",
                 layer_id,
                 (time.perf_counter() - recompute_gather_start) * 1000.0,
@@ -1150,7 +1150,7 @@ class LMCBlenderHole:
                     dtype=torch.int32,
                     device=q.device,
                 )
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_attn_metadata",
                 layer_id,
                 (time.perf_counter() - attn_metadata_update_start) * 1000.0,
@@ -1168,7 +1168,7 @@ class LMCBlenderHole:
                 num_falses=num_falses,
                 req_id=kwargs.get("req_id", self._trace_req_id),
             )
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_gap_materialize",
                 layer_id,
                 (time.perf_counter() - gap_materialize_start) * 1000.0,
@@ -1192,7 +1192,7 @@ class LMCBlenderHole:
             gap_scatter_start = time.perf_counter()
             old_k[self.metadata.buffer_indices] = k
             old_v[self.metadata.buffer_indices] = v
-            self.emit_blend_component(
+            self.emit_timer(
                 "blend_gap_scatter",
                 layer_id,
                 (time.perf_counter() - gap_scatter_start) * 1000.0,
@@ -1222,7 +1222,6 @@ class LMCBlenderHole:
         layerwise_model_executor = self.layerwise_model.compute_layer(
             tokens,
             mask,
-            req_id=kwargs.get("req_id"),
         )
         layerwise_retriever = self._sparse_retrieve_layer(
             tokens,
@@ -1237,7 +1236,7 @@ class LMCBlenderHole:
             layer_id = _
             wait_start = time.perf_counter()
             next(layerwise_retriever)
-            self._emit_timer(
+            self.emit_timer(
                 "wait_reuse",
                 layer_id,
                 (time.perf_counter() - wait_start) * 1000.0,

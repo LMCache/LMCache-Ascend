@@ -6,12 +6,6 @@ from typing import Optional
 from lmcache.v1.compute.attention.abstract import AttentionInterface
 from lmcache.v1.compute.attention.metadata import LMCFlashAttnMetadata
 from lmcache.v1.compute.blend.metadata import LMCBlendMetadata
-from lmcache.v1.trace_utils import (
-    mask_to_string,
-    tensor_to_list,
-    trace_flow,
-    trace_layer_enabled,
-)
 from torch import nn
 from torch_npu import npu_fused_infer_attention_score
 from transformers.integrations.npu_flash_attention import (
@@ -266,11 +260,9 @@ class ZLMCFlashAttnBackend(AttentionInterface):
 
         # 4. Determine Positions
         q_positions = None
-        buffer_indices = None
 
         if blend_metadata is not None and hasattr(blend_metadata, "imp_indices"):
             q_positions = blend_metadata.imp_indices
-            buffer_indices = getattr(blend_metadata, "buffer_indices", None)
         elif "q_positions" in kwargs:
             q_positions = kwargs["q_positions"]
 
@@ -284,33 +276,6 @@ class ZLMCFlashAttnBackend(AttentionInterface):
         else:
             # If q_positions is [Batch, Seq]
             raise NotImplementedError
-
-        layer_id = kwargs.get("layer_id")
-        if trace_layer_enabled(layer_id):
-            visible_counts = (~atten_mask[0, 0]).sum(dim=1).to(dtype=torch.long)
-            mask_preview_rows = [
-                mask_to_string(
-                    atten_mask[0, 0][row_idx],
-                    max_items=64,
-                )
-                for row_idx in range(min(q_seq_len, 8))
-            ]
-            q_out_of_range = bool(
-                (q_positions < 0).any().item()
-                or (q_positions >= kv_seq_len).any().item()
-            )
-            trace_flow(
-                "blend.attention",
-                "npu_attention_mask",
-                layer_id=layer_id,
-                q_seq_len=q_seq_len,
-                kv_seq_len=kv_seq_len,
-                q_positions=tensor_to_list(q_positions, dtype=torch.long),
-                buffer_indices=tensor_to_list(buffer_indices, dtype=torch.long),
-                q_positions_out_of_range=q_out_of_range,
-                visible_counts=tensor_to_list(visible_counts, dtype=torch.long),
-                mask_preview_rows=mask_preview_rows,
-            )
 
         result_tuple = npu_fused_infer_attention_score(
             query=query_input,  # Use the prepared input

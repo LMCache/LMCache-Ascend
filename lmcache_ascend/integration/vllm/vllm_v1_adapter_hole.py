@@ -57,7 +57,6 @@ from lmcache.v1.rpc.zmq_transport import (
 from lmcache.v1.rpc_utils import get_zmq_rpc_path_lmcache
 from lmcache.v1.trace_utils import (
     advance_layerwise_storers_with_timing,
-    emit_request_timer,
     mask_to_string,
     summarize_ranges,
     summarize_slot_mapping,
@@ -77,16 +76,16 @@ import torch
 from lmcache_ascend import _build_info
 from lmcache_ascend.v1.blend.blender import LMCBlender
 from lmcache_ascend.v1.blend.hole_blender import LMCBlenderHole
+from lmcache_ascend.v1.hole_cache_engine import HoleLegacyCacheEngine
 from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
 from lmcache_ascend.v1.hole_types import HoleLoadSpec, HoleSaveSpec
+from lmcache_ascend.v1.timer import emit_timer
 
 if _build_info.__framework_name__ == "pytorch":
     # First Party
-    from lmcache_ascend.v1.npu_connector import (
-        VLLMBufferLayerwiseNPUConnector,
-    )
     from lmcache_ascend.v1.npu_hole_connector import (
         VLLMBufferLayerwiseNPUHoleConnector,
+        VLLMBufferLayerwiseNPULegacyHoleConnector,
     )
 else:
     raise ValueError("Hole connector is only supported in LMCache-Ascend pytorch.")
@@ -536,13 +535,18 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
             assert isinstance(
                 self.lmcache_engine.gpu_connector, VLLMBufferLayerwiseNPUHoleConnector
             )
-            self.legacy_gpu_connector = VLLMBufferLayerwiseNPUConnector.from_metadata(
-                self.lmcache_engine.metadata,
-                use_gpu,
-                self.device,
+            self.legacy_gpu_connector = (
+                VLLMBufferLayerwiseNPULegacyHoleConnector.from_metadata(
+                    self.lmcache_engine.metadata,
+                    use_gpu,
+                    self.device,
+                )
             )
             self.legacy_blender = LMCBlender(
-                self.lmcache_engine,
+                HoleLegacyCacheEngine(
+                    self.lmcache_engine,
+                    self.legacy_gpu_connector,
+                ),
                 self.legacy_gpu_connector,
                 VLLMModelTracker.get_model(ENGINE_NAME),
                 self.config,
@@ -644,7 +648,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
 
         lookup_cache_start = time.perf_counter()
         nohole_hit_tokens = self._pure_lookup_client.lookup_cache(lookup_id=req_id)
-        emit_request_timer(
+        emit_timer(
             "lookup_cache",
             req_id=req_id,
             duration_ms=(time.perf_counter() - lookup_cache_start) * 1000.0,
@@ -658,7 +662,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                 lookup_id=req_id,
                 request_configs=request_configs,
             )
-            emit_request_timer(
+            emit_timer(
                 "lookup_rpc",
                 req_id=req_id,
                 duration_ms=(time.perf_counter() - lookup_rpc_start) * 1000.0,
@@ -683,7 +687,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                 lmcache_cached_tokens=nohole_hit_tokens,
                 can_load=False,
             )
-            logger.info(
+            logger.debug(
                 "Reqid: %s, Hole adapter fast-path resolved mode=%s with LMCache hit "
                 "tokens=%d, need to load=%d",
                 req_id,
@@ -713,14 +717,14 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                 covered_tokens=nohole_hit_tokens,
                 prefix_miss_tokens=0,
             )
-            emit_request_timer(
+            emit_timer(
                 "lookup_postprocess",
                 req_id=req_id,
                 duration_ms=(time.perf_counter() - lookup_postprocess_start) * 1000.0,
                 path="hole",
                 load_mode=mode,
             )
-            emit_request_timer(
+            emit_timer(
                 "lookup_total",
                 req_id=req_id,
                 duration_ms=(time.perf_counter() - lookup_total_start) * 1000.0,
@@ -733,7 +737,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
 
         lookup_hole_cache_start = time.perf_counter()
         hole_result = self.lookup_client.lookup_cache(lookup_id=req_id)
-        emit_request_timer(
+        emit_timer(
             "lookup_hole_cache",
             req_id=req_id,
             duration_ms=(time.perf_counter() - lookup_hole_cache_start) * 1000.0,
@@ -746,7 +750,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                 lookup_id=req_id,
                 request_configs=request_configs,
             )
-            emit_request_timer(
+            emit_timer(
                 "lookup_hole_rpc",
                 req_id=req_id,
                 duration_ms=(time.perf_counter() - lookup_hole_rpc_start) * 1000.0,
@@ -781,14 +785,14 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                 location=hole_result.location,
             )
 
-        logger.info(
+        logger.debug(
             "Reqid: %s, Total tokens %d, LMCache hit tokens: %d, need to load: %d",
             req_id,
             request.num_tokens,
             hit_tokens,
             need_to_allocate,
         )
-        logger.info(
+        logger.debug(
             "Reqid: %s, Hole mode=%s, covered tokens=%d, prefix miss tokens=%d",
             req_id,
             hole_result.mode,
@@ -818,14 +822,14 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
             covered_tokens=covered_tokens,
             prefix_miss_tokens=prefix_miss_tokens,
         )
-        emit_request_timer(
+        emit_timer(
             "lookup_postprocess",
             req_id=req_id,
             duration_ms=(time.perf_counter() - lookup_postprocess_start) * 1000.0,
             path="hole",
             load_mode=hole_result.mode,
         )
-        emit_request_timer(
+        emit_timer(
             "lookup_total",
             req_id=req_id,
             duration_ms=(time.perf_counter() - lookup_total_start) * 1000.0,
@@ -1153,7 +1157,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                             slot_mapping[:lmcache_cached_tokens]
                         ),
                     )
-                logger.info(
+                logger.debug(
                     "Reqid: %s, Hole lookup resolved to pure_hit; using legacy/nohole "
                     "load path",
                     request.req_id,
@@ -1191,7 +1195,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                             token_mask=mask_to_string(token_mask),
                             slot_mapping=summarize_slot_mapping(slot_mapping),
                         )
-                    logger.info(
+                    logger.debug(
                         "Reqid: %s, Hole lookup resolved to pure_hit; "
                         "using legacy/nohole load path",
                         request.req_id,
@@ -1331,7 +1335,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                             store_mask=mask_to_string(store_mask),
                             slot_mapping=summarize_slot_mapping(slot_mapping),
                         )
-                    logger.info(
+                    logger.debug(
                         "Storing KV cache for %d out of %d tokens "
                         "(skip_leading_tokens=%d) for request %s",
                         len(token_ids) - skip_leading_tokens,
@@ -1373,7 +1377,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                             continue
                         # Future optimization: batch all prefix-miss ranges in one
                         # sparse store path to amortize per-hole Python/storage cost.
-                        logger.info(
+                        logger.debug(
                             "Storing hole prefix-miss KV cache for %d tokens "
                             "(request_len=%d, global_range=[%d,%d), "
                             "local_skip_leading_tokens=%d) "
@@ -1454,7 +1458,7 @@ class LMCacheConnectorV1ImplHole(LMCacheConnectorV1Impl):
                         store_mask=mask_to_string(store_mask),
                         slot_mapping=summarize_slot_mapping(store_slot_mapping),
                     )
-                logger.info(
+                logger.debug(
                     "Storing KV cache for %d out of %d tokens "
                     "(skip_leading_tokens=%d) for request %s",
                     len(store_token_ids) - save_spec.covered_tokens,

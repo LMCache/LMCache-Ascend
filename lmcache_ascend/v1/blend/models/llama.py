@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Optional
-import time
 
 # Third Party
 import torch
@@ -16,7 +15,6 @@ class LMCLlamaModel(LMCModel):
         self,
         input_ids: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
-        req_id: Optional[str | int] = None,
     ):
         hidden_states = self.embed_input_ids(input_ids.npu())
         residual = None
@@ -69,15 +67,10 @@ class LMCLlamaModel(LMCModel):
                 dim=-1,
             )
 
-            blend_stage_start = time.perf_counter()
             q, k, v, residual, attn_output, attn_metadata = self.blender.process_qkv(
                 q, k, v, residual, idx, attn_output, attn_metadata, mask
             )
             if q.numel() == 0:
-                self.blender.emit_blend_timer(
-                    idx,
-                    (time.perf_counter() - blend_stage_start) * 1000.0,
-                )
                 no_more_queries = True
                 yield
                 continue
@@ -86,19 +79,11 @@ class LMCLlamaModel(LMCModel):
             num_kv_heads = self.vllm_attn_layers[idx].num_kv_heads
             head_size = self.vllm_attn_layers[idx].head_size
 
-            qkv_view_start = time.perf_counter()
             q = q.view(-1, num_heads, head_size)
             k = k.view(-1, num_kv_heads, head_size)
             v = v.view(-1, num_kv_heads, head_size)
             attn_output = attn_output.view(-1, num_heads, head_size)
-            if hasattr(self.blender, "emit_blend_component"):
-                self.blender.emit_blend_component(
-                    "blend_qkv_view",
-                    idx,
-                    (time.perf_counter() - qkv_view_start) * 1000.0,
-                )
 
-            attn_start = time.perf_counter()
             attn_output = self.lmc_attn_layers[idx].forward_contiguous(
                 q,
                 k,
@@ -106,19 +91,6 @@ class LMCLlamaModel(LMCModel):
                 attn_output,
                 attn_metadata,
                 blend_metadata=self.blender.metadata,
-                req_id=req_id,
-            )
-            # Attention has finished reading the scatter buffer.
-            self.blender.gpu_connector.record_scatter_done(idx)
-            if hasattr(self.blender, "emit_blend_component"):
-                self.blender.emit_blend_component(
-                    "blend_attention",
-                    idx,
-                    (time.perf_counter() - attn_start) * 1000.0,
-                )
-            self.blender.emit_blend_timer(
-                idx,
-                (time.perf_counter() - blend_stage_start) * 1000.0,
             )
 
             attn_output = attn_output.view(-1, num_heads * head_size)

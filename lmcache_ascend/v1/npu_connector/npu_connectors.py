@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import Any, List, Optional, Set, Union
-import os
 import threading
-import time
 
 # Third Party
 from lmcache.integration.vllm.utils import ENGINE_NAME
@@ -20,16 +18,6 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_management import GPUMemoryAllocator, MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
-from lmcache.v1.trace_utils import (
-    emit_layer_timer,
-    mask_to_string,
-    summarize_kv_tensor_stats,
-    summarize_slot_mapping,
-    tensor_to_list,
-    trace_flow,
-    trace_flow_enabled,
-    trace_layer_enabled,
-)
 import torch
 
 # First Party
@@ -41,13 +29,6 @@ import lmcache_ascend.c_ops as lmc_ops
 logger = init_logger(__name__)
 
 _IS_310P = None
-
-
-def _env_enabled(name: str, default: bool) -> bool:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    return str(raw_value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
 def is_310p():
@@ -75,179 +56,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         self.kv_format: KVCacheFormat = KVCacheFormat.UNDEFINED
         self.use_mla = bool(kwargs.get("use_mla", False))
         self.fused_rotary_emb: Any = None
-        self._fine_grained_sync_enabled = _env_enabled(
-            "LMCACHE_HOLE_FINE_GRAINED_SYNC",
-            default=True,
-        )
-        self._fine_grained_sync_runtime_disabled = False
-        self._reuse_timer_force_sync_enabled = _env_enabled(
-            "LMCACHE_REUSE_TIMER_FORCE_SYNC",
-            default=False,
-        )
-        self._buffer_load_events: dict[int, object] = {}
-        self._buffer_flush_events: dict[int, object] = {}
-
-    def record_scatter_done(self, layer_id: int) -> None:
-        """Allow hole connectors to record completion of a scatter operation."""
-        pass
-
-    def _emit_reuse_timer(
-        self,
-        bucket: str,
-        *,
-        req_id: str | int | None,
-        layer_id: int,
-        duration_ms: float,
-        path: str | None,
-        load_mode: str | None,
-    ) -> None:
-        emit_layer_timer(
-            bucket,
-            req_id=req_id,
-            layer_id=layer_id,
-            duration_ms=duration_ms,
-            path=path,
-            load_mode=load_mode,
-        )
-
-    def _maybe_force_sync_reuse_timer(self, *, use_load_stream: bool = False) -> None:
-        if not self._reuse_timer_force_sync_enabled:
-            return
-        if use_load_stream:
-            self.load_stream.synchronize()
-            return
-        torch.cuda.synchronize()
-
-    def _wait_for_loaded_buffer(
-        self,
-        *,
-        req_id: str | int | None,
-        layer_id: int,
-        buffer_obj: Any | None = None,
-        path: str | None,
-        load_mode: str | None,
-    ) -> None:
-        use_fine_grained = (
-            self._fine_grained_sync_enabled
-            and not self._fine_grained_sync_runtime_disabled
-        )
-        if use_fine_grained:
-            try:
-                sync_start = time.perf_counter()
-                current_stream = torch.cuda.current_stream()
-                load_event = (
-                    None
-                    if buffer_obj is None
-                    else self._buffer_load_events.pop(id(buffer_obj), None)
-                )
-                if load_event is not None:
-                    current_stream.wait_event(load_event)
-                    strategy = "wait_event"
-                else:
-                    current_stream.wait_stream(self.load_stream)
-                    strategy = "wait_stream"
-                if self._reuse_timer_force_sync_enabled:
-                    current_stream.synchronize()
-                self._emit_reuse_timer(
-                    "reuse_sync",
-                    req_id=req_id,
-                    layer_id=layer_id,
-                    duration_ms=(time.perf_counter() - sync_start) * 1000.0,
-                    path=path,
-                    load_mode=load_mode,
-                )
-                trace_flow(
-                    "npu_connector.nohole",
-                    "sync_loaded_buffer",
-                    layer_id=layer_id,
-                    strategy=strategy,
-                )
-                return
-            except Exception as exc:
-                self._fine_grained_sync_runtime_disabled = True
-                logger.exception(
-                    "Legacy fine-grained load sync failed at layer %d; "
-                    "falling back to global synchronize for the rest of the run.",
-                    layer_id,
-                )
-                trace_flow(
-                    "npu_connector.nohole",
-                    "sync_loaded_buffer_failure",
-                    layer_id=layer_id,
-                    strategy="wait_event_or_wait_stream",
-                    fallback="global_synchronize",
-                    error=repr(exc),
-                )
-
-        sync_start = time.perf_counter()
-        torch.cuda.synchronize()
-        self._emit_reuse_timer(
-            "reuse_sync",
-            req_id=req_id,
-            layer_id=layer_id,
-            duration_ms=(time.perf_counter() - sync_start) * 1000.0,
-            path=path,
-            load_mode=load_mode,
-        )
-        trace_flow(
-            "npu_connector.nohole",
-            "sync_loaded_buffer",
-            layer_id=layer_id,
-            strategy="global_synchronize",
-            runtime_disabled=self._fine_grained_sync_runtime_disabled,
-        )
-
-    def _record_load_buffer_ready(self, *, buffer_obj: Any) -> None:
-        if (
-            not self._fine_grained_sync_enabled
-            or self._fine_grained_sync_runtime_disabled
-        ):
-            return
-        load_event = torch.npu.Event()
-        load_event.record(self.load_stream)
-        self._buffer_load_events[id(buffer_obj)] = load_event
-
-    def _record_flush_buffer_busy(self, *, buffer_obj: Any) -> None:
-        if (
-            not self._fine_grained_sync_enabled
-            or self._fine_grained_sync_runtime_disabled
-        ):
-            return
-        flush_event = torch.npu.Event()
-        flush_event.record(torch.cuda.current_stream())
-        self._buffer_flush_events[id(buffer_obj)] = flush_event
-
-    def _wait_buffer_reusable(
-        self,
-        *,
-        buffer_obj: Any,
-        req_id: str | int | None,
-        layer_id: int,
-        path: str | None,
-        load_mode: str | None,
-    ) -> None:
-        if (
-            not self._fine_grained_sync_enabled
-            or self._fine_grained_sync_runtime_disabled
-        ):
-            return
-
-        flush_event = self._buffer_flush_events.pop(id(buffer_obj), None)
-        if flush_event is None:
-            return
-
-        wait_start = time.perf_counter()
-        self.load_stream.wait_event(flush_event)
-        if self._reuse_timer_force_sync_enabled:
-            self.load_stream.synchronize()
-        self._emit_reuse_timer(
-            "reuse_flush_reuse_wait",
-            req_id=req_id,
-            layer_id=layer_id,
-            duration_ms=(time.perf_counter() - wait_start) * 1000.0,
-            path=path,
-            load_mode=load_mode,
-        )
 
     def _lazy_initialize_buffer(self, kv_caches):
         """
@@ -400,22 +208,17 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             token sequence.
         """
         slot_mapping = self._prepare_transfer_context(kwargs)
-        debug_chunk_tags = list(kwargs.get("debug_chunk_tags", []) or [])
 
         if self.fused_rotary_emb is None and self.cache_positions:
             # TODO(Jiayi): Make this more elegant
             self.lmc_model = LMCBlenderBuilder.get(ENGINE_NAME).layerwise_model
             self.fused_rotary_emb = self.lmc_model.fused_rotary_emb
-        timer_req_id = kwargs.get("req_id")
-        timer_path = str(kwargs.get("timer_path", "nohole"))
-        timer_load_mode = kwargs.get("timer_load_mode")
 
         slot_mapping_full, num_all_tokens = self._get_full_slot_mapping(
             slot_mapping, starts, ends, mode="slice"
         )
 
         # compute gap positions
-        gap_mask_start = time.perf_counter()
         gap_mask = torch.ones(
             num_all_tokens, dtype=torch.bool, device=slot_mapping_full.device
         )
@@ -425,38 +228,10 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             gap_mask[start - buf_offset : end - buf_offset] = False
 
         self.current_gap_positions = torch.where(gap_mask)[0]
-        self._emit_reuse_timer(
-            "reuse_gap_mask",
-            req_id=timer_req_id,
-            layer_id=0,
-            duration_ms=(time.perf_counter() - gap_mask_start) * 1000.0,
-            path=timer_path,
-            load_mode=timer_load_mode,
-        )
-        if trace_flow_enabled():
-            trace_flow(
-                "npu_connector.nohole",
-                "batched_to_gpu_start",
-                starts=starts,
-                ends=ends,
-                slot_mapping=summarize_slot_mapping(slot_mapping_full),
-                num_all_tokens=num_all_tokens,
-                gap_mask=mask_to_string(gap_mask),
-                gap_positions=self.current_gap_positions.tolist(),
-            )
-        buffer_alloc_start = time.perf_counter()
         load_gpu_buffer_obj: Any = None
         compute_gpu_buffer_obj: Any = None
         compute_gpu_buffer_obj, load_gpu_buffer_obj = self._allocate_gpu_buffers(
             num_all_tokens, count=2
-        )
-        self._emit_reuse_timer(
-            "reuse_buffer_alloc",
-            req_id=timer_req_id,
-            layer_id=0,
-            duration_ms=(time.perf_counter() - buffer_alloc_start) * 1000.0,
-            path=timer_path,
-            load_mode=timer_load_mode,
         )
 
         if self.cache_positions:
@@ -469,10 +244,8 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
         for layer_id in range(self.num_layers + 2):
             if layer_id > 1:
-                flush_start = time.perf_counter()
-                flushed_buffer_obj = self.buffer_mapping[layer_id - 2]
                 lmc_ops.single_layer_kv_transfer(
-                    flushed_buffer_obj.tensor,
+                    self.buffer_mapping[layer_id - 2].tensor,
                     self.kvcaches[layer_id - 2],
                     slot_mapping_full,
                     False,
@@ -480,28 +253,13 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     False,  # shape is [2, num_tokens, hidden_dim]
                     self.vllm_two_major,
                 )
-                self._maybe_force_sync_reuse_timer()
-                self._emit_reuse_timer(
-                    "reuse_flush",
-                    req_id=timer_req_id,
-                    layer_id=layer_id - 2,
-                    duration_ms=(time.perf_counter() - flush_start) * 1000.0,
-                    path=timer_path,
-                    load_mode=timer_load_mode,
-                )
-                self._record_flush_buffer_busy(buffer_obj=flushed_buffer_obj)
                 del self.buffer_mapping[layer_id - 2]
 
                 logger.debug(f"Finished loading layer {layer_id - 2} into paged memory")
 
             if layer_id > 0 and layer_id <= self.num_layers:
-                self._wait_for_loaded_buffer(
-                    req_id=timer_req_id,
-                    layer_id=layer_id - 1,
-                    buffer_obj=load_gpu_buffer_obj,
-                    path=timer_path,
-                    load_mode=timer_load_mode,
-                )
+                # NOTE: wait until both compute and load streams are done
+                torch.cuda.synchronize()
 
                 # ping-pong the buffers
                 compute_gpu_buffer_obj, load_gpu_buffer_obj = (
@@ -512,42 +270,15 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                 if self.cache_positions:
                     assert compute_gpu_buffer_obj.tensor is not None
 
-                    rope_start = time.perf_counter()
                     compute_gpu_buffer_obj.tensor[0] = self.fused_rotary_emb(
                         old_positions_full,
                         new_positions_full,
                         compute_gpu_buffer_obj.tensor[0],
                     )
-                    self._maybe_force_sync_reuse_timer()
-                    self._emit_reuse_timer(
-                        "reuse_rope",
-                        req_id=timer_req_id,
-                        layer_id=layer_id - 1,
-                        duration_ms=(time.perf_counter() - rope_start) * 1000.0,
-                        path=timer_path,
-                        load_mode=timer_load_mode,
-                    )
 
                 # gap zeroing after RoPE
                 if self.current_gap_positions.numel():
-                    zero_start = time.perf_counter()
                     compute_gpu_buffer_obj.tensor[:, self.current_gap_positions] = 0.0
-                    self._maybe_force_sync_reuse_timer()
-                    self._emit_reuse_timer(
-                        "reuse_zero_gap",
-                        req_id=timer_req_id,
-                        layer_id=layer_id - 1,
-                        duration_ms=(time.perf_counter() - zero_start) * 1000.0,
-                        path=timer_path,
-                        load_mode=timer_load_mode,
-                    )
-                    if trace_flow_enabled():
-                        trace_flow(
-                            "npu_connector.nohole",
-                            "zero_gap_positions",
-                            layer_id=layer_id - 1,
-                            zeroed_positions=self.current_gap_positions.tolist(),
-                        )
 
                 self.buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
 
@@ -558,22 +289,9 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
                 # memobj -> gpu_buffer
                 with torch.cuda.stream(self.load_stream):
-                    self._wait_buffer_reusable(
-                        buffer_obj=load_gpu_buffer_obj,
-                        req_id=timer_req_id,
-                        layer_id=layer_id,
-                        path=timer_path,
-                        load_mode=timer_load_mode,
-                    )
-                    copy_start = time.perf_counter()
-                    for chunk_idx, (start, end, memory_obj) in enumerate(
-                        zip(starts, ends, memory_objs_layer, strict=False)
+                    for start, end, memory_obj in zip(
+                        starts, ends, memory_objs_layer, strict=False
                     ):
-                        chunk_tag = (
-                            debug_chunk_tags[chunk_idx]
-                            if chunk_idx < len(debug_chunk_tags)
-                            else None
-                        )
                         assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
                         assert load_gpu_buffer_obj.tensor is not None
                         load_gpu_buffer_obj.tensor[0][
@@ -583,48 +301,11 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                         load_gpu_buffer_obj.tensor[1][
                             start - buf_offset : end - buf_offset
                         ].copy_(memory_obj.tensor[1], non_blocking=True)
-                        if trace_flow_enabled() and trace_layer_enabled(layer_id):
-                            trace_flow(
-                                "npu_connector.nohole",
-                                "load_chunk_kv_stats",
-                                layer_id=layer_id,
-                                start=start,
-                                end=end,
-                                chunk_tag=chunk_tag,
-                                cached_positions=tensor_to_list(
-                                    memory_obj.metadata.cached_positions,
-                                    dtype=torch.long,
-                                ),
-                                k_stats=summarize_kv_tensor_stats(memory_obj.tensor[0]),
-                                v_stats=summarize_kv_tensor_stats(memory_obj.tensor[1]),
-                            )
 
                         if self.cache_positions and layer_id == 0:
                             old_positions_full[
                                 start - buf_offset : end - buf_offset
                             ] = memory_obj.metadata.cached_positions
-                            if trace_flow_enabled() and trace_layer_enabled(layer_id):
-                                trace_flow(
-                                    "npu_connector.nohole",
-                                    "load_chunk_into_buffer",
-                                    layer_id=layer_id,
-                                    start=start,
-                                    end=end,
-                                    cached_positions=tensor_to_list(
-                                        memory_obj.metadata.cached_positions,
-                                        dtype=torch.long,
-                                    ),
-                                )
-                    self._record_load_buffer_ready(buffer_obj=load_gpu_buffer_obj)
-                    self._maybe_force_sync_reuse_timer(use_load_stream=True)
-                    self._emit_reuse_timer(
-                        "reuse_copy_enqueue",
-                        req_id=timer_req_id,
-                        layer_id=layer_id,
-                        duration_ms=(time.perf_counter() - copy_start) * 1000.0,
-                        path=timer_path,
-                        load_mode=timer_load_mode,
-                    )
 
             elif layer_id == self.num_layers:
                 yield
@@ -632,8 +313,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         # free the buffer memory
         load_gpu_buffer_obj.ref_count_down()
         compute_gpu_buffer_obj.ref_count_down()
-        self._buffer_load_events.clear()
-        self._buffer_flush_events.clear()
 
         assert len(self.buffer_mapping) == 0, (
             "There are still layers in the buffer mapping after "
@@ -678,8 +357,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         :raises ValueError: If 'slot_mapping' is not provided in kwargs.
         """
         slot_mapping = self._prepare_transfer_context(kwargs)
-        position_offset = int(kwargs.get("position_offset", 0))
-        debug_chunk_tags = list(kwargs.get("debug_chunk_tags", []) or [])
 
         buf_start = 0
         buf_starts_ends = []
@@ -690,29 +367,11 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             buf_start = buf_end
             if self.cache_positions:
                 old_positions_chunks.append(
-                    torch.arange(
-                        start + position_offset,
-                        end + position_offset,
-                        device=self.kv_device,
-                        dtype=torch.int64,
-                    )
+                    torch.arange(start, end, device=self.kv_device, dtype=torch.int64)
                 )
 
         slot_mapping_full, num_tokens = self._get_full_slot_mapping(
             slot_mapping, starts, ends, mode="concat"
-        )
-        trace_flow(
-            "npu_connector.nohole",
-            "batched_from_gpu_start",
-            starts=starts,
-            ends=ends,
-            slot_mapping=summarize_slot_mapping(slot_mapping_full),
-            num_tokens=num_tokens,
-            position_offset=position_offset,
-            cached_position_chunks=[
-                tensor_to_list(chunk, dtype=torch.long)
-                for chunk in old_positions_chunks
-            ],
         )
 
         tmp_gpu_buffer_obj = self._allocate_gpu_buffers(num_tokens, count=1)
@@ -735,23 +394,12 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     self.vllm_two_major,
                 )
 
-                for chunk_idx, (
-                    (buf_start, buf_end),
-                    memory_obj,
-                    old_positions,
-                ) in enumerate(
-                    zip(
-                        buf_starts_ends,
-                        memory_objs_layer,
-                        old_positions_chunks,
-                        strict=False,
-                    )
+                for (buf_start, buf_end), memory_obj, old_positions in zip(
+                    buf_starts_ends,
+                    memory_objs_layer,
+                    old_positions_chunks,
+                    strict=False,
                 ):
-                    chunk_tag = (
-                        debug_chunk_tags[chunk_idx]
-                        if chunk_idx < len(debug_chunk_tags)
-                        else None
-                    )
                     assert memory_obj.tensor is not None
                     memory_obj.tensor[0].copy_(
                         tmp_gpu_buffer_obj.tensor[0][buf_start:buf_end],
@@ -763,30 +411,6 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                     )
                     if self.cache_positions:
                         memory_obj.metadata.cached_positions = old_positions
-                        trace_flow(
-                            "npu_connector.nohole",
-                            "save_chunk_from_buffer",
-                            layer_id=layer_id,
-                            chunk_range=[buf_start, buf_end],
-                            cached_positions=tensor_to_list(
-                                old_positions,
-                                dtype=torch.long,
-                            ),
-                        )
-                    if trace_layer_enabled(layer_id):
-                        trace_flow(
-                            "npu_connector.nohole",
-                            "save_chunk_kv_stats",
-                            layer_id=layer_id,
-                            chunk_range=[buf_start, buf_end],
-                            chunk_tag=chunk_tag,
-                            cached_positions=tensor_to_list(
-                                old_positions,
-                                dtype=torch.long,
-                            ),
-                            k_stats=summarize_kv_tensor_stats(memory_obj.tensor[0]),
-                            v_stats=summarize_kv_tensor_stats(memory_obj.tensor[1]),
-                        )
 
             yield
             self.store_stream.synchronize()

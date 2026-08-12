@@ -13,7 +13,6 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.blend.blender import LMCBlender
-import lmcache_ascend.v1.blend.blender as blender_impl
 
 
 class TestLMCBlendMetadata:
@@ -247,115 +246,6 @@ class TestLMCBlender:
 
         # Verify blend_layer was called with correct arguments
         blender.blend_layer.assert_called_once_with(tokens, None)
-
-    def test_process_qkv_emits_topk_timer_only_for_check_layers(
-        self,
-        blender,
-        monkeypatch,
-    ):
-        captured = []
-        monkeypatch.setattr(
-            blender_impl,
-            "emit_layer_timer",
-            lambda bucket, **kwargs: captured.append({"bucket": bucket, **kwargs}),
-        )
-
-        blender.common_metadata.check_layers = [1]
-        blender.common_metadata.recomp_ratios = [0.15]
-        blender.metadata.clean()
-
-        num_tokens = 64
-        q = torch.randn(num_tokens, 4096)
-        k = torch.randn(num_tokens, 1024)
-        v = torch.randn(num_tokens, 1024)
-        residual = torch.randn(num_tokens, 4096)
-        attn_output = torch.randn(num_tokens, 4096)
-
-        blender.gpu_connector.get_kv.return_value = (
-            torch.randn(num_tokens, 1024),
-            torch.randn(num_tokens, 1024),
-        )
-        blender.process_qkv(
-            q,
-            k,
-            v,
-            residual,
-            0,
-            attn_output,
-            Mock(spec=LMCAttnMetadata),
-        )
-
-        attn_metadata = Mock(spec=LMCAttnMetadata)
-        attn_metadata.update_from_top_indices = Mock()
-        old_k = k + torch.randn_like(k) * 0.001
-        old_v = v + torch.randn_like(v) * 0.001
-        blender.metadata.clean()
-        blender.gpu_connector.get_kv.return_value = (old_k, old_v)
-        blender.process_qkv(
-            q,
-            k,
-            v,
-            residual,
-            1,
-            attn_output,
-            attn_metadata,
-            req_id="req-1",
-        )
-
-        topk_events = [event for event in captured if event["bucket"] == "topk_l1"]
-        assert len(topk_events) == 1
-        assert topk_events[0]["layer_id"] == 1
-        assert topk_events[0]["req_id"] is None
-
-    def test_blend_emits_wait_reuse_timer_for_each_layer(self, blender, monkeypatch):
-        captured = []
-        monkeypatch.setattr(
-            blender_impl,
-            "emit_layer_timer",
-            lambda bucket, **kwargs: captured.append({"bucket": bucket, **kwargs}),
-        )
-
-        blender.layerwise_model.compute_layer = Mock(
-            return_value=iter(range(blender.num_layers + 2))
-        )
-        blender.cache_engine.retrieve_layer = Mock(
-            return_value=iter(range(blender.num_layers + 2))
-        )
-
-        blender.blend(torch.randn(10, 128), req_id="req-7", timer_path="nohole")
-
-        wait_events = [event for event in captured if event["bucket"] == "wait_reuse"]
-        assert len(wait_events) == blender.num_layers
-        assert [event["layer_id"] for event in wait_events] == list(
-            range(blender.num_layers)
-        )
-        assert all(event["req_id"] == "req-7" for event in wait_events)
-        assert all(event["path"] == "nohole" for event in wait_events)
-
-    def test_emit_blend_timer_subtracts_topk_duration(self, blender, monkeypatch):
-        captured = []
-        monkeypatch.setattr(
-            blender_impl,
-            "emit_layer_timer",
-            lambda bucket, **kwargs: captured.append({"bucket": bucket, **kwargs}),
-        )
-
-        blender._active_timer_req_id = "req-9"
-        blender._active_timer_path = "nohole"
-        blender._layer_topk_ms[2] = 1.5
-
-        blender.emit_blend_timer(2, 5.0)
-
-        assert captured == [
-            {
-                "bucket": "blend",
-                "duration_ms": pytest.approx(3.5),
-                "layer_id": 2,
-                "load_mode": None,
-                "path": "nohole",
-                "req_id": "req-9",
-            }
-        ]
 
 
 class TestLMCBlenderBuilder:
