@@ -749,6 +749,7 @@ class LMCBlenderHole:
         ends = []
         keys = []
         chunk_tags = []
+        source_offsets = []
         request_configs = kwargs.get("request_configs")
         prefix_start = kwargs.get("prefix_start", 0)
         effective_hit_ranges = list(
@@ -768,7 +769,7 @@ class LMCBlenderHole:
                 continue
             key = self.segment_helper.make_cache_key(
                 tokens,
-                (adj_start, adj_end),
+                (start, end),
                 request_configs,
             )
             trace_flow(
@@ -777,6 +778,7 @@ class LMCBlenderHole:
                 req_id=kwargs.get("req_id"),
                 original_range=[start, end],
                 adjusted_range=[adj_start, adj_end],
+                source_offset=adj_start - start,
                 prefix_start=prefix_start,
                 key=summarize_key(key),
             )
@@ -784,6 +786,7 @@ class LMCBlenderHole:
             ends.append(adj_end)
             keys.append(key.split_layers(self.cache_engine.num_layers))
             chunk_tags.append(summarize_key(key))
+            source_offsets.append(adj_start - start)
 
         if not keys:
             self.emit_timer(
@@ -825,6 +828,7 @@ class LMCBlenderHole:
             ends,
             prefix_end=load_spec.covered_tokens,
             debug_chunk_tags=chunk_tags,
+            source_offsets=source_offsets,
             **kwargs,
         )
         consumer_prime_start = time.perf_counter()

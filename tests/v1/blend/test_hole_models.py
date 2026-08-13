@@ -26,9 +26,7 @@ def test_hole_attention_records_completion_after_forward(monkeypatch):
         (),
         {"record_scatter_done": lambda self, layer_id: events.append(layer_id)},
     )()
-    backend = HoleSynchronizedAttentionBackend.__new__(
-        HoleSynchronizedAttentionBackend
-    )
+    backend = HoleSynchronizedAttentionBackend.__new__(HoleSynchronizedAttentionBackend)
     backend.gpu_connector = connector
     backend.layer_id = 3
 

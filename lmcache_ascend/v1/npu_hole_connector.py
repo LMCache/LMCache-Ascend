@@ -47,6 +47,21 @@ def _env_enabled(name: str, default: bool) -> bool:
     return str(raw_value).strip().lower() not in {"", "0", "false", "no", "off"}
 
 
+def _slice_source_tokens(
+    tensor: torch.Tensor,
+    source_offset: int,
+    num_tokens: int,
+) -> torch.Tensor:
+    source_end = source_offset + num_tokens
+    source = tensor[source_offset:source_end]
+    if source_offset < 0 or source.shape[0] != num_tokens:
+        raise ValueError(
+            "Cached hole segment does not contain the requested "
+            f"source range [{source_offset}:{source_end}]"
+        )
+    return source
+
+
 class VLLMBufferLayerwiseNPULegacyHoleConnector(VLLMBufferLayerwiseNPUConnector):
     """Legacy CacheBlend connector used only by hole-mode fallback requests."""
 
@@ -899,6 +914,14 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
     def batched_to_gpu(self, starts: List[int], ends: List[int], **kwargs):
         slot_mapping = self._prepare_transfer_context(kwargs)
         debug_chunk_tags = list(kwargs.get("debug_chunk_tags", []) or [])
+        raw_source_offsets = kwargs.get("source_offsets")
+        source_offsets = (
+            [0] * len(starts)
+            if raw_source_offsets is None
+            else list(raw_source_offsets)
+        )
+        if len(source_offsets) != len(starts):
+            raise ValueError("source_offsets must match the number of hole ranges")
 
         self._buffer_flush_events.clear()
         self._buffer_load_events.clear()
@@ -944,6 +967,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 prefix_end=prefix_end,
                 starts=starts,
                 ends=ends,
+                source_offsets=source_offsets,
                 slot_mapping=summarize_slot_mapping(slot_mapping_full),
                 gap_mask=mask_to_string(gap_mask),
                 gap_positions=self.current_gap_positions.tolist(),
@@ -1173,8 +1197,14 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                 send_step_timed_ms += (time.perf_counter() - reuse_wait_start) * 1000.0
                 with torch.cuda.stream(self.load_stream):
                     copy_start = time.perf_counter()
-                    for chunk_idx, (start, end, memory_obj) in enumerate(
-                        zip(starts, ends, memory_objs_layer, strict=False)
+                    for chunk_idx, (start, end, source_offset, memory_obj) in enumerate(
+                        zip(
+                            starts,
+                            ends,
+                            source_offsets,
+                            memory_objs_layer,
+                            strict=False,
+                        )
                     ):
                         chunk_tag = (
                             debug_chunk_tags[chunk_idx]
@@ -1184,12 +1214,20 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                         local_start = start - prefix_start
                         local_end = end - prefix_start
                         assert memory_obj.metadata.fmt == MemoryFormat.KV_2TD
+                        assert memory_obj.tensor is not None
                         assert load_gpu_buffer_obj.tensor is not None
+                        expected_tokens = local_end - local_start
+                        source_k = _slice_source_tokens(
+                            memory_obj.tensor[0], source_offset, expected_tokens
+                        )
+                        source_v = _slice_source_tokens(
+                            memory_obj.tensor[1], source_offset, expected_tokens
+                        )
                         load_gpu_buffer_obj.tensor[0][local_start:local_end].copy_(
-                            memory_obj.tensor[0], non_blocking=True
+                            source_k, non_blocking=True
                         )
                         load_gpu_buffer_obj.tensor[1][local_start:local_end].copy_(
-                            memory_obj.tensor[1], non_blocking=True
+                            source_v, non_blocking=True
                         )
                         if trace_layer_enabled(layer_id):
                             trace_flow(
@@ -1198,6 +1236,7 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                                 layer_id=layer_id,
                                 start=start,
                                 end=end,
+                                source_offset=source_offset,
                                 chunk_tag=chunk_tag,
                                 cached_positions=tensor_to_list(
                                     memory_obj.metadata.cached_positions,
@@ -1207,9 +1246,12 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                                 v_stats=summarize_kv_tensor_stats(memory_obj.tensor[1]),
                             )
                         if self.cache_positions and layer_id == 0:
-                            old_positions_full[local_start:local_end] = (
-                                memory_obj.metadata.cached_positions
+                            source_positions = _slice_source_tokens(
+                                memory_obj.metadata.cached_positions,
+                                source_offset,
+                                expected_tokens,
                             )
+                            old_positions_full[local_start:local_end] = source_positions
                             if trace_layer_enabled(layer_id):
                                 trace_flow(
                                     "npu_connector.hole",
@@ -1217,8 +1259,9 @@ class VLLMBufferLayerwiseNPUHoleConnector(VLLMBufferLayerwiseNPUConnector):
                                     layer_id=layer_id,
                                     start=start,
                                     end=end,
+                                    source_offset=source_offset,
                                     cached_positions=tensor_to_list(
-                                        memory_obj.metadata.cached_positions,
+                                        source_positions,
                                         dtype=torch.long,
                                     ),
                                 )
