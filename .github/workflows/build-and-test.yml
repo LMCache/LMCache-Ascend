@@ -87,6 +87,7 @@ jobs:
           submodules: true
       
       - name: 🟡 Set Status to Running
+        if: github.event_name != 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -200,7 +201,7 @@ jobs:
           path: test-results.xml
       
       - name: 🟢🔴 Update Hardware Status
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -295,6 +296,8 @@ jobs:
           submodules: true
       
       - name: 🟡 Set Status to Running
+        # fork PR 的 pull_request 事件下 GITHUB_TOKEN 只读，写 status 会 403，跳过即可
+        if: github.event_name != 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -413,7 +416,7 @@ jobs:
           path: test-results.xml
       
       - name: 🟢🔴 Update Hardware Status
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |

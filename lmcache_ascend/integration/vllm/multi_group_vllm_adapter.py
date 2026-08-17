@@ -797,30 +797,15 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             if num_current_tokens < len(request_tracker.token_ids):
                 logger.warning(
                     "Request %s rolled back from %d to %d tokens; "
-                    "truncating tracker state.",
+                    "truncating tracker state to logical boundary.",
                     req_id,
                     len(request_tracker.token_ids),
                     num_current_tokens,
                 )
-                num_token_slots = min(
-                    len(group_block_ids) * bs
-                    for group_block_ids, bs in zip(
-                        request_tracker.allocated_block_ids_by_group,
-                        self._block_sizes_by_group,
-                    )
-                )
                 tokens_to_keep = num_current_tokens
-                if num_token_slots < num_current_tokens:
-                    logger.warning(
-                        "Request %s tracker has %d token slots but %d tokens; "
-                        "capping token_ids to slot capacity.",
-                        req_id,
-                        num_token_slots,
-                        num_current_tokens,
-                    )
-                    tokens_to_keep = num_token_slots
-
-                request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
+                request_tracker.token_ids = list(
+                    request.all_token_ids[:tokens_to_keep]
+                )
                 request_tracker.num_saved_tokens = min(
                     request_tracker.num_saved_tokens, tokens_to_keep
                 )

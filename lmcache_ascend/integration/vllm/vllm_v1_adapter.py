@@ -6,19 +6,6 @@ from typing import TYPE_CHECKING, Any, Optional
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
-
-from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
-    LMCacheConnectorV1ImplMultiGroup,
-)
-
-# First Party
-from lmcache_ascend.integration.vllm.multi_spec_flatten import (
-    build_flat_kv_caches,
-    has_multiple_scheduler_groups,
-)
-from lmcache_ascend.integration.vllm.skip_state_groups import (
-    apply_skip_policy_from_env_to_flattened,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -26,6 +13,18 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.request import RequestStatus
 import torch
+
+# First Party
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    LMCacheConnectorV1ImplMultiGroup,
+)
+from lmcache_ascend.integration.vllm.multi_spec_flatten import (
+    build_flat_kv_caches,
+    has_multiple_scheduler_groups,
+)
+from lmcache_ascend.integration.vllm.skip_state_groups import (
+    apply_skip_policy_from_env_to_flattened,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -37,6 +36,9 @@ logger = init_logger(__name__)
 
 
 class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
+    # Type declarations for upstream-inherited attributes (mypy has-type fix)
+    kv_caches: dict[str, Any]
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -707,7 +709,76 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        _, return_params = super().request_finished(request, block_ids)
+
+        # Add patch from upstream LMCache#3340 (regression LMCache#3337)
+        if getattr(self, "use_layerwise", False) and hasattr(
+            self, "_layerwise_save_storers"
+        ):
+            self._layerwise_save_storers.pop(request.request_id, None)
+
+        # Cleanup if request was aborted
+        if request.status == RequestStatus.FINISHED_ABORTED:
+            # ``request_finished`` is a Scheduler-side connector API.
+            # The Scheduler typically does not initialize the storage
+            # engine (unless ``enable_scheduler_bypass_lookup`` is set);
+            # only the Worker role builds it by default. The Scheduler
+            # *does* own the lookup_client though, so the async lookup
+            # cancel below must run independently of the engine check
+            # to avoid leaking in-flight async lookups on Scheduler-side
+            # aborts. See LMCache#3337.
+            if self.lmcache_engine is None:
+                logger.warning(
+                    "Skipping abort-time backend cleanup for request %s: "
+                    "lmcache_engine is not initialized (Scheduler role "
+                    "without enable_scheduler_bypass_lookup).",
+                    request.request_id,
+                )
+            else:
+                # Notify storage backends of aborted requests
+                sm = self.lmcache_engine.storage_manager
+                if sm is not None:
+                    sm.cancel_request(request.request_id)
+
+            if self.async_loading:
+                # Cancel any ongoing async lookup and prefetch tasks on
+                # workers. Independent of ``lmcache_engine`` because the
+                # Scheduler owns ``lookup_client`` even when it does not
+                # build an engine.
+                lookup_id = request.request_id
+                if self.lookup_client is None:
+                    logger.warning(
+                        "Skipping abort-time async lookup cancel for "
+                        "request %s: lookup_client is not initialized "
+                        "while async_loading is enabled. Engine stays "
+                        "alive; this request's lookup is dropped.",
+                        request.request_id,
+                    )
+                else:
+                    self.lookup_client.cancel_lookup(lookup_id)  # type: ignore[attr-defined]
+
+        params = (
+            request.kv_transfer_params
+            if hasattr(request, "kv_transfer_params")
+            else None
+        )
+        return_params = None
+
+        # NOTE: Used to stream back the first token
+        # for disagg prefill
+        if params is not None and "ret_first_tok" in params:
+            return_params = {
+                "first_tok": request._output_token_ids[0],
+            }
+
+        if self.config.get_extra_config_value(
+            "enable_cache_usage_details_in_response", False
+        ):
+            request_tracker = self._request_trackers.get(request.request_id)
+            if request_tracker:
+                return_params = return_params or {}
+                return_params["num_lmcache_cached_tokens"] = (
+                    request_tracker.num_lmcache_cached_tokens
+                )
 
         # chunk_hashes return start ---------------------
         if getattr(self.config, "enable_chunk_hashes_return", False):
@@ -744,8 +815,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache).
-        """
+        """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
         if not block_ids:
             return False, None
         if len(block_ids) > 1:

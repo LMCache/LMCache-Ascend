@@ -13,7 +13,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_connector import (
     LMCacheConnectorV1,
 )
 
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import LMCacheAscendConnectorV1Impl
+# NOTE: Do not import LMCacheAscendConnectorV1Impl here for a second
+# construction. ``lmcache_ascend._patch_vllm_v1_adapter`` rebinds the
+# implementation class that the upstream base class constructor uses, so
+# ``super().__init__()`` below already builds the Ascend impl (and starts its
+# LMCacheManager services exactly once). Constructing another impl here would
+# orphan the first manager's services without shutting them down.
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -29,17 +34,18 @@ class LMCacheAscendConnector(LMCacheConnectorV1, SupportsHMA):
         role: KVConnectorRole,
         kv_cache_config: Optional[Any] = None,
     ) -> None:
+        # Store kv_cache_config before super().__init__() so the patched impl
+        # can retrieve it via parent._kv_cache_config fallback during construction.
+        self._kv_cache_config = kv_cache_config
         super().__init__(
             vllm_config=vllm_config,
             role=role,
             kv_cache_config=kv_cache_config,
         )
-        self._lmcache_engine = LMCacheAscendConnectorV1Impl(
-            vllm_config,
-            role,
-            self,
-            kv_cache_config=kv_cache_config,
-        )
+
+    def shutdown(self):
+        """Delegate shutdown to the single implementation instance."""
+        return self._lmcache_engine.shutdown()
 
     def request_finished_all_groups(
         self,
