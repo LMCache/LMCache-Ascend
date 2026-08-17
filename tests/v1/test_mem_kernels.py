@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-# Standard
+# Future
 from __future__ import annotations
 
+# Standard
 import random
 
 # Third Party
@@ -11,10 +12,26 @@ import pytest
 import torch
 
 # First Party
-import lmcache_ascend.c_ops as lmc_ops
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    _build_slot_mapping_for_group,
+)
 from lmcache_ascend.v1.kv_format import KVCacheFormat
+from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
+    VLLMPagedMemNPUConnectorV2,
+    _derive_group_params,
+)
+from lmcache_ascend.v1.slot_mapping_utils import (
+    build_filtered_slot_mappings,
+    multi_plane_slot_slice_bounds,
+)
+import lmcache_ascend.c_ops as lmc_ops
 
 # Local
+from .conftest_kvcache import device as _kvcache_device
+from .conftest_kvcache import fill_multi_plane_pattern
+from .conftest_kvcache import npu_available as _kvcache_npu_available
+from .conftest_kvcache import pinned_lmc_chunk
 from .utils import (
     check_paged_kv_cache_equal,
     generate_dsa_c8_kv_cache,
@@ -1535,8 +1552,9 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
     dsa_head_dim,
 ):
     """DSA+C8: byte-oriented LMCache chunk (uint8) and four paged pointers per layer."""
-    # Unique scope: this is the only direct c_ops multi-plane round-trip (store+load+parity).
-    # Other multi-plane tests route through connector wrappers or only verify store-side layout.
+    # Unique scope: only direct c_ops multi-plane round-trip (store+load+parity);
+    # other tests use connector wrappers or verify store-side layout only.
+    # First Party
     from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
 
     device = "npu"
@@ -1687,27 +1705,7 @@ def test_multi_layer_kv_transfer_dsa_c8_format(
     mem_allocator.close()
 
 
-# --- Generic multi-plane kernel tests (real NPU; see also test_ds4_kvcache_roundtrip) ---
-
-from .conftest_kvcache import (
-    device as _kvcache_device,
-    fill_multi_plane_pattern,
-    npu_available as _kvcache_npu_available,
-    pinned_lmc_chunk,
-)
-from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
-    _build_slot_mapping_for_group,
-)
-from lmcache_ascend.v1.kv_layer_groups import _lmc_chunk_hidden_bytes
-from lmcache_ascend.v1.npu_connector.npu_connectors import (
-    VLLMPagedMemNPUConnectorV2,
-    _derive_group_params,
-)
-from lmcache_ascend.v1.slot_mapping_utils import (
-    build_filtered_slot_mappings,
-    multi_plane_slot_slice_bounds,
-)
-
+# --- Generic multi-plane kernel tests (see test_ds4_kvcache_roundtrip) ---
 
 _GENERIC_BLOCK_SIZES = (128, 128, 128, 1024, 32, 32, 128, 128, 128, 128, 64, 64)
 
@@ -1729,7 +1727,7 @@ def _generic_slot_mappings(
     block_ids = list(range(1, 17))
     ratios = _generic_compress_ratios_12()
     mappings: list[torch.Tensor] = []
-    for ratio, bs in zip(ratios, _GENERIC_BLOCK_SIZES):
+    for ratio, bs in zip(ratios, _GENERIC_BLOCK_SIZES, strict=True):
         mappings.append(
             _build_slot_mapping_for_group(
                 block_ids,
@@ -1748,8 +1746,8 @@ def _generic_slot_mappings(
 )
 def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     """Store lays out each plane as a contiguous block inside the layer slice."""
-    # Unique scope: validates packed LMCache byte layout (plane contiguity and boundaries) post-store.
-    # Other tests focus on round-trip parity or slot-window corner cases, not raw packed offsets.
+    # Unique scope: validates the packed LMCache byte layout (plane contiguity
+    # and boundaries) post-store; other tests cover round-trip parity instead.
     dev = _kvcache_device()
     num_blocks = 4
     chunk = 64
@@ -1825,7 +1823,7 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
         layer_base = 0
         flat = lmc_chunk.reshape(-1)
         for pi, (plane_block, hd, n_tok) in enumerate(
-            zip(plane_block_sizes, plane_bytes, n_toks_per_plane)
+            zip(plane_block_sizes, plane_bytes, n_toks_per_plane, strict=True)
         ):
             plane_block_base = layer_base + sum(plane_block_sizes[q] for q in range(pi))
             plane_block_end = plane_block_base + plane_block
@@ -1848,8 +1846,9 @@ def test_multi_plane_chunk_uses_per_plane_layout() -> None:
     reason="NPU required for windowed cross-block bulk regression",
 )
 def test_multi_plane_windowed_cross_block_boundary_bulk() -> None:
-    # Unique scope: stresses windowed copy where mapped slots cross a paged block boundary.
-    # Other tests do not isolate this boundary-transition bulk path with hand-crafted slot slices.
+    # Unique scope: stresses windowed copy where mapped slots cross
+    # a paged block boundary. Other tests do not isolate this
+    # boundary-transition bulk path with hand-crafted slot slices.
     dev = _kvcache_device()
     num_blocks = 8
     chunk = 64

@@ -10,34 +10,34 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-# First Party
+# Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     LoadSpec,
-    logger,
 )
-from lmcache.integration.vllm.vllm_v1_adapter import (
-    ReqMeta as UpstreamReqMeta,
-)
+from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta as UpstreamReqMeta
 from lmcache.integration.vllm.vllm_v1_adapter import (
     RequestTracker as UpstreamRequestTracker,
 )
+from lmcache.integration.vllm.vllm_v1_adapter import (
+    logger,
+)
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
-import torch
-
-from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
-
-# Third Party
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
+import torch
+
+# First Party
+from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 if TYPE_CHECKING:
+    # Third Party
     from vllm.config import VllmConfig
     from vllm.v1.core.sched.output import NewRequestData
 
@@ -226,7 +226,7 @@ def _build_slot_mappings_by_group(
         )
     mappings: list[torch.Tensor] = []
     for g, (group_block_ids, block_size) in enumerate(
-        zip(block_ids_by_group, block_sizes_by_group)
+        zip(block_ids_by_group, block_sizes_by_group, strict=True)
     ):
         ratio = compress_ratios[g] if compress_ratios else 1
         sw_size = swsbg[g] if swsbg is not None else None
@@ -359,6 +359,7 @@ class RequestTracker(UpstreamRequestTracker):
                 for old_group_ids, new_group_ids in zip(
                     old_block_ids_by_group,
                     new_block_ids_by_group,
+                    strict=True,
                 )
             )
         self._sync_primary_allocated_block_ids()
@@ -489,6 +490,10 @@ class ReqMeta(UpstreamReqMeta):
 
 class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     """Multi-group scheduler/worker plumbing layered on upstream LMCache."""
+
+    # Annotated here for mypy: assigned in upstream __init__/_init_connector_state
+    # and temporarily overridden in record_failed_blocks (per-group block_size).
+    _block_size: int
 
     def __init__(
         self,
@@ -803,9 +808,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     num_current_tokens,
                 )
                 tokens_to_keep = num_current_tokens
-                request_tracker.token_ids = list(
-                    request.all_token_ids[:tokens_to_keep]
-                )
+                request_tracker.token_ids = list(request.all_token_ids[:tokens_to_keep])
                 request_tracker.num_saved_tokens = min(
                     request_tracker.num_saved_tokens, tokens_to_keep
                 )

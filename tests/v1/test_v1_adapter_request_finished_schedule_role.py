@@ -58,6 +58,7 @@ import pytest
 pytest.importorskip("lmcache")
 pytest.importorskip("vllm")
 
+# Third Party
 # Third Party (after importorskip)
 from vllm.v1.request import RequestStatus  # noqa: E402
 
@@ -150,9 +151,7 @@ def _make_connector(
     installs a fake manager rather than assigning to those properties
     directly.
     """
-    connector = LMCacheAscendConnectorV1Impl.__new__(
-        LMCacheAscendConnectorV1Impl
-    )
+    connector = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
     connector._manager = SimpleNamespace(  # type: ignore[assignment]
         lmcache_engine=engine,
         lookup_client=lookup_client,
@@ -283,9 +282,7 @@ def test_request_finished_non_aborted_returns_chunk_hashes() -> None:
     """
     inner = SimpleNamespace(get_cached_hashes=lambda req_id: ["h1", "h2"])
     engine = _FakeEngine()
-    connector = _make_connector(
-        engine=engine, lookup_client=inner, async_loading=False
-    )
+    connector = _make_connector(engine=engine, lookup_client=inner, async_loading=False)
     connector.config.enable_chunk_hashes_return = True
     request = SimpleNamespace(
         request_id="req-ok",

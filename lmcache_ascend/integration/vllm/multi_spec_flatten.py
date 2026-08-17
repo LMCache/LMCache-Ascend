@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Preprocess vllm-ascend multi-spec per-layer KV entries for the NPU connector."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from typing import Any, Sequence, Union
 
-from lmcache.v1.config import LMCacheEngineConfig
-
 # Third Party
+from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
+# First Party
 from lmcache_ascend.v1.kv_format import KVCacheFormat, _is_shared_storage_blob
 
 _KVEntry = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
@@ -252,7 +254,9 @@ def build_flat_kv_caches(
             sched_by_layer.append(groups[0])
             bundled = True
             continue
-        for sub_idx, (sub_tensor, sched_g) in enumerate(zip(planes, groups)):
+        for sub_idx, (sub_tensor, sched_g) in enumerate(
+            zip(planes, groups, strict=True)
+        ):
             flat[f"{layer_name}.sub{sub_idx}"] = _collapse_to_mla_page_buffer(
                 sub_tensor
             )

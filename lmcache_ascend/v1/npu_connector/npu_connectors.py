@@ -763,6 +763,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self.kv_lora_rank: int = 0
         self.qk_rope_head_dim: int = 0
         self.dsa_head_dim: int = 0
+        self.num_layers: int = num_layers
         # Per-token byte spans for DSA_C8_KV (k, v, dsa_k, dsa_k_scale); uint8 chunk
         self.dsa_c8_plane_bytes: tuple[int, int, int, int] = (0, 0, 0, 0)
         # vLLM logical slots (nb*bs) when ``block_stride_elems`` is set on the group
@@ -1614,7 +1615,7 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         self._initialize_pointers(kvcaches)
         if not self._has_per_group_transfer_infra():
             return
-        chunk_ranges = list(dict.fromkeys(zip(starts, ends)))
+        chunk_ranges = list(dict.fromkeys(zip(starts, ends, strict=True)))
         kwargs["mp_launch_meta"] = build_mp_launch_meta(
             self,
             chunk_ranges=chunk_ranges,
@@ -1724,7 +1725,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         n_memobj_groups = len(memory_obj.group_prefix_sum) - 1
         with torch.npu.stream(stream):
             for i, (group_ptrs, group_params) in enumerate(
-                zip(self.group_kv_cache_pointers, self.per_group_params)
+                zip(
+                    self.group_kv_cache_pointers,
+                    self.per_group_params,
+                    strict=True,
+                )
             ):
                 if i >= n_memobj_groups:
                     raise RuntimeError(

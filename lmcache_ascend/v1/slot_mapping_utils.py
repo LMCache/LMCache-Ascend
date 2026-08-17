@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Slot-mapping helpers for multi-plane KV transfer (slice bounds, compaction).
-"""
+"""Slot-mapping helpers for multi-plane KV transfer (slice bounds, compaction)."""
 
+# Future
 from __future__ import annotations
 
+# Standard
 from typing import Sequence
 
+# Third Party
 import torch
 
 

@@ -1450,12 +1450,14 @@ class TestAscendP2PBackendUnit:
         except (AttributeError, ImportError, OSError) as exc:
             pytest.skip(f"HcclChannel is unavailable in this test env: {exc}")
 
-        # First Party
+        # Third Party
         from lmcache.v1.memory_management import (
             MemoryObjMetadata,
             TensorMemoryObj,
             get_size_bytes,
         )
+
+        # First Party
         from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 
         shape_g0 = torch.Size([2, 4, 256, 64])

@@ -709,7 +709,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-
         # Add patch from upstream LMCache#3340 (regression LMCache#3337)
         if getattr(self, "use_layerwise", False) and hasattr(
             self, "_layerwise_save_storers"

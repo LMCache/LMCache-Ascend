@@ -5,7 +5,10 @@ from unittest.mock import patch
 import random
 
 # Third Party
+from lmcache.utils import EngineType
+from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.metadata import LMCacheMetadata
 
 # TODO (gingfung): once we have sglang kernel, re-enable test_sglang_connector_with_gpu_and_mla
 from lmcache_tests.v1.test_gpu_connector import (
@@ -21,9 +24,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache.utils import EngineType
-from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.metadata import LMCacheMetadata
 from lmcache_ascend.v1.npu_connector import CreateNPUConnector
 from lmcache_ascend.v1.npu_connector.npu_connectors import (
     SGLangLayerwiseNPUConnector,

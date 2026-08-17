@@ -137,9 +137,9 @@ vllm serve /data/models/Qwen/Qwen3-32B \
 ##### Offline
 ```python
 ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnector",
-        kv_role="kv_both",
-    )
+    kv_connector="LMCacheAscendConnector",
+    kv_role="kv_both",
+)
 ```
 
 > **Note**: For vllm-ascend versions >=0.17.0rc1, you can specify `--kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'`
@@ -251,9 +251,9 @@ python \
 ##### Offline
 ```python
 ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnector",
-        kv_role="kv_both",
-    )
+    kv_connector="LMCacheAscendConnector",
+    kv_role="kv_both",
+)
 ```
 
 ## FAQ

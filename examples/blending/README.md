@@ -79,7 +79,9 @@ blend_recompute_ratios: 0.15
 * **Offline Mode Token Requirement:** When processing in offline mode, the **BOS (Begin-of-Sequence) token must be manually removed** from all subsequent context segments (i.e., tokens following the initial `sys_prompt`).
 ```python
 # Recommended
-self.sep_tokens = self.tokenizer.encode(config.blend_special_str, add_special_tokens=False)
+self.sep_tokens = self.tokenizer.encode(
+    config.blend_special_str, add_special_tokens=False
+)
 
 # (to be replaced)
 self.sep_tokens = self.tokenizer.encode(config.blend_special_str)[1:]

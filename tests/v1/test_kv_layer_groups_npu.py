@@ -19,18 +19,18 @@ import pytest
 import torch
 
 # First Party
-import lmcache_ascend  # noqa: F401  — applies get_shapes patch
 from lmcache_ascend.v1.kv_format import (
     KVCacheFormat,
     _get_primary_blob_view,
     _is_shared_storage_blob,
 )
 from lmcache_ascend.v1.kv_layer_groups import (
-    _lmc_chunk_hidden_bytes,
     _get_kv_cache_group_key_and_info,
+    _lmc_chunk_hidden_bytes,
     build_kv_layer_groups,
 )
 from lmcache_ascend.v1.npu_connector.npu_connectors import _derive_group_params
+import lmcache_ascend  # noqa: F401  — applies get_shapes patch
 
 
 def _make_ascend_format_manager(
@@ -389,7 +389,7 @@ def test_block_stride_elems_inferred_from_dim0_stride():
 
 def test_upstream_init_with_gpu_kv_format():
     """Upstream manager accepts ``GPUKVFormat`` directly (MP / V3 path)."""
-    # First Party
+    # Third Party
     import lmcache.c_ops as lmc_ops
 
     if not hasattr(lmc_ops, "GPUKVFormat"):
