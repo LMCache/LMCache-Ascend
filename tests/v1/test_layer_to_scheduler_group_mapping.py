@@ -288,12 +288,8 @@ def test_bundle_flatten_preserves_multi_spec_layers(ds4_config) -> None:
 def _equal_bs_two_group_config() -> SimpleNamespace:
     """L0 split across two scheduler groups that both use block size 128."""
     groups = [
-        SimpleNamespace(
-            kv_cache_spec=Compress4AttentionSpec(128), layer_names=[L0]
-        ),
-        SimpleNamespace(
-            kv_cache_spec=SWAAttentionSpec(128), layer_names=[L0]
-        ),
+        SimpleNamespace(kv_cache_spec=Compress4AttentionSpec(128), layer_names=[L0]),
+        SimpleNamespace(kv_cache_spec=SWAAttentionSpec(128), layer_names=[L0]),
     ]
     return SimpleNamespace(kv_cache_groups=groups)
 

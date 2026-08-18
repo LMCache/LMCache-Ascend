@@ -26,6 +26,7 @@ class MultiPlaneBundle(tuple):
 
     __slots__ = ()
 
+
 # Shared type alias: unifies single-tensor layers with multi-view tuple/list
 # entries so _is_shared_storage_blob and callers accept all per-layer shapes.
 _BlobEntry = Union[torch.Tensor, Tuple[torch.Tensor, ...], List[torch.Tensor]]
