@@ -4,6 +4,7 @@
 from lmcache.storage_backend.serde.cachegen_basics import (
     CACHEGEN_GPU_MAX_TOKENS_PER_CHUNK,
     CacheGenConfig,
+    CacheGenGPUBytestream,
     CacheGenGPUEncoderOutput,
     QuantizationSpec,
 )
@@ -16,6 +17,25 @@ from lmcache.storage_backend.serde.cachegen_encoder import (
 import pytest
 import torch
 import torch_npu
+
+
+def _restore_decoder_input_to_npu(
+    decoder_input: CacheGenGPUEncoderOutput,
+) -> CacheGenGPUEncoderOutput:
+    """After pickle deserialization tensors land on CPU; move them back to
+    NPU as required by the NPU kernels."""
+    decoder_input.cdf = decoder_input.cdf.to("npu")
+    decoder_input.max_tensors_key = decoder_input.max_tensors_key.to("npu")
+    decoder_input.max_tensors_value = decoder_input.max_tensors_value.to("npu")
+    decoder_input.data_chunks = [
+        CacheGenGPUBytestream(
+            bytestream=chunk.bytestream.to("npu"),
+            bytestream_lengths=chunk.bytestream_lengths.to("npu"),
+            ntokens=chunk.ntokens,
+        )
+        for chunk in decoder_input.data_chunks
+    ]
+    return decoder_input
 
 
 @pytest.mark.parametrize("n_tokens", [20, 256, 1000])
@@ -87,7 +107,9 @@ def test_encode_into_decode(n_tokens, n_layers, chunk_size, num_heads, head_size
     decoded_chunks = []
 
     for byte_stream in byte_stream_full:
-        decoder_input = CacheGenGPUEncoderOutput.from_bytes(byte_stream)
+        decoder_input = _restore_decoder_input_to_npu(
+            CacheGenGPUEncoderOutput.from_bytes(byte_stream)
+        )
         decode_n_tokens = decoder_input.max_tensors_key.shape[1]
         decode_layers = decoder_input.cdf.shape[0] // 2
         decode_channels = decoder_input.cdf.shape[1]

@@ -26,6 +26,9 @@ from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.token_database import TokenDatabase
 import torch
 
+# First Party
+from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
+
 logger = init_logger(__name__)
 
 ProcessedChunk = Tuple[CacheEngineKey, MemoryObj, int, int]
@@ -448,9 +451,16 @@ class AscendLMCacheEngine(LMCacheEngine):
             )
 
             meta = mem_obj.metadata
+            # Multi-group: keep flat uint8 (upstream convention); single-group:
+            # reshape to meta.dtype/shape for TensorMemoryObj.tensor.
+            raw_data = (
+                dst
+                if is_multi_group_memory_obj(mem_obj)
+                else dst.view(meta.dtype).view(meta.shape)
+            )
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst.view(meta.dtype).view(meta.shape),
+                    raw_data=raw_data,
                     metadata=MemoryObjMetadata(
                         shape=meta.shape,
                         dtype=meta.dtype,
@@ -485,9 +495,16 @@ class AscendLMCacheEngine(LMCacheEngine):
             start, end_pos, meta_dict = meta_table[ci]
             metadata = MemoryObjMetadata.from_dict(meta_dict)
             dst = merged[byte_off : byte_off + byte_size]
+            # Multi-group: keep flat uint8 (upstream convention); single-group:
+            # reshape to metadata.dtype/shape for TensorMemoryObj.tensor.
+            raw_data = (
+                dst
+                if metadata.shapes is not None and len(metadata.shapes) > 1
+                else dst.view(metadata.dtype).view(metadata.shape)
+            )
             objs.append(
                 TensorMemoryObj(
-                    raw_data=dst.view(metadata.dtype).view(metadata.shape),
+                    raw_data=raw_data,
                     metadata=metadata,
                     parent_allocator=None,
                 )
@@ -1003,8 +1020,8 @@ class AscendLMCacheEngine(LMCacheEngine):
             )
             start_time = time.monotonic()
             self._store_cv.wait_for(
-                lambda: not any(
-                    req_id in self._pending_store_reqs for req_id in req_id_set
+                lambda: (
+                    not any(req_id in self._pending_store_reqs for req_id in req_id_set)
                 )
             )
             elapsed_ms = (time.monotonic() - start_time) * 1000

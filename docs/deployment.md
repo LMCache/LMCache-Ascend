@@ -132,4 +132,3 @@ ulimit -l unlimited # Update with the amount of memory you need to lock in KBs
 ```
 Locking a large amount of memory is required when the version of the Ascend driver is < 25. We warmly encourage the user to update the driver version to 25. 
 
-
