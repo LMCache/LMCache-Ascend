@@ -12,7 +12,11 @@ from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
 # First Party
-from lmcache_ascend.v1.kv_format import KVCacheFormat, _is_shared_storage_blob
+from lmcache_ascend.v1.kv_format import (
+    KVCacheFormat,
+    MultiPlaneBundle,
+    _is_shared_storage_blob,
+)
 
 _KVEntry = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
 
@@ -107,6 +111,31 @@ def _primary_scheduler_group_for_layer(
     return containing[0]
 
 
+def _planes_match_config_groups(
+    planes: list[torch.Tensor],
+    containing: list[int],
+    kv_cache_config: Any,
+) -> bool:
+    """True when planes map one-to-one onto scheduler groups by block size.
+
+    A genuine multi-spec bundle's planes each carry their own group's
+    configured block size, so an exact multiset match is positive provenance
+    of independent paging. Shape-based detection alone cannot provide it:
+    equal-block-size bundles are indistinguishable from plain (K, V) pairs,
+    and some collide with MLA/DSA_C8 layouts whose tensors all belong to a
+    single spec and share one block size (the multiset mismatch exposes
+    those).
+    """
+    if len(containing) < 2 or len(containing) != len(planes):
+        return False
+    plane_block_sizes = sorted(int(t.shape[1]) for t in planes)
+    group_block_sizes = sorted(
+        int(kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size)
+        for g in containing
+    )
+    return plane_block_sizes == group_block_sizes
+
+
 def ordered_scheduler_groups_for_layer(
     layer_name: str,
     entry: _KVEntry,
@@ -120,11 +149,17 @@ def ordered_scheduler_groups_for_layer(
     layers, each sub-tensor corresponds to a distinct scheduler group.
     """
     planes = _entry_planes(entry)
+    containing = _containing_groups_for_layer(layer_name, kv_cache_config)
+    # Config-verified multi-plane bundle: every plane's block size matches a
+    # distinct scheduler group's configured block size. Checked before the
+    # shape-based kernel-native test so equal-block-size bundles (whose
+    # shapes collide with MLA/DSA layouts) are not collapsed onto one group.
+    if _planes_match_config_groups(planes, containing, kv_cache_config):
+        return list(containing)
     if _is_kernel_native_tuple(entry):
         g = _primary_scheduler_group_for_layer(layer_name, kv_cache_config)
         return [g] * len(planes)
 
-    containing = _containing_groups_for_layer(layer_name, kv_cache_config)
     if len(containing) == len(planes):
         return containing
     # More planes than groups: some groups contribute multiple tensors
@@ -244,13 +279,37 @@ def build_flat_kv_caches(
                 f"layer {layer_name}: {len(planes)} planes vs "
                 f"{len(groups)} scheduler groups"
             )
+        # Config-verified multi-spec bundle: every plane's block size matches
+        # a distinct scheduler group's configured block size. Checked before
+        # _is_kernel_native_tuple because equal-block-size bundles can
+        # collide with MLA/DSA_C8 shapes that detect() cannot disambiguate;
+        # the MultiPlaneBundle tag carries this provenance into detection.
+        # Single-spec tuples (e.g. DSA_C8 with one shared block size) fail
+        # the multiset match and keep their kernel-native handling.
+        if (
+            bundle_multi_spec
+            and _planes_match_config_groups(
+                planes,
+                _containing_groups_for_layer(layer_name, kv_cache_config),
+                kv_cache_config,
+            )
+            and _keep_planes_bundled(entry)
+        ):
+            flat[layer_name] = MultiPlaneBundle(planes)
+            sched_by_layer.append(groups[0])
+            bundled = True
+            continue
         if _is_kernel_native_tuple(entry):
             flat[layer_name] = entry
             sched_by_layer.append(groups[0])
             bundled = True
             continue
+        # Fallback bundle branch: heterogeneous-block-size or multi-plane-per-
+        # group entries (e.g. 8 planes over 7 groups with duplicated indexer
+        # views). Detection classifies these via the block-size heuristic;
+        # the tag is applied for consistency with the config-verified branch.
         if bundle_multi_spec and _keep_planes_bundled(entry):
-            flat[layer_name] = tuple(planes)
+            flat[layer_name] = MultiPlaneBundle(planes)
             sched_by_layer.append(groups[0])
             bundled = True
             continue

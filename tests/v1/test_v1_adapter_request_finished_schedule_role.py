@@ -59,7 +59,6 @@ pytest.importorskip("lmcache")
 pytest.importorskip("vllm")
 
 # Third Party
-# Third Party (after importorskip)
 from vllm.v1.request import RequestStatus  # noqa: E402
 
 # First Party

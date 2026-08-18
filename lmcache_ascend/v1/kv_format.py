@@ -9,6 +9,23 @@ import torch
 
 logger = init_logger(__name__)
 
+
+# Constructor-applied provenance tag: marks a tuple of independently paged KV
+# planes bundled by build_flat_kv_caches after config verification
+# (see _planes_match_config_groups in integration/vllm/multi_spec_flatten.py).
+# Equal-block-size bundles are shape-indistinguishable from plain (K, V) /
+# MLA / DSA tuples, so shape-based heuristics alone cannot classify them;
+# the tag is the only positive proof of independent per-plane paging.
+class MultiPlaneBundle(tuple):
+    """Tuple subclass tagging N independently paged planes of one layer.
+
+    Behaves exactly like a plain tuple of tensors downstream; only format
+    detection (``_is_multi_plane_tuple`` / ``KVCacheFormat.detect``) consults
+    the tag. Untagged tuples keep the conservative shape heuristics.
+    """
+
+    __slots__ = ()
+
 # Shared type alias: unifies single-tensor layers with multi-view tuple/list
 # entries so _is_shared_storage_blob and callers accept all per-layer shapes.
 _BlobEntry = Union[torch.Tensor, Tuple[torch.Tensor, ...], List[torch.Tensor]]
@@ -34,6 +51,11 @@ def _plane_block_size(tensor: torch.Tensor, *, is_310p: bool = False) -> int:
 # connector to the fused multi-plane kernel instead of SEPARATE_KV / DSA_C8.
 def _is_multi_plane_tuple(cache_entry: Sequence[torch.Tensor]) -> bool:
     """True when planes have heterogeneous block sizes (independent paging)."""
+    # A MultiPlaneBundle provenance tag is positive proof of independent
+    # paging even when all planes share one block size; the bundling path
+    # only tags config-verified bundles, so the tag is trusted directly.
+    if isinstance(cache_entry, MultiPlaneBundle):
+        return True
     # Shared-storage blobs are one physical allocation under one scheduler group,
     # so block_size is uniform by construction — they are never multi-plane.
     if _is_shared_storage_blob(cache_entry):

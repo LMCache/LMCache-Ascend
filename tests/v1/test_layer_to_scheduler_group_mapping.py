@@ -18,7 +18,7 @@ from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     build_layer_to_scheduler_groups,
     ordered_scheduler_groups_for_layer,
 )
-from lmcache_ascend.v1.kv_format import KVCacheFormat
+from lmcache_ascend.v1.kv_format import KVCacheFormat, MultiPlaneBundle
 
 # Test data: spec schedules used to generate multi-spec sub-tensor fixtures.
 DSV4_CR4_SCHEDULE = (
@@ -283,3 +283,133 @@ def test_bundle_flatten_preserves_multi_spec_layers(ds4_config) -> None:
     assert len(flat[L3]) == 4
     assert len(sched) == 5
     assert len(layer_to_groups[L2]) == 8
+
+
+def _equal_bs_two_group_config() -> SimpleNamespace:
+    """L0 split across two scheduler groups that both use block size 128."""
+    groups = [
+        SimpleNamespace(
+            kv_cache_spec=Compress4AttentionSpec(128), layer_names=[L0]
+        ),
+        SimpleNamespace(
+            kv_cache_spec=SWAAttentionSpec(128), layer_names=[L0]
+        ),
+    ]
+    return SimpleNamespace(kv_cache_groups=groups)
+
+
+def test_equal_block_size_bundle_detects_multi_plane() -> None:
+    """Tagged bundles detect as MULTI_PLANE_KV even with equal block sizes.
+
+    Two independently allocated planes with the same block_size are shape-
+    indistinguishable from a plain (K, V) pair, so only the constructor-
+    applied provenance tag can route them to the fused multi-plane kernel.
+    """
+    # Same block size, different hidden: plain tuple would detect as MLA_KV.
+    p0 = _tensor(128, hidden=512)
+    p1 = _tensor(128, hidden=128)
+    assert (
+        KVCacheFormat.detect([MultiPlaneBundle((p0, p1))])
+        == KVCacheFormat.MULTI_PLANE_KV
+    )
+    # Fully equal shapes: plain tuple would detect as SEPARATE_KV.
+    p2 = _tensor(128, hidden=512)
+    assert (
+        KVCacheFormat.detect([MultiPlaneBundle((p0, p2))])
+        == KVCacheFormat.MULTI_PLANE_KV
+    )
+    # Untagged plain tuples keep the conservative heuristic.
+    assert KVCacheFormat.detect([(p0, p1)]) == KVCacheFormat.MLA_KV
+    assert KVCacheFormat.detect([(p0, p2)]) == KVCacheFormat.SEPARATE_KV
+
+
+def test_flatten_equal_block_size_bundle_is_tagged() -> None:
+    """Equal-block-size planes in separate scheduler groups stay MULTI_PLANE.
+
+    Regression for the format-detection edge case: the bundle is created
+    because the planes belong to different scheduler groups, and the
+    provenance tag makes detect() classify it correctly instead of
+    SEPARATE_KV / MLA_KV / DSA_C8_KV.
+    """
+    config = _equal_bs_two_group_config()
+    # Same hidden: an untagged flatten output would detect as SEPARATE_KV.
+    kv = {L0: [_tensor(128, hidden=576), _tensor(128, hidden=576)]}
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(kv, config)
+    assert bundled is True
+    assert isinstance(flat[L0], MultiPlaneBundle)
+    assert isinstance(flat[L0], tuple)
+    assert len(flat[L0]) == 2
+    assert layer_to_groups[L0] == [0, 1]
+    assert sched == (0,)
+    assert KVCacheFormat.detect([flat[L0]]) == KVCacheFormat.MULTI_PLANE_KV
+
+
+def test_flatten_equal_block_size_distinct_hidden_bundle_is_tagged() -> None:
+    """Equal block size with distinct hiddens must not fall to MLA/DSA paths.
+
+    Without the config-first bundle decision this entry would detect as
+    MLA_KV (2-plane) and collapse to a single scheduler group.
+    """
+    config = _equal_bs_two_group_config()
+    kv = {L0: [_tensor(128, hidden=576), _tensor(128, hidden=128)]}
+    flat, _, layer_to_groups, bundled = build_flat_kv_caches(kv, config)
+    assert bundled is True
+    assert isinstance(flat[L0], MultiPlaneBundle)
+    assert layer_to_groups[L0] == [0, 1]
+    assert KVCacheFormat.detect([flat[L0]]) == KVCacheFormat.MULTI_PLANE_KV
+
+
+def test_equal_block_size_group_mapping_not_collapsed() -> None:
+    """Group mapping uses scheduler config, not shape-based format detection."""
+    config = _equal_bs_two_group_config()
+    entry = [_tensor(128, hidden=576), _tensor(128, hidden=128)]
+    assert ordered_scheduler_groups_for_layer(L0, entry, config) == [0, 1]
+
+
+@pytest.mark.parametrize("bundle_enabled", [True, False])
+def test_dsa_c8_shaped_entry_stays_kernel_native_on_multigroup_layer(
+    ds4_config, monkeypatch: pytest.MonkeyPatch, bundle_enabled: bool
+) -> None:
+    """DSA_C8-shaped tensors keep kernel-native handling on multigroup layers.
+
+    All four tensors use block size 128 while L3's scheduler groups are
+    configured (128, 128, 64, 64): the multiset mismatch proves these are
+    one spec's DSA_C8 layout rather than independent planes, so no
+    provenance tag is applied and detection stays DSA_C8_KV.
+    """
+    # Local
+    from .conftest_ds4 import set_bundle_multi_spec_env
+
+    set_bundle_multi_spec_env(monkeypatch, enabled=bundle_enabled)
+    entry = _dsa_c8_entry()
+    flat, sched, layer_to_groups, bundled = build_flat_kv_caches(
+        {L3: entry}, ds4_config
+    )
+    assert bundled is True
+    assert flat[L3] is entry
+    assert not isinstance(flat[L3], MultiPlaneBundle)
+    assert sched == (8,)
+    assert layer_to_groups[L3] == [8, 8, 8, 8]
+    assert KVCacheFormat.detect([flat[L3]]) == KVCacheFormat.DSA_C8_KV
+
+
+def test_compress128_l3_bundle_tagged_with_matching_block_sizes(
+    ds4_config,
+) -> None:
+    """Planes matching group block sizes exactly are tagged as multi-plane.
+
+    L3's fixture planes (128, 128, 64, 64) match its scheduler groups'
+    configured block sizes, so the bundle is config-verified and carries
+    the provenance tag even though detection would also succeed via the
+    heterogeneous-block-size heuristic.
+    """
+    # Local
+    from .conftest_ds4 import make_ds4_kv_caches_dict
+
+    dev = torch.device("cpu")
+    kv_dict = make_ds4_kv_caches_dict(dev, num_blocks=8)
+    flat, _, layer_to_groups, _ = build_flat_kv_caches({L3: kv_dict[L3]}, ds4_config)
+    assert isinstance(flat[L3], MultiPlaneBundle)
+    assert len(flat[L3]) == 4
+    assert layer_to_groups[L3] == [8, 9, 10, 11]
+    assert KVCacheFormat.detect([flat[L3]]) == KVCacheFormat.MULTI_PLANE_KV

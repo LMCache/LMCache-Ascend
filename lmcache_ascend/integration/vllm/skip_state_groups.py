@@ -14,6 +14,9 @@ from lmcache.logging import init_logger
 from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
+# First Party
+from lmcache_ascend.v1.kv_format import MultiPlaneBundle
+
 logger = init_logger(__name__)
 
 _KVEntry = Union[torch.Tensor, tuple[torch.Tensor, ...], list[torch.Tensor]]
@@ -155,7 +158,15 @@ def _filter_multi_plane_entry(
     entry: tuple[torch.Tensor, ...] | list[torch.Tensor],
     active_indices: Sequence[int],
 ) -> tuple[torch.Tensor, ...] | list[torch.Tensor]:
-    """Slice tuple/list entries to active plane indices."""
+    """Slice tuple/list entries to active plane indices.
+
+    Preserves a ``MultiPlaneBundle`` provenance tag: a filtered bundle is
+    still a set of independently paged planes, and dropping the tag would
+    make format detection fall back to the shape heuristic (misclassifying
+    equal-block-size bundles as SEPARATE_KV / MLA_KV).
+    """
+    if isinstance(entry, MultiPlaneBundle):
+        return MultiPlaneBundle(entry[i] for i in active_indices)
     if isinstance(entry, tuple):
         return tuple(entry[i] for i in active_indices)
     return [entry[i] for i in active_indices]
