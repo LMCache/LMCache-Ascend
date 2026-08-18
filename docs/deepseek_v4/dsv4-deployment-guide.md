@@ -85,6 +85,29 @@ cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
 
+> **Important — `third_party/hcomm` must match the container's CANN version.**
+
+> 1. Check the container's CANN version:
+>    ```bash
+>    ls /usr/local/Ascend
+>    ```
+>    e.g. `8.5.0` (or `0.8.5`) means CANN 8.5; `9.0.0` (or `0.9.0`) means
+>    CANN 9.0.
+> 2. List available hcomm versions/tags from the upstream repository:
+>    <https://gitcode.com/cann/hcomm>
+>    Then switch the submodule to the tag that matches your CANN version
+>    **before** running `pip install`:
+>    ```bash
+>    cd third_party/hcomm
+>    git fetch --tags
+>    git checkout v8.5.0   # CANN 8.5.x; use the matching tag for other versions
+>    cd ../..
+>    ```
+> 3. If you switch (or roll back) the submodule, always rebuild:
+>    ```bash
+>    pip install -v --no-build-isolation -e .
+>    ```
+
 ---
 
 ## 4. Service Startup Configuration
