@@ -115,7 +115,6 @@ git clone -b v0.4.5 https://github.com/LMCache/LMCache.git
 cd LMCache
 export NO_CUDA_EXT=1
 python3 -m pip install -v --no-build-isolation --no-deps -e .
-python3 -m pip install sortedcontainers
 cd ..
 ```
 
@@ -163,7 +162,7 @@ Create `/mnt/sdb/<USER_ID>/p2p/lmcache-p2p-a.yaml` on Node A:
 ```yaml
 chunk_size: 1024
 local_cpu: true
-max_local_cpu_size: 16
+max_local_cpu_size: 1
 enable_async_loading: true
 use_layerwise: false
 numa_mode: "auto"
@@ -189,6 +188,7 @@ lmcache_worker_ports: [8500, 8501, 8502, 8503, 8504, 8505, 8506, 8507]
 extra_config:
   save_only_first_rank: true
   lookup_backoff_time: 0.001
+  first_rank_max_local_cpu_size: 150
 ```
 
 Create `/mnt/sdb/<USER_ID>/p2p/lmcache-p2p-b.yaml` on Node B. It is
@@ -226,7 +226,7 @@ export TASK_QUEUE_ENABLE=1
 export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 export VLLM_ENABLE_V1_MULTIPROCESSING=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
-export PYTHONHASHSEED=123
+export PYTHONHASHSEED=0
 export LMCACHE_TRACK_USAGE=false
 export GLOO_SOCKET_IFNAME=$NIC_NAME
 export TP_SOCKET_IFNAME=$NIC_NAME
@@ -249,7 +249,6 @@ vllm serve "$MODEL_PATH" \
     --host 0.0.0.0 \
     --port 8010 \
     --served-model-name dsv4 \
-    --no-enable-prefix-caching \
     --max-model-len 131072 \
     --max-num-batched-tokens 8192 \
     --max-num-seqs 16 \
