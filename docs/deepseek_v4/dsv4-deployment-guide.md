@@ -161,7 +161,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --quantization ascend \
     --port 8900 \
     --block-size 32 \
-    --no-disable-hybrid-kv-cache-manager \
     --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '
@@ -209,6 +208,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Flash-w8a8
     --quantization ascend \
     --port 8900 \
     --block-size 32 \
+    --no-disable-hybrid-kv-cache-manager \
     --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '
