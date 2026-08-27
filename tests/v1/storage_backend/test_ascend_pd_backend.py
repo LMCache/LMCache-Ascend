@@ -505,6 +505,48 @@ class TestAscendPDBackend:
         assert resp.alloc_failed is True
         backend.put.assert_not_called()
 
+    def test_push_mode_partial_alloc_failure_cleans_pd_entries(self):
+        """Partial push allocation rollback removes both receiver indexes."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
+            AscendPDReceiverMixin,
+        )
+
+        backend = _make_pd_backend_stub()
+        backend.data = {}
+        backend._pd_entries = {}
+        backend.put = lambda key, mem_obj: AscendPDBackend.put(backend, key, mem_obj)
+        allocated_obj = _make_mock_mem_obj()
+        backend.transfer_channel.get_local_buffer_refs.return_value = (
+            ["uuid-alloc"],
+            [42],
+        )
+        key0 = _make_key("partial-alloc-0")
+        key1 = _make_key("partial-alloc-1")
+
+        alloc_req = AllocRequest(
+            keys=[key0.to_string(), key1.to_string()],
+            fmt=MemoryFormat.KV_2LTD.value,
+            shape=list(DEFAULT_SHAPE),
+            dtype="bfloat16",
+            last_chunk_toks=256,
+        )
+
+        with patch(
+            "lmcache_ascend.v1.storage_backend.pd.receiver_mixin.allocate_with_retry",
+            side_effect=[allocated_obj, None],
+        ):
+            resp = AscendPDReceiverMixin._allocate_and_put(backend, alloc_req)
+
+        assert isinstance(resp, AscendAllocResponse)
+        assert resp.alloc_failed is True
+        assert key0 not in backend.data
+        assert key0 not in backend._pd_entries
+        assert key1 not in backend.data
+        assert key1 not in backend._pd_entries
+        allocated_obj.ref_count_down.assert_called_once()
+
     def test_pull_eager_flow(self):
         """Pull-eager: allocates, reads from sender, returns ack + callback."""
         # First Party
