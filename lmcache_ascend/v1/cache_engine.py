@@ -119,15 +119,21 @@ class AscendLMCacheEngine(LMCacheEngine):
             self.kv_events = ThreadSafeEventList()
 
     def _is_pd_receiver(self) -> bool:
-        return self.config.enable_pd and self.config.pd_role == "receiver"
+        config = getattr(self, "config", None)
+        return bool(
+            getattr(config, "enable_pd", False)
+            and getattr(config, "pd_role", None) == "receiver"
+        )
 
     def _release_pd_request_lease(self, request_id: Optional[str]) -> None:
         if not request_id or request_id == "unspecified":
             return
-        if not self._is_pd_receiver() or self.storage_manager is None:
+
+        storage_manager = getattr(self, "storage_manager", None)
+        if not self._is_pd_receiver() or storage_manager is None:
             return
 
-        pd_backend = self.storage_manager.storage_backends.get("PDBackend")
+        pd_backend = storage_manager.storage_backends.get("PDBackend")
         release_request_lease = getattr(pd_backend, "release_request_lease", None)
         if callable(release_request_lease):
             release_request_lease(request_id)
