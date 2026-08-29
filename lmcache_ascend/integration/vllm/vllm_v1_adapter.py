@@ -43,6 +43,28 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1Impl):
         self._late_finished_sending: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
 
+    def _apply_extra_config(self, config, vllm_config: "VllmConfig") -> None:
+        """Apply vLLM extra config, then reject unsupported combinations.
+
+        Runs before ``LMCacheManager`` is built and its services are started, so
+        a bad configuration is refused without leaving background threads or
+        sockets behind, and after the ``lmcache.`` extra-config keys have been
+        folded in.
+        """
+        super()._apply_extra_config(config, vllm_config)
+
+        cache_config = getattr(vllm_config, "cache_config", None)
+        if config.enable_blending and getattr(
+            cache_config, "enable_prefix_caching", False
+        ):
+            raise ValueError(
+                "Cacheblend is not compatible with vLLM's prefix cache. When "
+                "vLLM has already cached part of a request, LMCache retrieves "
+                "only the remaining suffix into the blend buffer, so blending "
+                "would run against a shifted KV window. Please start vLLM with "
+                "enable_prefix_caching=False."
+            )
+
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self.current_layer = 0
