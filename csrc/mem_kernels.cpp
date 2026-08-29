@@ -183,7 +183,7 @@ void multi_layer_kv_transfer_310p(
   // we require the kv ptr list to be on the device too
   const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
 
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   at_npu::native::OpCommand cmd;
   cmd.Name("multi_layer_kv_transfer_kernel_310p");
@@ -375,7 +375,7 @@ void load_and_reshape_flash(
   int num_blocks = key_cache.size(0);
   int hidden_dims = key_value.size(-1);
   const c10::OptionalDeviceGuard device_guard(device_of(key_cache));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   at::ScalarType scalar_type = key_value.scalar_type();
   at::ScalarType slot_type = slot_mapping.scalar_type();
@@ -425,7 +425,7 @@ void reshape_and_cache_back_flash(
   int num_blocks = key_cache.size(0);
   int hidden_dims = key_value.size(-1);
   const c10::OptionalDeviceGuard device_guard(device_of(key_cache));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
 
   at::ScalarType scalar_type = key_value.scalar_type();
   at::ScalarType slot_type = slot_mapping.scalar_type();

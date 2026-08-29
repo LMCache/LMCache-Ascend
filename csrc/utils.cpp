@@ -88,7 +88,7 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   // we require the kv ptr list to be on the device too
   const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
 
-  config.stream = c10_npu::getCurrentNPUStream().stream();
+  config.stream = c10_npu::getCurrentNPUStream().stream(false);
 
   auto ascendcPlatform =
       platform_ascendc::PlatformAscendCManager::GetInstance(config.socName);
@@ -152,7 +152,7 @@ void compute_single_layer_ub_params(const KVTransferDims &dims,
 
   const c10::OptionalDeviceGuard device_guard(device_of(vllm_cache));
 
-  ub_params.stream = c10_npu::getCurrentNPUStream().stream();
+  ub_params.stream = c10_npu::getCurrentNPUStream().stream(false);
   const char *socName = aclrtGetSocName();
 
   auto ascendcPlatform =

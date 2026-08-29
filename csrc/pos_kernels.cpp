@@ -175,7 +175,7 @@ void rotary_embedding_k_fused(torch::Tensor &oldPositions,
   uint8_t *cosSinCachePtr = get_kernel_ptr<uint8_t, torch::Tensor>(cosSinCache);
   uint8_t *keyOutPtr = keyPtr;
 
-  auto aclStream = c10_npu::getCurrentNPUStream().stream();
+  auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
 
   at_npu::native::OpCommand cmd;
   cmd.Name("fused_rope");
