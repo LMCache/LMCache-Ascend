@@ -1488,3 +1488,157 @@ def test_multi_layer_kv_transfer_dsa_format(
     )
 
     mem_allocator.close()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 1024])
+@pytest.mark.parametrize("num_layers", [1, 8])
+@pytest.mark.parametrize("num_heads", [8])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("head_size", [128])
+def test_multi_layer_kernel_int8(
+    num_tokens, num_layers, num_heads, block_size, head_size
+):
+    """int8 KV caches round trip through the multi layer kernel."""
+    device = "npu"
+    num_blocks = 256
+    dtype = torch.int8
+    hidden_dim_size = num_heads * head_size
+    page_buffer_size = num_blocks * block_size
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+    )
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+    )
+
+    def pointers_of(caches):
+        ptrs = torch.empty(num_layers, dtype=torch.int64, device="cpu")
+        for i in range(num_layers):
+            ptrs[i] = caches[i].data_ptr()
+        return ptrs.npu()
+
+    slot_mapping = random.sample(range(0, page_buffer_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    mem_allocator = PinMemoryAllocator(1024 * 1024 * 1024)
+    memory_obj = mem_allocator.allocate(
+        torch.Size([2, num_layers, num_tokens, hidden_dim_size]), dtype
+    )
+
+    # from_gpu, then to_gpu into a second set of paged caches
+    for caches, ptrs, direction in (
+        (kv_cache, pointers_of(kv_cache), True),
+        (kv_cache_new, pointers_of(kv_cache_new), False),
+    ):
+        lmc_ops.multi_layer_kv_transfer(
+            memory_obj.tensor,
+            ptrs,
+            slot_mapping,
+            caches[0].device,
+            page_buffer_size,
+            direction,
+            False,
+            1,  # MERGED_KV
+            hidden_dim_size,  # k_hidden_dims
+            hidden_dim_size,  # v_hidden_dims
+            0,  # dsa_hidden_dims
+        )
+    torch.npu.synchronize()
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
+    )
+
+    mem_allocator.close()
+
+
+@pytest.mark.parametrize("num_tokens", [256, 1024])
+@pytest.mark.parametrize("num_layers", [1, 8])
+@pytest.mark.parametrize("num_blocks", [1000])
+@pytest.mark.parametrize("block_size", [16])
+@pytest.mark.parametrize("num_heads", [8])
+@pytest.mark.parametrize("head_size", [128])
+@pytest.mark.parametrize("token_major", [True, False])
+def test_single_layer_kernel_int8(
+    num_tokens, num_layers, num_blocks, block_size, num_heads, head_size, token_major
+):
+    """int8 KV caches round trip through the single layer kernel."""
+    device = "npu"
+    kvs = 2
+    dtype = torch.int8
+    hidden_dim_size = num_heads * head_size
+
+    kv_cache = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+    )
+    kv_cache_new = generate_kv_cache_paged_list_tensors(
+        num_blocks,
+        device,
+        block_size=block_size,
+        dtype=dtype,
+        num_layers=num_layers,
+        num_heads=num_heads,
+        head_size=head_size,
+    )
+
+    slot_mapping = random.sample(range(0, num_blocks * block_size), num_tokens)
+    slot_mapping = torch.tensor(slot_mapping, device=device)
+
+    shape = (
+        (num_tokens, kvs, hidden_dim_size)
+        if token_major
+        else (kvs, num_tokens, hidden_dim_size)
+    )
+    tmp_gpu_buffer = torch.empty(shape, dtype=dtype, device=device)
+
+    for layer_id in range(num_layers):
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache[layer_id],
+            slot_mapping,
+            True,
+            1,  # MERGED_KV
+            token_major,
+            True,  # vllm_two_major
+        )
+        lmc_ops.single_layer_kv_transfer(
+            tmp_gpu_buffer,
+            kv_cache_new[layer_id],
+            slot_mapping,
+            False,
+            1,  # MERGED_KV
+            token_major,
+            True,  # vllm_two_major
+        )
+    torch.npu.synchronize()
+
+    check_paged_kv_cache_equal(
+        kv_cache,
+        kv_cache_new,
+        slot_mapping,
+        num_heads=num_heads,
+        head_size=head_size,
+    )

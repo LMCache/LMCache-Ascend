@@ -14,6 +14,14 @@ def create_npu_connector(hidden_dim, num_layers):
     return VLLMPagedMemNPUConnectorV2(hidden_dim, num_layers)
 
 
+def _random_kv(shape, dtype, device):
+    """Random KV data for either a floating point or an integer dtype."""
+    if dtype.is_floating_point:
+        return torch.rand(shape, dtype=dtype, device=device)
+    info = torch.iinfo(dtype)
+    return torch.randint(info.min, info.max + 1, shape, dtype=dtype, device=device)
+
+
 def generate_kv_cache_paged_list_tensors(
     num_blocks,
     device,
@@ -38,8 +46,7 @@ def generate_kv_cache_paged_list_tensors(
     shape = [num_blocks, block_size, head_size] if use_mla else vllm_shapes
 
     for i in range(num_layers):
-        kv = torch.rand(shape, dtype=dtype, device=device)
-        ret.append(kv)
+        ret.append(_random_kv(shape, dtype, device))
 
     return ret
 
