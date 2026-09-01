@@ -77,6 +77,11 @@ class WeightedSemaphore:
         """Number of slots currently available."""
         return self._available
 
+    @property
+    def capacity(self) -> int:
+        """Total slot capacity."""
+        return self._capacity
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -89,6 +94,8 @@ async def lifespan(app: FastAPI):
     app.state.total_clients = []
     app.state.prefiller_states = []
     app.state.prefiller_select_seq = 0
+    app.state.decoder_states = []
+    app.state.decoder_select_seq = 0
 
     # Build prefill clients with CSV-based broadcast pairing
     pref_hosts = global_args.prefiller_host
@@ -163,6 +170,11 @@ async def lifespan(app: FastAPI):
         len(dec_hosts) == 1 and len(dec_ports) == 1 and global_args.num_decoders > 1
     )
 
+    kv_bytes_per_token = compute_kv_bytes_per_token(global_args.model)
+    pd_capacity_slots = global_args.pd_buffer_size // (
+        kv_bytes_per_token * global_args.chunk_size
+    )
+
     for i, (host, port) in enumerate(decoder_pairs):
         decoder_base_url = f"http://{host}:{int(port)}"
         decode_client = httpx.AsyncClient(timeout=None, base_url=decoder_base_url)
@@ -175,14 +187,24 @@ async def lifespan(app: FastAPI):
             init_ports = list(global_args.decoder_init_port)
             alloc_ports = list(global_args.decoder_alloc_port)
 
-        app.state.decode_clients.append(
-            ClientInfo(
-                decode_client,
+        client_info = ClientInfo(
+            decode_client,
+            host=host,
+            init_port=init_ports,
+            alloc_port=alloc_ports,
+            name=f"decoder-{i}",
+            base_url=decoder_base_url,
+        )
+        app.state.decode_clients.append(client_info)
+        app.state.decoder_states.append(
+            DecoderState(
+                client_info=client_info,
+                name=client_info.name or f"decoder-{i}",
                 host=host,
+                port=int(port),
                 init_port=init_ports,
                 alloc_port=alloc_ports,
-                name=f"decoder-{i}",
-                base_url=decoder_base_url,
+                pd_buffer_semaphore=WeightedSemaphore(pd_capacity_slots),
             )
         )
 
@@ -190,16 +212,10 @@ async def lifespan(app: FastAPI):
 
     app.state.zmq_task = asyncio.create_task(zmq_pull_server())
 
-    global pd_buffer_semaphore
-    kv_bytes_per_token = compute_kv_bytes_per_token(global_args.model)
-    capacity_slots = global_args.pd_buffer_size // (
-        kv_bytes_per_token * global_args.chunk_size
-    )
-    pd_buffer_semaphore = WeightedSemaphore(capacity_slots)
     logger.info(
-        "PD buffer semaphore: capacity=%d slots"
+        "Per-decoder PD buffer semaphore: capacity=%d slots per decoder"
         " (%d bytes / (%d bytes/tok * %d chunk_size)) for model %s.",
-        capacity_slots,
+        pd_capacity_slots,
         global_args.pd_buffer_size,
         kv_bytes_per_token,
         global_args.chunk_size,
@@ -390,6 +406,51 @@ class PrefillerState:
         }
 
 
+@dataclass
+class DecoderState:
+    client_info: ClientInfo
+    name: str
+    host: str
+    port: int
+    init_port: list[int]
+    alloc_port: list[int]
+    pd_buffer_semaphore: WeightedSemaphore
+    active_decode_tokens: int = 0
+    active_decode_requests: int = 0
+    total_decode_tokens: int = 0
+    total_decode_requests: int = 0
+    failed_decode_requests: int = 0
+    last_error: Optional[str] = None
+    last_decode_ms: Optional[float] = None
+    decode_ms_ewma: Optional[float] = None  # Smoothed recent decode latency in ms.
+    last_success_ts: Optional[float] = None
+    last_selected_seq: int = 0
+
+    @property
+    def load_score(self) -> int:
+        return self.active_decode_tokens
+
+    def snapshot(self) -> dict:
+        return {
+            "name": self.name,
+            "host": self.host,
+            "port": self.port,
+            "init_port": self.init_port,
+            "alloc_port": self.alloc_port,
+            "active_decode_tokens": self.active_decode_tokens,
+            "active_decode_requests": self.active_decode_requests,
+            "load_score": self.load_score,
+            "total_decode_tokens": self.total_decode_tokens,
+            "total_decode_requests": self.total_decode_requests,
+            "failed_decode_requests": self.failed_decode_requests,
+            "last_error": self.last_error,
+            "last_decode_ms": self.last_decode_ms,
+            "decode_ms_ewma": self.decode_ms_ewma,
+            "pd_slots_available": self.pd_buffer_semaphore.available,
+            "pd_slots_capacity": self.pd_buffer_semaphore.capacity,
+        }
+
+
 # Initialize variables to hold the persistent clients
 app.state.prefill_clients = []
 app.state.decode_clients = []
@@ -397,6 +458,9 @@ app.state.total_clients = []
 app.state.prefiller_states = []
 app.state.prefiller_lock = asyncio.Lock()
 app.state.prefiller_select_seq = 0
+app.state.decoder_states = []
+app.state.decoder_lock = asyncio.Lock()
+app.state.decoder_select_seq = 0
 
 """
 client_request and tokenization client map
@@ -407,8 +471,6 @@ app.state.bound_clients = {}
 
 # Keep finished reqs
 app.state.finished_reqs = defaultdict(int)
-
-pd_buffer_semaphore: Optional[WeightedSemaphore] = None
 
 
 zmq_ctx = zmq.asyncio.Context()
@@ -494,7 +556,6 @@ def round_robin_pick_client(clients, idx):
 
 
 tokenization_round_robin_counter = itertools.count()
-decoder_round_robin_counter = itertools.count()
 
 
 BOUND_CLIENTS_MAX_NUM = 1024 * 1024
@@ -525,9 +586,38 @@ def pick_up_tokenization_client(request: Request) -> ClientInfo:
     return round_robin_pick_client(app.state.total_clients, idx)
 
 
-def pick_up_decoder_client() -> ClientInfo:
-    idx = next(decoder_round_robin_counter)
-    return round_robin_pick_client(app.state.decode_clients, idx)
+async def select_decoder(
+    prompt_token_count: int,
+) -> tuple[DecoderState, dict]:
+    if not app.state.decoder_states:
+        raise ValueError("No decoder clients configured")
+
+    async with app.state.decoder_lock:
+        candidate_loads = [state.snapshot() for state in app.state.decoder_states]
+        selected = min(
+            app.state.decoder_states,
+            key=lambda state: (
+                state.load_score,
+                state.last_selected_seq,
+                state.name,
+            ),
+        )
+        selected_load_before = selected.load_score
+        app.state.decoder_select_seq += 1
+        selected.last_selected_seq = app.state.decoder_select_seq
+        selected.active_decode_tokens += prompt_token_count
+        selected.active_decode_requests += 1
+        selected.total_decode_tokens += prompt_token_count
+        selected.total_decode_requests += 1
+
+        return selected, {
+            "decoder_policy": "min_active_decode_tokens",
+            "decode_score": prompt_token_count,
+            "selected_decoder": selected.name,
+            "selected_decoder_load_before": selected_load_before,
+            "selected_decoder_state_after": selected.snapshot(),
+            "candidate_decoder_loads": candidate_loads,
+        }
 
 
 async def select_prefiller(
@@ -596,6 +686,37 @@ async def release_prefiller(
         return prefiller_state.snapshot()
 
 
+async def release_decoder(
+    decoder_state: DecoderState,
+    prompt_token_count: int,
+    success: bool,
+    decode_ms: Optional[float] = None,
+    error: Optional[str] = None,
+) -> dict:
+    async with app.state.decoder_lock:
+        decoder_state.active_decode_tokens = max(
+            0, decoder_state.active_decode_tokens - prompt_token_count
+        )
+        decoder_state.active_decode_requests = max(
+            0, decoder_state.active_decode_requests - 1
+        )
+        if success:
+            decoder_state.last_error = None
+            decoder_state.last_success_ts = time.time()
+            if decode_ms is not None:
+                decoder_state.last_decode_ms = decode_ms
+                if decoder_state.decode_ms_ewma is None:
+                    decoder_state.decode_ms_ewma = decode_ms
+                else:
+                    decoder_state.decode_ms_ewma = (
+                        decoder_state.decode_ms_ewma * 0.8 + decode_ms * 0.2
+                    )
+        else:
+            decoder_state.failed_decode_requests += 1
+            decoder_state.last_error = error
+        return decoder_state.snapshot()
+
+
 def _format_metric(value, digits: int = 3) -> str:
     if value is None:
         return "-"
@@ -639,10 +760,50 @@ def _format_candidate_prefillers(candidate_loads: list[dict]) -> str:
     )
 
 
+def _format_decoder_active(state: dict) -> str:
+    if not state:
+        return "-"
+    return (
+        f"{state.get('active_decode_requests', '-')}"
+        f"req/{state.get('active_decode_tokens', '-')}tok"
+    )
+
+
+def _format_decoder_candidate(state: dict) -> str:
+    name = state.get("name", "-")
+    host = state.get("host", "-")
+    port = state.get("port", "-")
+    return (
+        f"{name}@{host}:{port}"
+        f"(load={state.get('load_score', '-')},"
+        f"active={_format_decoder_active(state)},"
+        f"pd_slots={state.get('pd_slots_available', '-')}/"
+        f"{state.get('pd_slots_capacity', '-')},"
+        f"total={state.get('total_decode_requests', '-')}req/"
+        f"{state.get('total_decode_tokens', '-')}tok,"
+        f"failed={state.get('failed_decode_requests', '-')},"
+        f"last_ms={_format_metric(state.get('last_decode_ms'))},"
+        f"ewma_ms={_format_metric(state.get('decode_ms_ewma'))})"
+    )
+
+
+def _format_candidate_decoders(candidate_loads: list[dict]) -> str:
+    if not candidate_loads:
+        return "[]"
+    return (
+        "["
+        + "; ".join(_format_decoder_candidate(state) for state in candidate_loads)
+        + "]"
+    )
+
+
 def _format_route_summary(event: str, payload: dict) -> str:
-    selected_state = payload.get("selected_prefiller_state_after") or {}
-    released_state = payload.get("prefiller_state_after_release") or {}
-    active_state = released_state or selected_state
+    prefiller_selected_state = payload.get("selected_prefiller_state_after") or {}
+    prefiller_released_state = payload.get("prefiller_state_after_release") or {}
+    prefiller_active_state = prefiller_released_state or prefiller_selected_state
+    decoder_selected_state = payload.get("selected_decoder_state_after") or {}
+    decoder_released_state = payload.get("decoder_state_after_release") or {}
+    decoder_active_state = decoder_released_state or decoder_selected_state
 
     lines = [
         "===============================",
@@ -657,11 +818,22 @@ def _format_route_summary(event: str, payload: dict) -> str:
         f" - pd_slot_wait_ms: {_format_metric(payload.get('pd_slot_wait_ms'))}",
         " - prefiller_load_before: "
         f"{payload.get('selected_prefiller_load_before', '-')}",
-        f" - prefiller_load_after_select: {selected_state.get('load_score', '-')}",
-        f" - prefiller_load_after_release: {released_state.get('load_score', '-')}",
-        f" - prefiller_active_current: {_format_prefiller_active(active_state)}",
+        " - prefiller_load_after_select: "
+        f"{prefiller_selected_state.get('load_score', '-')}",
+        " - prefiller_load_after_release: "
+        f"{prefiller_released_state.get('load_score', '-')}",
+        f" - decoder_load_before: {payload.get('selected_decoder_load_before', '-')}",
+        " - decoder_load_after_select: "
+        f"{decoder_selected_state.get('load_score', '-')}",
+        " - decoder_load_after_release: "
+        f"{decoder_released_state.get('load_score', '-')}",
+        " - prefiller_active_current: "
+        f"{_format_prefiller_active(prefiller_active_state)}",
+        f" - decoder_active_current: {_format_decoder_active(decoder_active_state)}",
         " - candidate_prefiller_loads: "
         f"{_format_candidate_prefillers(payload.get('candidate_prefiller_loads', []))}",
+        " - candidate_decoder_loads: "
+        f"{_format_candidate_decoders(payload.get('candidate_decoder_loads', []))}",
     ]
 
     if payload.get("kv_ready_wait_ms") is not None:
@@ -713,12 +885,13 @@ async def handle_completions(request: Request):
     prompt_token_count = 0
     prefiller_state = None
     prefiller_released = False
+    decoder_state = None
+    decoder_released = False
     route_info = {}
     try:
         req_data = await request.json()
 
         tokenization_client = pick_up_tokenization_client(request)
-        decode_client = pick_up_decoder_client()
 
         tokenize_output = await send_request_to_service(
             tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
@@ -726,17 +899,24 @@ async def handle_completions(request: Request):
         tokenize_output = tokenize_output.json()
         prompt_token_count = len(tokenize_output["tokens"])
 
-        prefiller_state, route_info = await select_prefiller(prompt_token_count)
-        prefill_client = prefiller_state.client_info
+        decoder_state, decoder_info = await select_decoder(prompt_token_count)
+        route_info = dict(decoder_info)
         route_info.update(
             {
                 "req_id": req_id,
                 "endpoint": "/v1/completions",
                 "prompt_token_count": prompt_token_count,
-                "chosen_prefiller": prefiller_state.name,
-                "chosen_decoder": decode_client.name,
+                "chosen_decoder": decoder_state.name,
                 "tokenization_client": tokenization_client.name,
-                "decoder_policy": "round_robin",
+            }
+        )
+        decode_client = decoder_state.client_info
+        prefiller_state, prefiller_info = await select_prefiller(prompt_token_count)
+        route_info.update(prefiller_info)
+        prefill_client = prefiller_state.client_info
+        route_info.update(
+            {
+                "chosen_prefiller": prefiller_state.name,
             }
         )
         log_route_event("proxy_route_selected", route_info)
@@ -748,11 +928,10 @@ async def handle_completions(request: Request):
         # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
         slots = math.ceil(prompt_token_count / global_args.chunk_size)
         pd_slot_wait_ms = 0.0
-        if pd_buffer_semaphore is not None:
-            pd_slot_wait_start = time.time()
-            await pd_buffer_semaphore.acquire(slots)
-            pd_slot_wait_ms = (time.time() - pd_slot_wait_start) * 1000
-            acquired = True
+        pd_slot_wait_start = time.time()
+        await decoder_state.pd_buffer_semaphore.acquire(slots)
+        pd_slot_wait_ms = (time.time() - pd_slot_wait_start) * 1000
+        acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -809,7 +988,7 @@ async def handle_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
-            nonlocal pd_slots_released
+            nonlocal decoder_released, pd_slots_released
             kv_ready_wait_ms = None
             decode_stream_ms = None
             stream_error = None
@@ -837,8 +1016,8 @@ async def handle_completions(request: Request):
                 kv_ready_wait_start = time.time()
                 await wait_decode_kv_ready(req_id, num_tp_rank)
                 kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
-                if pd_buffer_semaphore is not None and acquired:
-                    await pd_buffer_semaphore.release(slots)
+                if acquired:
+                    await decoder_state.pd_buffer_semaphore.release(slots)
                     pd_slots_released = True
 
                 decode_stream_start = time.time()
@@ -851,18 +1030,25 @@ async def handle_completions(request: Request):
                 stream_error = str(exc)
                 raise
             finally:
-                if (
-                    pd_buffer_semaphore is not None
-                    and acquired
-                    and not pd_slots_released
-                ):
-                    await pd_buffer_semaphore.release(slots)
+                if acquired and not pd_slots_released:
+                    await decoder_state.pd_buffer_semaphore.release(slots)
                     pd_slots_released = True
+                decoder_release_state = None
+                if decoder_state is not None and not decoder_released:
+                    decoder_release_state = await release_decoder(
+                        decoder_state,
+                        prompt_token_count,
+                        success=stream_error is None,
+                        decode_ms=decode_stream_ms,
+                        error=stream_error,
+                    )
+                    decoder_released = True
                 complete_payload = dict(route_log_base)
                 complete_payload.update(
                     {
                         "kv_ready_wait_ms": kv_ready_wait_ms,
                         "decode_stream_ms": decode_stream_ms,
+                        "decoder_state_after_release": decoder_release_state,
                         "total_ms": (time.time() - st) * 1000,
                         "error": stream_error,
                     }
@@ -880,8 +1066,17 @@ async def handle_completions(request: Request):
                 error=str(e),
             )
             route_info["prefiller_state_after_release"] = release_state
-        if pd_buffer_semaphore is not None and acquired and not pd_slots_released:
-            await pd_buffer_semaphore.release(slots)
+        if decoder_state is not None and not decoder_released:
+            release_state = await release_decoder(
+                decoder_state,
+                prompt_token_count,
+                success=False,
+                error=str(e),
+            )
+            route_info["decoder_state_after_release"] = release_state
+            decoder_released = True
+        if decoder_state is not None and acquired and not pd_slots_released:
+            await decoder_state.pd_buffer_semaphore.release(slots)
             pd_slots_released = True
         if route_info:
             error_payload = dict(route_info)
@@ -917,12 +1112,13 @@ async def handle_chat_completions(request: Request):
     prompt_token_count = 0
     prefiller_state = None
     prefiller_released = False
+    decoder_state = None
+    decoder_released = False
     route_info = {}
     try:
         req_data = await request.json()
 
         tokenization_client = pick_up_tokenization_client(request)
-        decode_client = pick_up_decoder_client()
 
         # For chat completions, we need to tokenize the messages
         tokenize_output = await send_request_to_service(
@@ -931,17 +1127,24 @@ async def handle_chat_completions(request: Request):
         tokenize_output = tokenize_output.json()
         prompt_token_count = len(tokenize_output["tokens"])
 
-        prefiller_state, route_info = await select_prefiller(prompt_token_count)
-        prefill_client = prefiller_state.client_info
+        decoder_state, decoder_info = await select_decoder(prompt_token_count)
+        route_info = dict(decoder_info)
         route_info.update(
             {
                 "req_id": req_id,
                 "endpoint": "/v1/chat/completions",
                 "prompt_token_count": prompt_token_count,
-                "chosen_prefiller": prefiller_state.name,
-                "chosen_decoder": decode_client.name,
+                "chosen_decoder": decoder_state.name,
                 "tokenization_client": tokenization_client.name,
-                "decoder_policy": "round_robin",
+            }
+        )
+        decode_client = decoder_state.client_info
+        prefiller_state, prefiller_info = await select_prefiller(prompt_token_count)
+        route_info.update(prefiller_info)
+        prefill_client = prefiller_state.client_info
+        route_info.update(
+            {
+                "chosen_prefiller": prefiller_state.name,
             }
         )
         log_route_event("proxy_route_selected", route_info)
@@ -958,11 +1161,10 @@ async def handle_chat_completions(request: Request):
         # Acquire ceil(L/chunk_size) PD buffer slots before prefill.
         slots = math.ceil(prompt_token_count / global_args.chunk_size)
         pd_slot_wait_ms = 0.0
-        if pd_buffer_semaphore is not None:
-            pd_slot_wait_start = time.time()
-            await pd_buffer_semaphore.acquire(slots)
-            pd_slot_wait_ms = (time.time() - pd_slot_wait_start) * 1000
-            acquired = True
+        pd_slot_wait_start = time.time()
+        await decoder_state.pd_buffer_semaphore.acquire(slots)
+        pd_slot_wait_ms = (time.time() - pd_slot_wait_start) * 1000
+        acquired = True
 
         disagg_spec = {
             "req_id": req_id,
@@ -1025,7 +1227,7 @@ async def handle_chat_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
-            nonlocal pd_slots_released
+            nonlocal decoder_released, pd_slots_released
             kv_ready_wait_ms = None
             decode_stream_ms = None
             stream_error = None
@@ -1069,8 +1271,8 @@ async def handle_chat_completions(request: Request):
                 kv_ready_wait_start = time.time()
                 await wait_decode_kv_ready(req_id, num_tp_rank)
                 kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
-                if pd_buffer_semaphore is not None and acquired:
-                    await pd_buffer_semaphore.release(slots)
+                if acquired:
+                    await decoder_state.pd_buffer_semaphore.release(slots)
                     pd_slots_released = True
 
                 decode_stream_start = time.time()
@@ -1125,18 +1327,25 @@ async def handle_chat_completions(request: Request):
                 stream_error = str(exc)
                 raise
             finally:
-                if (
-                    pd_buffer_semaphore is not None
-                    and acquired
-                    and not pd_slots_released
-                ):
-                    await pd_buffer_semaphore.release(slots)
+                if acquired and not pd_slots_released:
+                    await decoder_state.pd_buffer_semaphore.release(slots)
                     pd_slots_released = True
+                decoder_release_state = None
+                if decoder_state is not None and not decoder_released:
+                    decoder_release_state = await release_decoder(
+                        decoder_state,
+                        prompt_token_count,
+                        success=stream_error is None,
+                        decode_ms=decode_stream_ms,
+                        error=stream_error,
+                    )
+                    decoder_released = True
                 complete_payload = dict(route_log_base)
                 complete_payload.update(
                     {
                         "kv_ready_wait_ms": kv_ready_wait_ms,
                         "decode_stream_ms": decode_stream_ms,
+                        "decoder_state_after_release": decoder_release_state,
                         "total_ms": (time.time() - st) * 1000,
                         "error": stream_error,
                     }
@@ -1154,8 +1363,17 @@ async def handle_chat_completions(request: Request):
                 error=str(e),
             )
             route_info["prefiller_state_after_release"] = release_state
-        if pd_buffer_semaphore is not None and acquired and not pd_slots_released:
-            await pd_buffer_semaphore.release(slots)
+        if decoder_state is not None and not decoder_released:
+            release_state = await release_decoder(
+                decoder_state,
+                prompt_token_count,
+                success=False,
+                error=str(e),
+            )
+            route_info["decoder_state_after_release"] = release_state
+            decoder_released = True
+        if decoder_state is not None and acquired and not pd_slots_released:
+            await decoder_state.pd_buffer_semaphore.release(slots)
             pd_slots_released = True
         if route_info:
             error_payload = dict(route_info)
