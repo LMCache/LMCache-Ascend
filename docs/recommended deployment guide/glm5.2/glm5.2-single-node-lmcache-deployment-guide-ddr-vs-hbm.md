@@ -1,9 +1,8 @@
-# GLM-5.2 (w8a8) Single-Node Deployment Guide — DDR + SSD
+# GLM-5.2 (w8a8) Single-Node Deployment Guide — DDR vs HBM
 
 Deploy GLM-5.2-w8a8 as a single vLLM service on one Ascend server with
-LMCache-Ascend providing a two-tier KV cache — CPU memory (DDR) plus a
-local SSD backend — and benchmark it against the native HBM
-prefix-caching baseline.
+LMCache-Ascend providing a CPU-memory (DDR) KV cache tier, and benchmark
+it against the native HBM prefix-caching baseline.
 
 > **Hardware validation scope**: verified on a single Ubuntu server with
 > 8 × Ascend 910 NPUs (2 chips per card, 16 chips); the service maps
@@ -15,12 +14,11 @@ prefix-caching baseline.
 Create a workspace on the host. Replace `<USER_ID>` with your identifier:
 
 ```bash
-mkdir -p /mnt/sdb/<USER_ID>                   # workspace
-mkdir -p /mnt/sdb/<USER_ID>/lmcache_ssd_dir   # disk KV cache (SSD backend)
+mkdir -p /mnt/sdb/<USER_ID>
 ```
 
-Both directories are mounted into the container and hold the source
-trees, configuration files, benchmarks, and disk cache. Confirm the
+The directory is mounted into the container at the same path and holds
+the source trees, configuration files, and benchmarks. Confirm the
 GLM-5.2-w8a8 weights exist under `/mnt/sdb/models/GLM-5.2-w8a8`.
 
 ---
@@ -51,7 +49,6 @@ docker run -itd \
   -v /mnt/shared/models:/mnt/shared/models \
   -v /mnt/sdb/models:/mnt/sdb/models \
   -v /mnt/sdb/<USER_ID>:/mnt/sdb/<USER_ID> \
-  -v /mnt/sdb/<USER_ID>/lmcache_ssd_dir:/mnt/lmcache_ssd_dir \
   --name vllm-ascend-<USER_ID> \
   --entrypoint /bin/bash \
   quay.io/ascend/vllm-ascend:glm5.2-a3
@@ -112,14 +109,13 @@ git clone -b v0.4.3 https://github.com/LMCache/LMCache.git
 chunk_size: 512          # tokens per KV chunk
 local_cpu: True          # KV in CPU memory, saves NPU HBM
 max_local_cpu_size: 50   # CPU cache cap (GB), LRU eviction beyond
-local_disk: True                        # SSD backend on
-local_disk_path: "/mnt/lmcache_ssd_dir" # SSD cache path inside the container
-max_local_disk_size: 200                # SSD cache cap (GB)
 use_layerwise: False
 enable_async_loading: False   # covered by store_async
 store_async: True        # background writes, never blocks the engine
 extra_config:
-  save_only_first_rank: False   # every TP rank stores its own KV (see Tips)
+  save_only_first_rank: true
+  lookup_backoff_time: 0.001
+  first_rank_max_local_cpu_size: 150
 ```
 
 ### 4.2 Startup Script (with LMCache)
@@ -209,10 +205,5 @@ python multi-round-qa.py \
 > 1. **`PYTHONHASHSEED=0` is mandatory** — without it, per-process hash
 >    randomization makes the same tokens hash differently across the 16
 >    worker processes and the LMCache hit rate stays at zero.
-> 2. **`save_only_first_rank: false` is the key YAML switch** — with the
->    default `true`, only rank 0 stores KV and every other rank blocks on
->    a cross-rank retrieve (measured 3.01 s per call, >20x slowdown);
->    with `false`, all 8 TP ranks cache locally and retrieval drops to
->    0.0185 s per call (162x faster).
 > 3. **Measure the baseline without LMCache** (Section 4.3); everything
 >    else must stay identical between the two runs.

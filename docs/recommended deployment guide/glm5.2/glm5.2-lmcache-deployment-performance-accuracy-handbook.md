@@ -122,7 +122,9 @@ use_layerwise: False
 enable_async_loading: False   # covered by store_async
 store_async: True        # background writes, never blocks the engine
 extra_config:
-  save_only_first_rank: False   # every TP rank stores its own KV (see Tips)
+  save_only_first_rank: true
+  lookup_backoff_time: 0.001
+  first_rank_max_local_cpu_size: 150
 ```
 
 ### 4.2 Startup Script (with LMCache)
@@ -436,11 +438,6 @@ Only 2 of 57 subsets were evaluated — extend to the full set, use
 >    the same tokens hash differently in each of the 16 worker
 >    processes. Measured: without it, 2.43 M lookups and 0 hits; with
 >    it, 69% token-level and 98% request-level hit rates.
-> 2. **`save_only_first_rank: false` is the key YAML switch** — with the
->    default `true`, only rank 0 stores KV and every other rank blocks
->    on a cross-rank retrieve (measured 3.01 s per call, mean TTFT
->    ballooned to 73 s, a net loss). With `false`, all 8 TP ranks cache
->    locally and retrieval drops to 0.0185 s per call (162x faster).
 > 3. **`store_async: true` + `chunk_size: 512`** complete the tuned
 >    configuration — background writes plus larger chunks keep both
 >    store and retrieve off the critical path.
