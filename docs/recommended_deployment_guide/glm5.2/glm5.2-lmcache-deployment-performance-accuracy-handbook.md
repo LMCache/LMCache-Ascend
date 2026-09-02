@@ -100,7 +100,7 @@ pip install -v --no-build-isolation -e .
 
 ```bash
 cd /mnt/sdb/<USER_ID>
-git clone -b v0.4.4· https://github.com/LMCache/LMCache.git
+git clone -b v0.4.4 https://github.com/LMCache/LMCache.git
 ```
 
 > Benchmarks run from `LMCache/` (upstream); deployment uses
