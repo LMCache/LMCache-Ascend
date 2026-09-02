@@ -12,6 +12,5 @@ in **in-process mode**. Check out the listed branch before building.
 | GLM-5.3 | Yes | `main` | In-process |
 | MiniMax-M2.7 | Yes | `main` | In-process |
 | MiniMax-M3 | Yes | `main` | In-process |
-| Qwen3 | Yes | `main` | In-process |
 | DeepSeek-V4-Flash | Yes | `dsv4_support_045` | In-process |
 | DeepSeek-V4-Pro | Yes | `dsv4_support_045` | In-process |
