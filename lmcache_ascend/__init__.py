@@ -229,6 +229,35 @@ def _patch_config():
         "memory growth. Default is 0 (unlimited).",
     }
 
+    # Xio backend configs
+    lmcache.v1.config._CONFIG_DEFINITIONS["enable_xio"] = {
+        "type": bool,
+        "default": False,
+        "env_converter": _to_bool,
+        "description": "Enable XioBackend for remote KV cache storage "
+        "via Xio (Accelio-compatible) TCP/RDMA transport.",
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["xio_url"] = {
+        "type": str,
+        "default": None,
+        "description": "URL of the Xio endpoint "
+        "(e.g., xio://host:port or xio+tcp://host:port).",
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["xio_connect_timeout"] = {
+        "type": float,
+        "default": 5.0,
+        "env_converter": float,
+        "description": "TCP connect timeout in seconds for the Xio backend.",
+    }
+    lmcache.v1.config._CONFIG_DEFINITIONS["xio_reconnect_interval"] = {
+        "type": float,
+        "default": 10.0,
+        "env_converter": float,
+        "description": "Minimum seconds between reconnection attempts "
+        "after an Xio connection failure.",
+    }
+
+
     namespace_extras = {
         "validate": lmcache.v1.config._validate_config,
         "log_config": lmcache.v1.config._log_config,

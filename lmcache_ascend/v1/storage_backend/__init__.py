@@ -197,6 +197,27 @@ def CreateStorageBackends(
             storage_backends,
         )
 
+    if getattr(config, "enable_xio", False) and "XioBackend" not in _skip:
+        # First Party
+        from lmcache_ascend.v1.storage_backend.xio_backend import XioBackend
+
+        xio_url = getattr(config, "xio_url", None)
+        if xio_url is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_xio=true` requires "
+                "`xio_url` to be set (e.g., xio://host:port)."
+            )
+        xio_backend = XioBackend(
+            url=xio_url,
+            dst_device=dst_device,
+            connect_timeout=getattr(config, "xio_connect_timeout", 5.0),
+            reconnect_interval=getattr(config, "xio_reconnect_interval", 10.0),
+        )
+        backend_name = str(xio_backend)
+        storage_backends[backend_name] = xio_backend
+        logger.info("Created XioBackend connected to %s", xio_url)
+
+
     # Only wrap if audit is enabled in config
     if config.extra_config is not None and config.extra_config.get(
         "audit_backend_enabled", False
