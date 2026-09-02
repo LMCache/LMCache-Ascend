@@ -70,7 +70,7 @@ npu-smi info   # expect 8 cards / 16 chips
 
 ```bash
 # mirror: add -i https://mirrors.aliyun.com/pypi/simple if PyPI is slow
-NO_CUDA_EXT=1 pip install lmcache==0.4.3
+NO_CUDA_EXT=1 pip install lmcache==0.4.4
 ```
 
 `NO_CUDA_EXT=1` skips the CUDA extension (Ascend hosts have no CUDA
@@ -79,7 +79,7 @@ toolchain).
 ### 3.2 Install LMCache-Ascend
 
 ```bash
-git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
+git clone --recurse-submodules -b v0.4.4 https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
@@ -88,7 +88,7 @@ pip install -v --no-build-isolation -e .
 
 ```bash
 cd /mnt/sdb/<USER_ID>
-git clone -b v0.4.3 https://github.com/LMCache/LMCache.git
+git clone -b v0.4.4 https://github.com/LMCache/LMCache.git
 ```
 
 > Benchmarks run from `LMCache/` (upstream); deployment uses
