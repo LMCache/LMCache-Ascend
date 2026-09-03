@@ -3,6 +3,7 @@
 #include "utils.h"
 #include <ATen/ATen.h>
 #include <Python.h>
+#include <acl/acl.h>
 #include <pybind11/pybind11.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
@@ -38,13 +39,15 @@ void multi_layer_kv_transfer(
     const torch::Device &paged_memory_device, const int page_buffer_size,
     const bool direction, const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims, const int64_t v_hidden_dims,
-    const int64_t dsa_hidden_dims) {
+    const int64_t dsa_hidden_dims, const int64_t dsa_c8_scale_plane_bytes,
+    const int32_t paged_kv_block_size) {
   uint8_t *key_value_ptr = get_kernel_ptr<uint8_t, torch::Tensor>(key_value);
 
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
       page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
-      v_hidden_dims, dsa_hidden_dims);
+      v_hidden_dims, dsa_hidden_dims, dsa_c8_scale_plane_bytes,
+      paged_kv_block_size);
 
   // Calculate UB buffer parameters
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
@@ -78,7 +81,8 @@ void fused_multi_layer_kv_transfer(
     const bool direction, // true: from_gpu, false: to_gpu
     const bool use_mla, const int kvcache_format_raw,
     const int64_t k_hidden_dims, const int64_t v_hidden_dims,
-    const int64_t dsa_hidden_dims) {
+    const int64_t dsa_hidden_dims, const int64_t dsa_c8_scale_plane_bytes,
+    const int32_t paged_kv_block_size) {
   // get host cpu buffer pointer for aclrtMemcpyAsync
   uint8_t *key_value_ptr = static_cast<uint8_t *>(key_value.data_ptr());
   uint8_t *staging_cache_ptr =
@@ -87,7 +91,8 @@ void fused_multi_layer_kv_transfer(
   MultiLayerKVConfig config = prepare_multi_layer_kv_config(
       key_value, key_value_ptrs, slot_mapping, paged_memory_device,
       page_buffer_size, direction, use_mla, kvcache_format_raw, k_hidden_dims,
-      v_hidden_dims, dsa_hidden_dims);
+      v_hidden_dims, dsa_hidden_dims, dsa_c8_scale_plane_bytes,
+      paged_kv_block_size);
 
   compute_multi_layer_ub_params(config, key_value, paged_memory_device,
                                 key_value_ptrs);
@@ -99,33 +104,43 @@ void fused_multi_layer_kv_transfer(
       static_cast<size_t>(staging_cache.numel()) * staging_cache.element_size();
 
   size_t required_size = 0;
-  switch (config.kvcache_format) {
-  case kvcache_ops::KVCacheFormat::MLA_KV:
-    required_size = static_cast<size_t>(config.num_layers) * config.num_tokens *
-                    (config.k_hidden_dims + config.v_hidden_dims) *
-                    key_value.element_size();
-    break;
-  case kvcache_ops::KVCacheFormat::DSA_KV:
-    required_size =
-        static_cast<size_t>(config.num_layers) * config.num_tokens *
-        (config.k_hidden_dims + config.v_hidden_dims + config.dsa_hidden_dims) *
-        key_value.element_size();
-    break;
-  default:
-    required_size = static_cast<size_t>(config.kv_size) * config.num_layers *
-                    config.num_tokens * config.hidden_dims *
-                    key_value.element_size();
-    break;
+  {
+    switch (config.kvcache_format) {
+    case kvcache_ops::KVCacheFormat::MLA_KV:
+      required_size = static_cast<size_t>(config.num_layers) *
+                      config.num_tokens *
+                      (config.k_hidden_dims + config.v_hidden_dims) *
+                      key_value.element_size();
+      break;
+    case kvcache_ops::KVCacheFormat::DSA_KV:
+      required_size = static_cast<size_t>(config.num_layers) *
+                      config.num_tokens *
+                      (config.k_hidden_dims + config.v_hidden_dims +
+                       config.dsa_hidden_dims) *
+                      key_value.element_size();
+      break;
+    default:
+      required_size = static_cast<size_t>(config.kv_size) * config.num_layers *
+                      config.num_tokens * config.hidden_dims *
+                      key_value.element_size();
+      break;
+    }
   }
 
   TORCH_CHECK(staging_cache_size >= required_size,
               "staging_cache size insufficient: need ", required_size,
               " bytes, got ", staging_cache_size);
 
+  // DSA_C8 needs the separate multi-plane kernel, which is not part of this
+  // MP-mode-only build; reject it explicitly instead of corrupting data via
+  // the standard kernel.
+  TORCH_CHECK(!config.is_dsa_c8,
+              "DSA_C8 fused transfer is not supported in this build");
+
   at_npu::native::OpCommand cmd;
   cmd.Name("fused_multi_layer_kv_transfer_kernel_v2");
-  cmd.SetCustomHandler([config, staging_cache_ptr, key_value_ptr,
-                        required_size]() -> int {
+  cmd.SetCustomHandler([config, staging_cache_ptr, key_value_ptr, required_size,
+                        staging_cache]() -> int {
     auto slot_num = vllm_ascend::get_dtype_from_torch(config.slot_type);
     auto dtype_num = vllm_ascend::get_dtype_from_torch(config.scalar_type);
 
@@ -143,13 +158,15 @@ void fused_multi_layer_kv_transfer(
     }
 
     // Step 2: Kernel (Gather or Scatter)
-    kvcache_ops::multi_layer_kv_transfer_kernel_v2(
-        dtype_num, slot_num, config.kvcache_format, config.aiv_num,
-        config.stream, config.page_buffer_ptrs, staging_cache_ptr,
-        config.slot_mapping_ptr, config.hidden_dims, config.kv_size,
-        config.num_layers, config.page_buffer_size, config.num_tokens,
-        config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction,
-        config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims);
+    {
+      kvcache_ops::multi_layer_kv_transfer_kernel_v2(
+          dtype_num, slot_num, config.kvcache_format, config.aiv_num,
+          config.stream, config.page_buffer_ptrs, staging_cache_ptr,
+          config.slot_mapping_ptr, config.hidden_dims, config.kv_size,
+          config.num_layers, config.page_buffer_size, config.num_tokens,
+          config.singlePerLoopBuffer, config.maxTokensPerLoop, config.direction,
+          config.k_hidden_dims, config.v_hidden_dims, config.dsa_hidden_dims);
+    }
 
     // Step 3: D2H memcpy (from_gpu)
     if (!isH2D) {
