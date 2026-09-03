@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 
 namespace py = pybind11;

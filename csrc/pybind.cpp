@@ -8,6 +8,7 @@
 #include "pac_kernels.h"
 #include "pos_kernels.h"
 #include <iostream>
+#include <stdexcept>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <torch/csrc/autograd/python_variable.h>
