@@ -32,8 +32,8 @@ python /LMCache-Ascend/lmcache_ascend/integration/patch/apply_patch.py
 #### Option 2: Manual Modification
 If you prefer to update the code manually, please modify the following file:
 
-**File Path**: `vllm-ascend/vllm-ascend/worker/worker_v1.py`
-1. In the `_init_worker_distributed_environment` function: Comment out the line `ensure_kv_transfer_initialized(vllm_config)`
+**File Path**: `vllm-ascend/vllm-ascend/worker/worker.py`
+1. In the `initialize_from_config` function: Comment out the line `ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)`
 2. At the end of the `load_model` function: Add the following Python snippet
 ```python
 from lmcache.v1.compute.models.utils import VLLMModelTracker

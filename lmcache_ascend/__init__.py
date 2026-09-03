@@ -680,6 +680,128 @@ def _patch_lookup_client_factory():
     lmc_async.LMCacheAsyncLookupClient = LMCacheAsyncLookupClient
 
 
+def _patch_vllm_service_factory_hole():
+    """Make VllmServiceFactory produce hole-mode services when the hole
+    connector module is selected. Non-hole mode is unaffected and delegates to
+    the original methods."""
+    # Third Party
+    import lmcache.integration.vllm.vllm_service_factory as vsf
+
+    _HOLE_MODULE_PATH = (
+        "lmcache_ascend.integration.vllm.lmcache_ascend_hole_connector_v1"
+    )
+
+    def _is_hole(self) -> bool:
+        ktc = getattr(self.vllm_config, "kv_transfer_config", None)
+        path = getattr(ktc, "kv_connector_module_path", None) if ktc else None
+        return path == _HOLE_MODULE_PATH
+
+    _orig_get_engine = vsf.VllmServiceFactory.get_or_create_lmcache_engine
+    _orig_make_client = vsf.VllmServiceFactory.maybe_create_lookup_client
+    _orig_make_server = vsf.VllmServiceFactory.maybe_create_lookup_server
+
+    def get_or_create_lmcache_engine(self):
+        if not _is_hole(self):
+            return _orig_get_engine(self)
+
+        # Third Party
+        from lmcache.integration.vllm.utils import ENGINE_NAME
+        from lmcache.v1.cache_engine import LMCacheEngineBuilder
+
+        # First Party
+        from lmcache_ascend.integration.vllm.vllm_v1_adapter_hole import (
+            init_lmcache_engine_hole,
+        )
+
+        self._ensure_metadata()
+        assert self.metadata is not None
+
+        # Preserve upstream behavior: scheduler without bypass lookup should not
+        # build an engine and should only initialize Prometheus metadata.
+        if (
+            self.role == "scheduler"
+            and not self.lmcache_config.enable_scheduler_bypass_lookup
+        ):
+            # Third Party
+            from lmcache.observability import PrometheusLogger
+
+            PrometheusLogger.GetOrCreate(
+                self.metadata,
+                config=self.lmcache_config,
+            )
+            return None
+
+        if curr_engine := LMCacheEngineBuilder.get(ENGINE_NAME):
+            self.lmcache_engine = curr_engine
+            self.metadata = curr_engine.metadata
+            return curr_engine
+
+        engine = init_lmcache_engine_hole(
+            self.lmcache_config,
+            self.vllm_config,
+            self.role,
+        )
+        self.lmcache_engine = engine
+        self.metadata = engine.metadata
+
+        if (
+            self.role == "scheduler"
+            and self.lmcache_config.enable_scheduler_bypass_lookup
+        ):
+            assert engine.save_only_first_rank or (
+                self.lmcache_config.get_extra_config_value(
+                    "remote_enable_mla_worker_id_as0", self.metadata.use_mla
+                )
+            ), (
+                "enable_scheduler_bypass_lookup is only supported with "
+                "save_only_first_rank or remote_enable_mla_worker_id_as0"
+            )
+
+        return engine
+
+    def maybe_create_lookup_client(self):
+        if not _is_hole(self):
+            return _orig_make_client(self)
+        if self.role != "scheduler":
+            return None
+
+        # First Party
+        from lmcache_ascend.v1.lookup_client.lmcache_hole_lookup_client import (
+            LMCacheHoleLookupClient,
+        )
+
+        self._ensure_metadata()
+        assert self.metadata is not None
+        return LMCacheHoleLookupClient(
+            self.vllm_config,
+            self.lmcache_config,
+            self.metadata,
+        )
+
+    def maybe_create_lookup_server(self):
+        if not _is_hole(self):
+            return _orig_make_server(self)
+        if self.role != "worker":
+            return None
+
+        # First Party
+        from lmcache_ascend.v1.lookup_client.lmcache_hole_lookup_server import (
+            LMCacheHoleLookupServer,
+        )
+
+        self._ensure_metadata()
+        self._ensure_engine()
+        assert self.lmcache_engine is not None
+        return LMCacheHoleLookupServer(
+            self.lmcache_engine,
+            self.vllm_config,
+        )
+
+    vsf.VllmServiceFactory.get_or_create_lmcache_engine = get_or_create_lmcache_engine
+    vsf.VllmServiceFactory.maybe_create_lookup_client = maybe_create_lookup_client
+    vsf.VllmServiceFactory.maybe_create_lookup_server = maybe_create_lookup_server
+
+
 def _patch_api_server():
     # Register /memory/prefetch and /memory/evict REST endpoints.
     # Third Party
@@ -695,12 +817,35 @@ def _patch_api_server():
     InternalAPIServer.__init__ = InternalAPIServer__init__
 
 
+def _patch_trace_utils_compat():
+    # First Party
+    from lmcache_ascend.v1 import trace_utils_compat as _compat
+
+    try:
+        # Third Party
+        import lmcache.v1.trace_utils as _upstream
+    except ModuleNotFoundError as exc:
+        if exc.name != "lmcache.v1.trace_utils":
+            raise
+        # Upstream module missing — install our compat module as a full stand-in
+        sys.modules["lmcache.v1.trace_utils"] = _compat
+        return
+
+    # Upstream exists — backfill any symbols it's missing from our compat
+    for attr in dir(_compat):
+        if attr.startswith("_"):
+            continue
+        if not hasattr(_upstream, attr):
+            setattr(_upstream, attr, getattr(_compat, attr))
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Standard
     from functools import partial
     import sys
 
+    _patch_trace_utils_compat()
     _patch_config()
 
     is_sgl = _is_sglang_runtime()
@@ -743,6 +888,7 @@ if not LMCACHE_ASCEND_PATCHED:
             _patch_sys_detection()
 
         _patch_lookup_client_factory()
+        _patch_vllm_service_factory_hole()
         _patch_vllm_v1_adapter()
 
         _patch_cache_engine()
