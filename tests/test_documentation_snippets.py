@@ -3,7 +3,6 @@
 from pathlib import Path
 import re
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 GUIDE_ROOT = REPOSITORY_ROOT / "docs" / "recommended_deployment_guide"
 SHELL_BLOCK_PATTERN = re.compile(r"```(?:bash|sh)\s*\n(.*?)```", re.DOTALL)
@@ -28,9 +27,8 @@ def test_nounset_shell_blocks_do_not_expand_unset_ld_preload():
         for block_number, block in enumerate(
             SHELL_BLOCK_PATTERN.findall(contents), start=1
         ):
-            if (
-                NOUNSET_PATTERN.search(block)
-                and UNSAFE_LD_PRELOAD_PATTERN.search(block)
+            if NOUNSET_PATTERN.search(block) and UNSAFE_LD_PRELOAD_PATTERN.search(
+                block
             ):
                 location = guide.relative_to(REPOSITORY_ROOT)
                 failures.append(f"{location} block {block_number}")
