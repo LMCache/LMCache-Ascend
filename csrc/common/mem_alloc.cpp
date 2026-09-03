@@ -5,6 +5,7 @@
 #include <cstring> // for strerror
 #include <errno.h>
 #include <numaif.h>
+#include <stdexcept>
 #include <string>
 #include <sys/mman.h>
 

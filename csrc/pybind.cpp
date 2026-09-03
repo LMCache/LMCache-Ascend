@@ -10,6 +10,7 @@
 #include <iostream>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <stdexcept>
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch/torch.h>
 

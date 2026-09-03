@@ -9,6 +9,7 @@
 #include <Python.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <stdexcept>
 #include <string>
 
 kvcache_ops::AscendType get_dtype_from_np(const py::array &arr) {
