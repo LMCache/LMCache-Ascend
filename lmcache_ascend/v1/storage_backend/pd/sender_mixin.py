@@ -258,13 +258,34 @@ class AscendPDSenderMixin:
         receiver_init_port: int,
         receiver_alloc_port: int,
     ) -> None:
-        """Override to call parent and handle any Ascend-specific setup."""
-        super()._ensure_peer_connection(
-            receiver_id=receiver_id,
-            receiver_host=receiver_host,
-            receiver_init_port=receiver_init_port,
-            receiver_alloc_port=receiver_alloc_port,
+        """Connect to a decoder peer over HCCL (not upstream NIXL).
+
+        Upstream ``PDBackend._ensure_peer_connection`` serializes with
+        ``_nixl_agent_lock``, which Ascend backends do not create.  HCCL
+        already protects channel state via ``transfer_channel._state_lock``.
+        Fixes GitHub Issue #264: https://github.com/LMCache/LMCache-Ascend/issues/264
+        """
+        if receiver_id in self.initialized_peers:
+            return
+
+        receiver_init_url = f"{receiver_host}:{receiver_init_port}"
+        receiver_mem_alloc_url = f"{receiver_host}:{receiver_alloc_port}"
+
+        self.transfer_channel.lazy_init_peer_connection(
+            local_id=self.local_id,
+            peer_id=receiver_id,
+            peer_init_url=receiver_init_url,
         )
+
+        mem_alloc_socket = get_zmq_socket(
+            self.zmq_context,
+            receiver_mem_alloc_url,
+            "tcp",
+            zmq.REQ,
+            "connect",
+        )
+        self.mem_alloc_sockets[receiver_id] = mem_alloc_socket
+        self.initialized_peers.add(receiver_id)
 
     def _remote_allocate(
         self, receiver_id: str, alloc_request: AllocRequest
