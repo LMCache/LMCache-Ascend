@@ -318,6 +318,32 @@ def test_attention_allocation_does_not_allocate_state(pool):
     obj.ref_count_down()
 
 
+def test_paged_pool_reuses_composite_metadata_for_different_layout_sizes():
+    # Third Party
+    from lmcache.v1.memory_management import MemoryFormat, PagedTensorMemoryAllocator
+
+    # First Party
+    from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+
+    allocator = PagedTensorMemoryAllocator(
+        torch.zeros(48, dtype=torch.uint8),
+        [torch.Size([48])],
+        [torch.uint8],
+        MemoryFormat.BINARY,
+    )
+    for layers in (2, 1, 2):
+        layout = make_layout(layers=layers)
+        with allocate_state_checkpoint(layout, allocator) as buffer:
+            assert buffer.planes[1].shape == (layers, 2, 2)
+            assert buffer.planes[1].dtype == torch.float32
+            assert (
+                buffer.planes[1].data_ptr() - buffer.planes[0].data_ptr()
+                == layout.planes[1].offset
+            )
+        assert allocator.num_active_allocations == 0
+    assert allocator.memcheck()
+
+
 def make_ref(layout, boundary=16, key=None):
     # First Party
     from lmcache_ascend.v1.state_checkpoint import CheckpointRef
