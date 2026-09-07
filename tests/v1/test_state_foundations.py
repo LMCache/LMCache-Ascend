@@ -2,10 +2,11 @@
 """GDN foundation regressions using the normal repository test environment."""
 
 # Standard
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from types import SimpleNamespace
 
 # Third Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import TensorMemoryAllocator, TensorMemoryObj
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
@@ -21,6 +22,7 @@ import torch
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     ordered_scheduler_groups_for_layer,
 )
+from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
 
 
 def gdn_spec(**overrides):
@@ -300,3 +302,109 @@ def test_attention_allocation_does_not_allocate_state(pool):
     assert pool.num_active_allocations == 1
     assert obj.get_tensor(0).shape == (2, 1, 16, 4)
     obj.ref_count_down()
+
+
+def make_ref(layout, boundary=16, key=None):
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import CheckpointRef
+
+    key = key or CacheEngineKey("qwen-test", 2, 0, 123, torch.bfloat16)
+    return CheckpointRef.from_chunk(
+        key, chunk_end=boundary, boundary=boundary, chunk_size=16, layout=layout
+    )
+
+
+def test_ref_reuses_key_identity_without_allocating_or_claiming_availability():
+    layout = make_layout()
+    ref = make_ref(layout)
+    assert ref.prefix_hash == 123
+    assert ref.boundary == 16
+    assert (ref.model_name, ref.world_size, ref.worker_id) == ("qwen-test", 2, 0)
+    assert ref != CacheEngineKey("qwen-test", 2, 0, 123, torch.bfloat16)
+    assert ref != make_ref(replace(layout, group_index=1))
+    assert ref != make_ref(replace(layout, version=2))
+
+
+@pytest.mark.parametrize("chunk_end, boundary", [(16, 15), (16, 32), (15, 15), (0, 0)])
+def test_ref_requires_the_exact_complete_chunk_boundary(chunk_end, boundary):
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import CheckpointRef
+
+    with pytest.raises(ValueError, match="boundary|chunk"):
+        CheckpointRef.from_chunk(
+            CacheEngineKey("qwen-test", 2, 0, 123, torch.bfloat16),
+            chunk_end=chunk_end,
+            boundary=boundary,
+            chunk_size=16,
+            layout=make_layout(),
+        )
+
+
+def test_existing_chained_prefix_keys_are_preserved():
+    # Third Party
+    from lmcache.v1.config import LMCacheEngineConfig
+    from lmcache.v1.metadata import LMCacheMetadata
+    from lmcache.v1.token_database import ChunkedTokenDatabase
+
+    config = LMCacheEngineConfig.from_defaults(chunk_size=16)
+    metadata = LMCacheMetadata(
+        "qwen-test", 2, 2, 0, 0, torch.bfloat16, (1, 2, 16, 2, 4)
+    )
+    database = ChunkedTokenDatabase(config, metadata)
+    keys_a = list(database.process_tokens(tokens=[1] * 16 + [3] * 16))
+    keys_b = list(database.process_tokens(tokens=[2] * 16 + [3] * 16))
+    ref_a = make_ref(make_layout(), keys_a[-1][1], keys_a[-1][2])
+    ref_b = make_ref(make_layout(), keys_b[-1][1], keys_b[-1][2])
+    assert ref_a.prefix_hash == keys_a[-1][2].chunk_hash
+    assert ref_b.prefix_hash == keys_b[-1][2].chunk_hash
+    assert ref_a != ref_b
+
+
+@pytest.mark.parametrize("load", [False, True])
+def test_operation_preserves_r_without_copying_or_inventing_e(load):
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
+
+    layout = make_layout()
+    _, tensors = layout_inputs()
+    binding = StateBlockBinding(
+        tuple(tuple(tensors[name]) for name in layout.layer_names), 1
+    )
+    pool = TensorMemoryAllocator(torch.zeros(8192, dtype=torch.uint8))
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        for plane in buffer.planes:
+            plane.fill_(9)
+        operation = StateOperation(
+            make_ref(layout),
+            layout,
+            buffer if load else binding,
+            binding if load else buffer,
+            attention_end=32,
+        )
+        assert operation.checkpoint.boundary == 16
+        assert operation.executed_end is None
+        assert operation.attention_end == 32
+        assert all(torch.all(plane == 9) for plane in buffer.planes)
+    assert pool.num_active_allocations == 0
+
+
+def test_operation_rejects_wrong_layout_and_out_of_range_block():
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
+
+    layout = make_layout()
+    _, tensors = layout_inputs()
+    entries = tuple(tuple(tensors[name]) for name in layout.layer_names)
+    pool = TensorMemoryAllocator(torch.zeros(8192, dtype=torch.uint8))
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        with pytest.raises(ValueError, match="layout"):
+            StateOperation(
+                make_ref(replace(layout, version=2)),
+                layout,
+                StateBlockBinding(entries, 0),
+                buffer,
+            )
+        with pytest.raises(ValueError, match="block"):
+            StateOperation(
+                make_ref(layout), layout, StateBlockBinding(entries, 5), buffer
+            )
