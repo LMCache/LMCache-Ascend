@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
@@ -8,6 +9,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
@@ -30,9 +32,17 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class LMCacheAscendConnectorMetadata(LMCacheConnectorMetadata):
+    """Multi-group LMCache requests plus scheduler preemption hints."""
+
+    preempted_req_ids: set[str] = field(default_factory=set)
 
 
 class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
@@ -58,6 +68,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         self._finished_req_ids_waiting_for_save: set[str] = set()
         self._late_finished_sending: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
+
+    @_lmcache_nvtx_annotate
+    def build_connector_meta(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> KVConnectorMetadata:
+        """Preserve multi-group request metadata and carry preemptions to workers."""
+        metadata = super().build_connector_meta(scheduler_output)
+        assert isinstance(metadata, LMCacheConnectorMetadata)
+        return LMCacheAscendConnectorMetadata(
+            requests=metadata.requests,
+            preempted_req_ids=set(
+                getattr(scheduler_output, "preempted_req_ids", None) or ()
+            ),
+        )
 
     @_lmcache_nvtx_annotate
     def register_kv_caches(
@@ -702,7 +726,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         )
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
-        if self.lmcache_engine is None:
+        if self.lmcache_engine is None or not preempted_req_ids:
             return
 
         logger.debug(
