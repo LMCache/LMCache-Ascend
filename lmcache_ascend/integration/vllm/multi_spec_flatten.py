@@ -12,6 +12,11 @@ from lmcache.v1.config import LMCacheEngineConfig
 import torch
 
 # First Party
+from lmcache_ascend.integration.vllm.state_groups import (
+    layer_spec,
+    state_group_index,
+    validate_state_planes,
+)
 from lmcache_ascend.v1.kv_format import (
     KVCacheFormat,
     MultiPlaneBundle,
@@ -148,6 +153,13 @@ def ordered_scheduler_groups_for_layer(
     group), all sub-tensors map to the same primary group.  For multi-spec
     layers, each sub-tensor corresponds to a distinct scheduler group.
     """
+    state_index = state_group_index(kv_cache_config, layer_name)
+    if state_index is not None:
+        if not isinstance(entry, (tuple, list)):
+            raise ValueError(f"State layer {layer_name!r} requires a plane sequence")
+        spec = layer_spec(kv_cache_config.kv_cache_groups[state_index], layer_name)
+        validate_state_planes(layer_name, spec, entry)
+        return [state_index] * len(entry)
     planes = _entry_planes(entry)
     containing = _containing_groups_for_layer(layer_name, kv_cache_config)
     # Config-verified multi-plane bundle: every plane's block size matches a
