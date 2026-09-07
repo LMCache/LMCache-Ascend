@@ -147,3 +147,12 @@ def build_state_layouts(
             entries.append(entry)
         layouts.append(build_state_group_layout(index, group.layer_names, entries))
     return tuple(layouts)
+
+
+def require_no_state_transfer(state_groups: Sequence[object]) -> None:
+    """Prevent registered GDN state from entering the unfinished hybrid path."""
+    if state_groups:
+        raise NotImplementedError(
+            "GDN layouts are supported, but hybrid state store/retrieve is not "
+            "implemented in PR 1"
+        )

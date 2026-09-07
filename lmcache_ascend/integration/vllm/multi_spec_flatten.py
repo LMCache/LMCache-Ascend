@@ -14,6 +14,7 @@ import torch
 # First Party
 from lmcache_ascend.integration.vllm.state_groups import (
     layer_spec,
+    require_no_state_transfer,
     state_group_index,
     validate_state_planes,
 )
@@ -275,6 +276,10 @@ def build_flat_kv_caches(
         (flat_kv, sched_by_layer, layer_to_groups, bundled)
     """
     flat: dict[str, _KVEntry] = {}
+    for name in kv_caches:
+        state_index = state_group_index(kv_cache_config, name)
+        if state_index is not None:
+            require_no_state_transfer((state_index,))
     sched_by_layer: list[int] = []
     layer_to_groups = build_layer_to_scheduler_groups(
         kv_cache_config,

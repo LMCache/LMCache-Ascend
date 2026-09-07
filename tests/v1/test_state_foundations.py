@@ -147,6 +147,20 @@ def test_explicit_primary_cannot_fall_back_to_another_group():
         request_primary(([1],), (16,), 1)
 
 
+def test_gdn_cannot_enter_attention_flattening(monkeypatch):
+    # First Party
+    from lmcache_ascend.integration.vllm import multi_spec_flatten
+
+    monkeypatch.setattr(multi_spec_flatten, "should_bundle_multi_spec", lambda _: True)
+    tensors = [torch.empty(5, 3, 4, dtype=torch.bfloat16), torch.empty(5, 2, 3, 4)]
+    with pytest.raises(NotImplementedError, match="hybrid"):
+        multi_spec_flatten.build_flat_kv_caches({"gdn.0": tensors}, config_for())
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import require_no_state_transfer
+
+    require_no_state_transfer(())
+
+
 def layout_inputs(layers=2, padded=False):
     spec = gdn_spec(shapes=((1, 3), (2, 2)), page_size_padded=256)
     config = config_for(spec=spec)

@@ -25,7 +25,11 @@ from lmcache_ascend.integration.vllm.multi_spec_flatten import (
 from lmcache_ascend.integration.vllm.skip_state_groups import (
     apply_skip_policy_from_env_to_flattened,
 )
-from lmcache_ascend.integration.vllm.state_groups import request_primary
+from lmcache_ascend.integration.vllm.state_groups import (
+    build_state_layouts,
+    request_primary,
+    require_no_state_transfer,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -68,6 +72,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         **kwargs: Any,
     ) -> None:
         """Register KV caches (upstream) with Ascend multi-group preprocessing."""
+        self.state_layouts = (
+            build_state_layouts(self._kv_cache_config, kv_caches)
+            if self._kv_cache_config is not None
+            else ()
+        )
+        require_no_state_transfer(self.state_layouts)
         flat_kv = kv_caches
         sched_by_layer: tuple[int, ...] | None = None
         layer_to_groups: dict[str, list[int]] | None = None
