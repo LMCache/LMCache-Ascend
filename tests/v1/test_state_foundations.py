@@ -2,6 +2,7 @@
 """GDN foundation regressions using the normal repository test environment."""
 
 # Standard
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 # Third Party
@@ -141,3 +142,77 @@ def test_explicit_primary_cannot_fall_back_to_another_group():
 
     with pytest.raises(ValueError):
         request_primary(([1],), (16,), 1)
+
+
+def layout_inputs(layers=2, padded=False):
+    spec = gdn_spec(shapes=((1, 3), (2, 2)), page_size_padded=256)
+    config = config_for(spec=spec)
+    config.kv_cache_groups[0].layer_names = [f"gdn.{i}" for i in range(layers)]
+    tensors = {}
+    for name in config.kv_cache_groups[0].layer_names:
+        conv = torch.empty(5, 1, 3, dtype=torch.bfloat16)
+        if padded:
+            conv = torch.empty(25, dtype=torch.bfloat16).as_strided(
+                (5, 1, 3), (5, 3, 1)
+            )
+        tensors[name] = [conv, torch.empty(5, 2, 2, dtype=torch.float32)]
+    return config, tensors
+
+
+def make_layout(layers=2, padded=False):
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import build_state_layouts
+
+    config, tensors = layout_inputs(layers, padded)
+    return build_state_layouts(config, tensors)[0]
+
+
+def test_plane_major_payload_excludes_runtime_page_padding():
+    layout = make_layout()
+    assert layout.layer_names == ("gdn.0", "gdn.1")
+    assert [p.name for p in layout.planes] == ["conv", "ssm"]
+    assert [p.shape for p in layout.planes] == [(2, 1, 3), (2, 2, 2)]
+    assert [p.dtype for p in layout.planes] == [torch.bfloat16, torch.float32]
+    assert [p.offset for p in layout.planes] == [0, 12]
+    assert [p.nbytes for p in layout.planes] == [12, 32]
+    assert layout.nbytes == 44
+    with pytest.raises(FrozenInstanceError):
+        layout.nbytes = 10
+
+
+def test_mixed_dtype_offsets_include_only_required_padding():
+    layout = make_layout(layers=1)
+    assert [p.offset for p in layout.planes] == [0, 8]
+    assert layout.nbytes == 24
+    assert sum(p.nbytes for p in layout.planes) == 22
+
+
+def test_source_stride_is_not_payload_compatibility():
+    packed = make_layout()
+    padded = make_layout(padded=True)
+    assert packed.planes[0].block_stride_bytes == (6, 6)
+    assert padded.planes[0].block_stride_bytes == (10, 10)
+    assert packed.signature == padded.signature
+
+
+def test_plane_dtype_changes_compatibility():
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import build_state_layouts
+
+    config, tensors = layout_inputs()
+    config.kv_cache_groups[0].kv_cache_spec = gdn_spec(
+        shapes=((1, 3), (2, 2)), dtypes=(torch.bfloat16, torch.bfloat16)
+    )
+    for name in tensors:
+        tensors[name][1] = tensors[name][1].to(torch.bfloat16)
+    assert build_state_layouts(config, tensors)[0].signature != make_layout().signature
+
+
+def test_noncontiguous_state_elements_are_explicitly_rejected():
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import build_state_layouts
+
+    config, tensors = layout_inputs()
+    tensors["gdn.0"][1] = tensors["gdn.0"][1].transpose(1, 2)
+    with pytest.raises(ValueError, match="stride|contiguous"):
+        build_state_layouts(config, tensors)

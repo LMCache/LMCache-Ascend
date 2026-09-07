@@ -13,6 +13,9 @@ from vllm.v1.kv_cache_interface import (
 )
 import torch
 
+# First Party
+from lmcache_ascend.v1.state_layout import StateGroupLayout, build_state_group_layout
+
 
 def layer_spec(group: Any, layer_name: str) -> Any:
     """Resolve a layer's spec, including vLLM uniform-type group wrappers."""
@@ -120,3 +123,27 @@ def request_primary(
             raise ValueError("The configured full-attention primary is missing")
         return state_primary
     return max(range(len(block_ids)), key=lambda i: len(block_ids[i]) * block_sizes[i])
+
+
+def build_state_layouts(
+    kv_cache_config: Any, kv_caches: dict[str, Sequence[torch.Tensor]]
+) -> tuple[StateGroupLayout, ...]:
+    """Build each GDN group's layout from specs and real registered tensors."""
+    layouts = []
+    for index, group in enumerate(kv_cache_config.kv_cache_groups):
+        specs = [layer_spec(group, name) for name in group.layer_names]
+        if not any(isinstance(spec, MambaSpec) for spec in specs):
+            continue
+        entries = []
+        for name, spec in zip(group.layer_names, specs, strict=True):
+            if state_group_index(kv_cache_config, name) != index:
+                raise ValueError(f"State group {index}: inconsistent layer {name!r}")
+            if name not in kv_caches:
+                raise ValueError(f"State group {index}: missing tensors for {name!r}")
+            entry = kv_caches[name]
+            if not isinstance(entry, (tuple, list)):
+                raise ValueError(f"State layer {name!r} requires a plane sequence")
+            validate_state_planes(name, spec, entry)
+            entries.append(entry)
+        layouts.append(build_state_group_layout(index, group.layer_names, entries))
+    return tuple(layouts)
