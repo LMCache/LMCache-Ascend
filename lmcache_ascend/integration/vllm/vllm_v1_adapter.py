@@ -25,6 +25,7 @@ from lmcache_ascend.integration.vllm.multi_spec_flatten import (
 from lmcache_ascend.integration.vllm.skip_state_groups import (
     apply_skip_policy_from_env_to_flattened,
 )
+from lmcache_ascend.integration.vllm.state_groups import request_primary
 
 if TYPE_CHECKING:
     # Third Party
@@ -817,6 +818,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
         if not block_ids:
             return False, None
+        state_primary = self._state_primary_kv_group_idx
+        if state_primary is not None:
+            primary = request_primary(
+                block_ids, self._block_sizes_by_group, state_primary
+            )
+            return self.request_finished(request, block_ids[primary])
         if len(block_ids) > 1:
             if len(block_ids) == len(self._block_sizes_by_group):
                 primary = max(

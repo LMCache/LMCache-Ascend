@@ -34,6 +34,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
+from lmcache_ascend.integration.vllm.state_groups import (
+    request_primary,
+    select_state_primary,
+)
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
 
 if TYPE_CHECKING:
@@ -371,9 +375,8 @@ class ReqMeta(UpstreamReqMeta):
     slot_mappings_by_group: "tuple[torch.Tensor, ...]" = field(default_factory=tuple)
     # Allocated block ids grouped by KV cache group.
     allocated_block_ids_by_group: "tuple[list[int], ...]" = field(default_factory=tuple)
-    # Index of the KV group whose block table covers the most logical tokens
-    # (dense / full-sequence path). Used for store/retrieve when only one
-    # group's slot_mapping can drive the LMCache engine (Phase 2: all groups).
+    # GDN uses the full-attention group chosen from specs at initialization.
+    # Other models retain their existing per-request primary policy.
     primary_kv_group_idx: int = 0
     # Per-sched-group dense slot mappings (no -1) and valid-slot prefix arrays.
     filtered_slot_by_group: Optional[tuple[torch.Tensor, ...]] = None
@@ -399,6 +402,7 @@ class ReqMeta(UpstreamReqMeta):
         save_decode_cache: bool = False,
         compress_ratios: "tuple[int, ...] | None" = None,
         sliding_window_size_by_group: "tuple[int | None, ...] | None" = None,
+        primary_kv_group_idx: int | None = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -415,15 +419,9 @@ class ReqMeta(UpstreamReqMeta):
                 "partial-chunk store/load is not supported for state and "
                 "sliding windowgroups."
             )
-        if tracker.num_kv_groups == 1:
-            primary_kv_group_idx = 0
-        else:
-            primary_kv_group_idx = max(
-                range(tracker.num_kv_groups),
-                key=lambda i: (
-                    len(tracker.allocated_block_ids_by_group[i]) * block_sizes[i]
-                ),
-            )
+        primary_kv_group_idx = request_primary(
+            tracker.allocated_block_ids_by_group, block_sizes, primary_kv_group_idx
+        )
 
         saved_allocated_block_ids = tracker.allocated_block_ids
         tracker.allocated_block_ids = list(
@@ -516,29 +514,24 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         config: LMCacheEngineConfig,
     ) -> None:
         super()._init_connector_state(role, vllm_config, config)
+        self._state_primary_kv_group_idx: int | None = None
         if self._kv_cache_config is not None and getattr(
             self._kv_cache_config, "kv_cache_groups", None
         ):
             self._num_kv_groups = len(self._kv_cache_config.kv_cache_groups)
+            self._state_primary_kv_group_idx = select_state_primary(
+                self._kv_cache_config
+            )
             self._block_sizes_by_group: "tuple[int, ...]" = tuple(
                 group.kv_cache_spec.block_size
                 for group in self._kv_cache_config.kv_cache_groups
             )
-            try:
-                groups = self._kv_cache_config.kv_cache_groups
-                mems = [
-                    g.kv_cache_spec.max_memory_usage_bytes(vllm_config) for g in groups
-                ]
-                max_mem_hint_idx = int(mems.index(max(mems)))
-            except Exception:
-                max_mem_hint_idx = 0
             logger.info(
                 "LMCache KV cache groups: count=%d, block_sizes_by_group=%s, "
-                "max_memory_usage_hint_idx=%d (per-request primary_kv_group_idx "
-                "uses argmax(len(block_ids)*block_size))",
+                "state_primary_kv_group_idx=%s (None uses existing KV policy)",
                 self._num_kv_groups,
                 self._block_sizes_by_group,
-                max_mem_hint_idx,
+                self._state_primary_kv_group_idx,
             )
         else:
             self._num_kv_groups = 1
@@ -675,6 +668,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
                 sliding_window_size_by_group=self._sliding_window_size_by_group,
+                primary_kv_group_idx=self._state_primary_kv_group_idx,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -723,6 +717,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     save_decode_cache=self.config.save_decode_cache,
                     compress_ratios=self._compress_ratios_by_group,
                     sliding_window_size_by_group=self._sliding_window_size_by_group,
+                    primary_kv_group_idx=self._state_primary_kv_group_idx,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
@@ -835,6 +830,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
                 sliding_window_size_by_group=self._sliding_window_size_by_group,
+                primary_kv_group_idx=self._state_primary_kv_group_idx,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)

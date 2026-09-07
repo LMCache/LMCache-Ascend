@@ -124,3 +124,20 @@ def test_unsupported_state_mode_is_rejected(override):
         ordered_scheduler_groups_for_layer(
             "gdn.0", tensors, config_for(spec=gdn_spec(**override))
         )
+
+
+def test_explicit_primary_ignores_current_block_counts():
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import request_primary
+
+    assert request_primary(([1] * 32, [8]), (16, 16), 1) == 1
+    assert request_primary(([1], [8] * 32), (16, 16), 1) == 1
+    assert request_primary(([1] * 32, [8]), (16, 16), None) == 0
+
+
+def test_explicit_primary_cannot_fall_back_to_another_group():
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import request_primary
+
+    with pytest.raises(ValueError):
+        request_primary(([1],), (16,), 1)

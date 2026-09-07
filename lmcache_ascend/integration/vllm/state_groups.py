@@ -107,3 +107,16 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
     if len(candidates) != 1:
         raise ValueError("GDN requires one unambiguous full-attention primary group")
     return candidates[0]
+
+
+def request_primary(
+    block_ids: Sequence[Sequence[int]],
+    block_sizes: Sequence[int],
+    state_primary: int | None,
+) -> int:
+    """Use the GDN spec primary; preserve the existing policy for other models."""
+    if state_primary is not None:
+        if not 0 <= state_primary < len(block_ids):
+            raise ValueError("The configured full-attention primary is missing")
+        return state_primary
+    return max(range(len(block_ids)), key=lambda i: len(block_ids[i]) * block_sizes[i])
