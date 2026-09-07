@@ -6,6 +6,7 @@ from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 
 # Third Party
+from lmcache.v1.memory_management import TensorMemoryAllocator, TensorMemoryObj
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -216,3 +217,86 @@ def test_noncontiguous_state_elements_are_explicitly_rejected():
     tensors["gdn.0"][1] = tensors["gdn.0"][1].transpose(1, 2)
     with pytest.raises(ValueError, match="stride|contiguous"):
         build_state_layouts(config, tensors)
+
+
+@pytest.fixture
+def pool():
+    # The real pool reserves a 4 KiB-aligned block per allocation.
+    allocator = TensorMemoryAllocator(torch.zeros(16384, dtype=torch.uint8))
+    yield allocator
+    assert allocator.num_active_allocations == 0
+
+
+def test_allocate_composite_planes_from_real_pool(pool):
+    # First Party
+    from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+
+    layout = make_layout(layers=1)
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        assert pool.num_active_allocations == 1
+        base = buffer.memory_obj.raw_tensor.data_ptr()
+        conv, ssm = buffer.planes
+        assert conv.shape == (1, 1, 3)
+        assert ssm.shape == (1, 2, 2)
+        assert conv.dtype == torch.bfloat16
+        assert ssm.dtype == torch.float32
+        assert [conv.data_ptr() - base, ssm.data_ptr() - base] == [0, 8]
+        assert ssm.data_ptr() % 4 == 0
+        assert buffer.memory_obj.raw_tensor.numel() == 24
+
+
+def test_live_checkpoints_are_independent_and_release_to_pool(pool):
+    # First Party
+    from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+
+    with allocate_state_checkpoint(make_layout(), pool) as first:
+        with allocate_state_checkpoint(make_layout(), pool) as second:
+            for plane in first.planes:
+                plane.fill_(7)
+            for plane in second.planes:
+                plane.fill_(9)
+            assert all(torch.all(plane == 7) for plane in first.planes)
+            assert pool.num_active_allocations == 2
+        assert pool.num_active_allocations == 1
+        assert all(torch.all(plane == 7) for plane in first.planes)
+    first.close()
+    with pytest.raises(RuntimeError, match="released"):
+        _ = first.planes
+
+
+def test_allocation_failure_does_not_return_partial_buffer():
+    # First Party
+    from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+
+    allocator = TensorMemoryAllocator(torch.zeros(8, dtype=torch.uint8))
+    with pytest.raises(MemoryError):
+        allocate_state_checkpoint(make_layout(), allocator)
+    assert allocator.num_active_allocations == 0
+
+
+def test_view_failure_returns_allocation_to_pool(pool, monkeypatch):
+    # First Party
+    from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+
+    original = TensorMemoryObj.get_tensor
+
+    def fail_ssm(self, index):
+        if index == 1:
+            raise RuntimeError("injected view failure")
+        return original(self, index)
+
+    monkeypatch.setattr(TensorMemoryObj, "get_tensor", fail_ssm)
+    with pytest.raises(RuntimeError, match="injected view failure"):
+        allocate_state_checkpoint(make_layout(), pool)
+    assert pool.num_active_allocations == 0
+
+
+def test_attention_allocation_does_not_allocate_state(pool):
+    # Third Party
+    from lmcache.v1.memory_management import MemoryFormat
+
+    obj = pool.allocate(torch.Size([2, 1, 16, 4]), torch.bfloat16, MemoryFormat.KV_2LTD)
+    assert obj is not None
+    assert pool.num_active_allocations == 1
+    assert obj.get_tensor(0).shape == (2, 1, 16, 4)
+    obj.ref_count_down()
