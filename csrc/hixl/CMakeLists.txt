@@ -15,6 +15,7 @@ target_include_directories(hixl_npu_comms PRIVATE
     ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
     ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/include
+    ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/pkg_inc
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/pkg_inc/runtime
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/include/experiment/msprof
 )
