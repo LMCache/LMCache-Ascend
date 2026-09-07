@@ -507,6 +507,9 @@ def _patch_storage_manager():
         allocate_and_copy_objects as ascend_allocate_and_copy_objects,
     )
     from lmcache_ascend.v1.storage_backend.storage_manager import (
+        batched_contains as ascend_batched_contains,
+    )
+    from lmcache_ascend.v1.storage_backend.storage_manager import (
         batched_get as ascend_batched_get,
     )
     from lmcache_ascend.v1.storage_backend.storage_manager import get as ascend_get
@@ -517,6 +520,7 @@ def _patch_storage_manager():
     )
 
     lm_storage_manager.StorageManager.get = ascend_get
+    lm_storage_manager.StorageManager.batched_contains = ascend_batched_contains
     lm_storage_manager.StorageManager.batched_get = ascend_batched_get
     lm_storage_manager.StorageManager.prefetch_all_done_callback = (
         patched_prefetch_all_done_callback

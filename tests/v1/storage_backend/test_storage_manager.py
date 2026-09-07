@@ -62,3 +62,26 @@ def test_allocate_and_copy_objects_preserves_key_alignment_after_existing_key():
         src_objs[2].tensor,
         non_blocking=True,
     )
+
+
+def test_batched_contains_uses_pd_request_lease_when_context_set():
+    """Pinned PD receiver lookup should create a request-scoped lease."""
+    # First Party
+    from lmcache_ascend.v1.storage_backend import storage_manager as sm
+
+    keys = ["k0", "k1"]
+    pd_backend = MagicMock()
+    pd_backend.batched_contains_and_lease.return_value = len(keys)
+    manager = MagicMock()
+    manager.get_active_storage_backends.return_value = [("PDBackend", pd_backend)]
+
+    token = sm.set_current_pd_lookup_id("req-1")
+    try:
+        hit_chunks, block_mapping = sm.batched_contains(manager, keys, pin=True)
+    finally:
+        sm.reset_current_pd_lookup_id(token)
+
+    assert hit_chunks == len(keys)
+    assert block_mapping == {"PDBackend": keys}
+    pd_backend.batched_contains_and_lease.assert_called_once_with(keys, "req-1")
+    pd_backend.batched_contains.assert_not_called()
