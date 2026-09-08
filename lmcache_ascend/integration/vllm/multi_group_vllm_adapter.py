@@ -27,6 +27,7 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
 )
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.token_database import ChunkedTokenDatabase
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -40,9 +41,14 @@ from lmcache_ascend.integration.vllm.state_groups import (
     request_primary,
     select_state_primary,
     state_group_index,
+    validate_state_config,
 )
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
-from lmcache_ascend.v1.state_lookup import cancel_state_lookup, lookup_state
+from lmcache_ascend.v1.state_lookup import (
+    cancel_state_lookup,
+    lookup_state,
+    validate_state_lookup_client,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -580,16 +586,24 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
     ) -> None:
+        primary = (
+            select_state_primary(self._kv_cache_config)
+            if self._kv_cache_config is not None
+            else None
+        )
+        if primary is not None:
+            validate_state_config(config, vllm_config)
+            if role == KVConnectorRole.SCHEDULER:
+                validate_state_lookup_client(self.lookup_client, self.worker_count)
+                if type(self.lookup_client.token_database) is not ChunkedTokenDatabase:
+                    raise ValueError("GDN checkpoints require ChunkedTokenDatabase")
         super()._init_connector_state(role, vllm_config, config)
         self._allocated_blocks: dict[str, tuple[list[int], ...]] = {}
-        self._state_primary_kv_group_idx: int | None = None
+        self._state_primary_kv_group_idx: int | None = primary
         if self._kv_cache_config is not None and getattr(
             self._kv_cache_config, "kv_cache_groups", None
         ):
             self._num_kv_groups = len(self._kv_cache_config.kv_cache_groups)
-            self._state_primary_kv_group_idx = select_state_primary(
-                self._kv_cache_config
-            )
             self._block_sizes_by_group: "tuple[int, ...]" = tuple(
                 group.kv_cache_spec.block_size
                 for group in self._kv_cache_config.kv_cache_groups
@@ -667,6 +681,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     def get_num_new_matched_tokens(self, request: Any, num_computed_tokens: int):
         if self._state_primary_kv_group_idx is None:
             return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if getattr(request, "mm_features", None):
+            raise ValueError("GDN checkpoints support only text requests")
         if request.request_id.startswith("mock_req"):
             return 0
         if self.kv_role == "kv_producer" and not hasattr(

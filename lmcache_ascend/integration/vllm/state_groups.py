@@ -15,6 +15,10 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.state_layout import StateGroupLayout, build_state_group_layout
+from lmcache_ascend.integration.vllm.skip_state_groups import (
+    parse_skip_state_policy_from_env,
+    should_skip_layer,
+)
 
 
 def layer_spec(group: Any, layer_name: str) -> Any:
@@ -94,8 +98,34 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
     if not has_state:
         return None
     candidates = []
+    names = set()
+    policy = parse_skip_state_policy_from_env()
     for index, group in enumerate(groups):
         specs = [layer_spec(group, name) for name in group.layer_names]
+        if group.is_eagle_group:
+            raise ValueError("GDN checkpoints do not support MTP/eagle groups")
+        for name, spec in zip(group.layer_names, specs, strict=True):
+            if name in names:
+                raise ValueError(
+                    f"Hybrid layer {name!r} has ambiguous scheduler groups"
+                )
+            names.add(name)
+            if should_skip_layer(layer_name=name, scheduler_group=group, policy=policy):
+                raise ValueError(f"Cannot skip required hybrid layer {name!r}")
+            if isinstance(spec, MambaSpec):
+                validate_gdn_spec(spec)
+            elif not (
+                type(spec) is FullAttentionSpec
+                and spec.sliding_window is None
+                and spec.attention_chunk_size is None
+            ):
+                raise ValueError(
+                    "GDN supports only full Attention and GDN state groups"
+                )
+        if any(isinstance(spec, MambaSpec) for spec in specs) and not all(
+            isinstance(spec, MambaSpec) for spec in specs
+        ):
+            raise ValueError("Hybrid state and Attention require separate groups")
         if (
             specs
             and all(
@@ -110,6 +140,69 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
     if len(candidates) != 1:
         raise ValueError("GDN requires one unambiguous full-attention primary group")
     return candidates[0]
+
+
+def validate_state_config(config: Any, vllm_config: Any) -> None:
+    """The first hybrid path uses synchronous all-rank text/TP CPU/disk caching."""
+    if vllm_config.speculative_config is not None:
+        raise ValueError("GDN checkpoints do not support MTP/speculative decoding")
+    if vllm_config.parallel_config.pipeline_parallel_size != 1:
+        raise ValueError("GDN checkpoints do not support pipeline parallelism")
+    # Qwen3.5 may expose a multimodal model config; request payloads are checked
+    # before lookup and again in _attach_state_executions before transfer.
+    for field in (
+        "store_async",
+        "enable_async_loading",
+        "use_layerwise",
+        "enable_blending",
+        "enable_chunk_statistics",
+        "enable_scheduler_bypass_lookup",
+        "enable_pd",
+        "enable_p2p",
+        "enable_controller",
+        "external_lookup_client",
+        "remote_url",
+        "storage_plugins",
+        "remote_storage_plugins",
+        "gds_path",
+        "maru_path",
+    ):
+        if getattr(config, field):
+            raise ValueError(f"GDN checkpoints do not support {field}")
+    if config.hit_miss_ratio is not None:
+        raise ValueError("GDN checkpoints do not support hit_miss_ratio")
+    for field in (
+        "save_only_first_rank",
+        "enable_nixl_storage",
+        "remove_after_retrieve",
+        "audit_backend_enabled",
+    ):
+        if config.get_extra_config_value(field, False):
+            raise ValueError(f"GDN checkpoints do not support {field}")
+    world_size = vllm_config.parallel_config.tensor_parallel_size
+    workers = config.get_lookup_server_worker_ids(False, world_size)
+    if world_size <= 0 or (workers and sorted(workers) != list(range(world_size))):
+        raise ValueError(
+            "GDN checkpoints require all lookup workers; no worker subsets"
+        )
+    if config.lmcache_worker_ids and sorted(config.lmcache_worker_ids) != list(
+        range(world_size)
+    ):
+        raise ValueError("GDN checkpoints do not support lmcache worker subsets")
+    tiers = {"LocalCPUBackend", "LocalDiskBackend"}
+    if (config.store_location is not None and config.store_location not in tiers) or (
+        config.retrieve_locations is not None
+        and (
+            not config.retrieve_locations or not set(config.retrieve_locations) <= tiers
+        )
+    ):
+        raise ValueError("GDN checkpoints support only local CPU/disk locations")
+    if config.max_local_cpu_size <= 0 or not (
+        config.local_cpu or (config.local_disk and config.max_local_disk_size > 0)
+    ):
+        raise ValueError("GDN checkpoints require a CPU allocator and a CPU/disk tier")
+    if config.pin_timeout_sec <= 0:
+        raise ValueError("GDN checkpoints require positive pin_timeout_sec")
 
 
 def request_primary(
@@ -150,9 +243,8 @@ def build_state_layouts(
 
 
 def require_no_state_transfer(state_groups: Sequence[object]) -> None:
-    """Prevent registered GDN state from entering the unfinished hybrid path."""
+    """Keep raw state out of the KV-only flattening path."""
     if state_groups:
         raise NotImplementedError(
-            "GDN layouts are supported, but hybrid state store/retrieve is not "
-            "implemented in PR 1"
+            "Raw GDN state requires hybrid registration, not KV flattening"
         )

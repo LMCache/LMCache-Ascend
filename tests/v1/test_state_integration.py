@@ -102,6 +102,14 @@ def test_hybrid_minimum_rejects_entire_selection_and_skip_limits_query(monkeypat
     cancel.assert_called_once_with(connector.lookup_client, "r")
 
 
+def test_hybrid_multimodal_request_is_rejected_before_lookup(monkeypatch):
+    connector, request, lookup, _ = _scheduler(monkeypatch, [3072])
+    request.mm_features = [object()]
+    with pytest.raises(ValueError, match="text"):
+        connector.get_num_new_matched_tokens(request, 0)
+    lookup.assert_not_called()
+
+
 def _load_worker(monkeypatch, ret_mask=None):
     from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
     from lmcache_ascend.integration.vllm import vllm_v1_adapter as module
@@ -473,9 +481,7 @@ def test_hybrid_attention_copy_error_drains_and_releases_get_reference(drain_err
         on_retrieve_request=lambda count: profile, on_retrieve_finished=Mock()
     )
     memory = Mock()
-    engine._process_hybrid_tokens = Mock(
-        return_value=([(object(), memory, 0, 16)], 16)
-    )
+    engine._process_hybrid_tokens = Mock(return_value=([(object(), memory, 0, 16)], 16))
     copy_error = RuntimeError("Attention copy failed")
     stream = Mock()
     if drain_error:

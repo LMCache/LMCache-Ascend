@@ -7,6 +7,7 @@ import sys
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.token_database import ChunkedTokenDatabase
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -29,11 +30,13 @@ from lmcache_ascend.integration.vllm.skip_state_groups import (
 from lmcache_ascend.integration.vllm.state_groups import (
     build_state_layouts,
     request_primary,
-    require_no_state_transfer,
+    select_state_primary,
+    validate_state_config,
 )
 from lmcache_ascend.v1.state_cache import StateCache, StateLoadError
 from lmcache_ascend.v1.state_lookup import cancel_state_lookup
 from lmcache_ascend.v1.state_transfer import transfer_state
+from lmcache_ascend.v1.storage_backend.storage_manager import state_store_locations
 
 if TYPE_CHECKING:
     # Third Party
@@ -78,18 +81,51 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         **kwargs: Any,
     ) -> None:
         """Register KV caches (upstream) with Ascend multi-group preprocessing."""
+        primary = (
+            select_state_primary(self._kv_cache_config)
+            if self._kv_cache_config is not None
+            else None
+        )
+        engine = self.lmcache_engine
+        if primary is not None:
+            validate_state_config(self.config, self._vllm_config)
+            if (
+                engine is None
+                or type(engine.token_database) is not ChunkedTokenDatabase
+            ):
+                raise ValueError("GDN checkpoints require ChunkedTokenDatabase")
+            if engine.save_only_first_rank or engine.remove_after_retrieve:
+                raise ValueError(
+                    "GDN checkpoints reject save_only_first_rank/remove_after_retrieve"
+                )
+            locations = state_store_locations(engine.storage_manager)
+            if not locations:
+                raise ValueError("GDN checkpoints require a writable CPU/disk tier")
+            requested = set(self.config.retrieve_locations or ())
+            if self.config.store_location:
+                requested.add(self.config.store_location)
+            if not requested <= set(locations):
+                raise ValueError("GDN checkpoint locations must be available")
         self.state_layouts = (
             build_state_layouts(self._kv_cache_config, kv_caches)
             if self._kv_cache_config is not None
             else ()
         )
-        require_no_state_transfer(self.state_layouts)
         self.state_kv_caches = {
             name: tuple(kv_caches[name])
             for layout in self.state_layouts
             for name in layout.layer_names
         }
-        flat_kv = kv_caches
+        attention_kv = (
+            {
+                name: entry
+                for name, entry in kv_caches.items()
+                if name not in self.state_kv_caches
+            }
+            if self.state_layouts
+            else kv_caches
+        )
+        flat_kv = attention_kv
         sched_by_layer: tuple[int, ...] | None = None
         layer_to_groups: dict[str, list[int]] | None = None
         bundled = False
@@ -97,7 +133,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         if multi_group:
             flat_kv, sched_by_layer, layer_to_groups, bundled = build_flat_kv_caches(
-                kv_caches,
+                attention_kv,
                 self._kv_cache_config,
             )
             flat_kv, sched_by_layer, layer_to_groups = (
@@ -130,16 +166,30 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 )
                 hints["scheduler_group_by_flat_layer"] = sched_by_layer
                 hints["layer_to_scheduler_groups"] = layer_to_groups
-                hints["model_kv_caches"] = kv_caches
+                hints["model_kv_caches"] = attention_kv
                 hints["flat_layer_names"] = list(flat_kv.keys())
                 hints["bundle_multi_spec"] = bundled
             connector.layout_hints = hints
+
+        if self.state_layouts:
+            if connector is None or not hasattr(connector, "ensure_kv_layer_groups"):
+                raise ValueError(
+                    "GDN checkpoints require the Ascend grouped KV connector"
+                )
+            connector.num_layers = len(flat_kv)
+            self.num_layers = len(flat_kv)
 
         # Build kv_layer_groups_manager before post_init() so
         # metadata.get_shapes() allocates one MemoryObj slot per NPU group.
         if connector is not None and hasattr(connector, "ensure_kv_layer_groups"):
             try:
                 connector.ensure_kv_layer_groups(list(flat_kv.values()))
+                if (
+                    self.state_layouts
+                    and len(engine.metadata.kv_layer_groups_manager.kv_layer_groups)
+                    != 1
+                ):
+                    raise ValueError("Hybrid requires one full Attention payload group")
                 logger.info(
                     "Registered KV layer groups during register_kv_caches "
                     "(%d layers, kv_layer_groups_manager=%s)",
@@ -167,6 +217,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         logger.info("Registering KV caches")
         assert len(self.kv_caches) == 0 and len(flat_kv) > 0
         self.kv_caches = flat_kv
+        if self.state_layouts:
+            engine.state_layouts = self.state_layouts
         self._manager.post_init()
 
     # Upstream start_load_kv only transfers the primary group's slot_mapping.

@@ -15,6 +15,7 @@ import torch
 from lmcache_ascend.integration.vllm.state_groups import (
     layer_spec,
     require_no_state_transfer,
+    select_state_primary,
     state_group_index,
     validate_state_planes,
 )
@@ -280,6 +281,50 @@ def build_flat_kv_caches(
         state_index = state_group_index(kv_cache_config, name)
         if state_index is not None:
             require_no_state_transfer((state_index,))
+    primary = select_state_primary(kv_cache_config)
+    if primary is not None:
+        # Spec-known hybrid MHA must retain its native K/V representation.
+        # Generic multi-spec bundling can mistake (K, V) for independent state.
+        names = kv_cache_config.kv_cache_groups[primary].layer_names
+        if set(kv_caches) != set(names):
+            raise ValueError("Hybrid registration requires every full Attention layer")
+        signature = None
+        mapping = {}
+        for name, entry in kv_caches.items():
+            fmt = KVCacheFormat.detect([entry])
+            if fmt not in (KVCacheFormat.MERGED_KV, KVCacheFormat.SEPARATE_KV):
+                raise ValueError(
+                    "Hybrid full Attention requires native merged/separate KV"
+                )
+            planes = _entry_planes(entry)
+            spec = layer_spec(kv_cache_config.kv_cache_groups[primary], name)
+            tail = (spec.block_size, spec.num_kv_heads, spec.head_size)
+            valid_shape = (
+                isinstance(entry, torch.Tensor)
+                and entry.ndim == 5
+                and entry.shape[0] == 2
+                and entry.shape[1] > 0
+                and tuple(entry.shape[2:]) == tail
+            ) or (
+                isinstance(entry, (tuple, list))
+                and len(entry) == len(planes) == 2
+                and all(
+                    t.ndim == 4 and t.shape[0] > 0 and tuple(t.shape[1:]) == tail
+                    for t in planes
+                )
+            )
+            if not valid_shape or any(t.dtype != spec.dtype for t in planes):
+                raise ValueError(
+                    "Hybrid full Attention tensors do not match their spec"
+                )
+            current = (fmt, tuple((tuple(t.shape), t.dtype) for t in planes))
+            if signature is not None and current != signature:
+                raise ValueError(
+                    "Hybrid requires one uniform full Attention payload group"
+                )
+            signature = current
+            mapping[name] = [primary] * len(planes)
+        return dict(kv_caches), (primary,) * len(kv_caches), mapping, False
     sched_by_layer: list[int] = []
     layer_to_groups = build_layer_to_scheduler_groups(
         kv_cache_config,
