@@ -28,6 +28,7 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
+from lmcache_ascend.v1.state_cache import StateCache
 
 logger = init_logger(__name__)
 
@@ -1068,6 +1069,26 @@ class AscendLMCacheEngine(LMCacheEngine):
     def lookup_unpin(self, lookup_id: str) -> None:
         with self._engine_state_lock:
             super().lookup_unpin(lookup_id)
+
+    @torch.inference_mode()
+    def store_state(self, execution, layouts, kv_caches, ordering_event):
+        """Synchronously save a planned endpoint after the worker's forward gate."""
+        if self._is_passive() or not self.is_healthy() or self.is_frozen():
+            return
+        if self.store_location not in (None, "LocalCPUBackend"):
+            raise ValueError("State disk publication is not integrated yet")
+        assert self.storage_manager is not None
+        assert self.gpu_connector is not None
+        with self._engine_state_lock:
+            StateCache(
+                self.storage_manager, self.token_database, self.config.chunk_size
+            ).save(
+                execution,
+                layouts,
+                kv_caches,
+                self.gpu_connector.store_stream,
+                ordering_event,
+            )
 
     @torch.inference_mode()
     def store(

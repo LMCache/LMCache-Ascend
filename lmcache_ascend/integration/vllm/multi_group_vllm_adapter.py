@@ -7,6 +7,7 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 """
 
 # Standard
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -267,6 +268,7 @@ class StateExecution:
     state_block_sizes: tuple[tuple[int, int], ...]
     can_load: bool
     can_save: bool
+    request_configs: dict | None = None
 
     def _blocks_at(self, boundary: int) -> tuple[tuple[int, int], ...]:
         blocks = []
@@ -719,6 +721,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     ),
                     block_ids_by_group=tuple(tuple(ids) for ids in tables),
                     state_block_sizes=state_sizes,
+                    request_configs=deepcopy(tracker.request_configs),
                     can_load=can_load,
                     can_save=(
                         not tracker.skip_save

@@ -144,11 +144,15 @@ def adopt_state_checkpoint(
 
 
 def allocate_state_checkpoint(
-    layout: StateGroupLayout, allocator: MemoryAllocatorInterface
+    layout: StateGroupLayout,
+    allocator: MemoryAllocatorInterface,
+    *,
+    busy_loop: bool | None = None,
 ) -> StateCheckpointBuffer:
     """Allocate a managed BINARY payload, including explicit padding segments."""
     shapes, dtypes, _ = _state_segments(layout)
-    obj = allocator.allocate(shapes, dtypes, fmt=MemoryFormat.BINARY)
+    kwargs = {} if busy_loop is None else {"busy_loop": busy_loop}
+    obj = allocator.allocate(shapes, dtypes, fmt=MemoryFormat.BINARY, **kwargs)
     if obj is None:
         raise MemoryError(
             f"Cannot allocate {layout.nbytes} bytes for a state checkpoint"

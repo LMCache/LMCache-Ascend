@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from typing import TYPE_CHECKING, Any, Optional
+import sys
 
 # Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
@@ -78,6 +79,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             else ()
         )
         require_no_state_transfer(self.state_layouts)
+        self.state_kv_caches = {
+            name: tuple(kv_caches[name])
+            for layout in self.state_layouts
+            for name in layout.layer_names
+        }
         flat_kv = kv_caches
         sched_by_layer: tuple[int, ...] | None = None
         layer_to_groups: dict[str, list[int]] | None = None
@@ -370,13 +376,19 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     def wait_for_save(self):
         """Blocking until the KV cache is saved to the connector buffer."""
 
+        # vLLM invokes this method from a generator finally, even if forward fails.
+        forward_failed = sys.exc_info()[0] is not None
         connector_metadata = self._parent._get_connector_metadata()
         assert isinstance(connector_metadata, LMCacheConnectorMetadata)
 
+        if forward_failed and getattr(self, "state_layouts", ()):
+            self._unpin_save_requests(connector_metadata)
+            self._wait_for_save_done = True
+            return
+
         if self.kv_role == "kv_consumer":
             if self.lmcache_engine is not None:
-                for request in connector_metadata.requests:
-                    self.lmcache_engine.lookup_unpin(request.req_id)
+                self._unpin_save_requests(connector_metadata)
             self._wait_for_save_done = True
             return
 
@@ -418,6 +430,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         ordering_event = torch.npu.Event()
         ordering_event.record()
         # lmcache-ascend end ---------------------
+
+        try:
+            self._save_state_executions(connector_metadata, ordering_event)
+        finally:
+            if getattr(self, "state_layouts", ()):
+                self._unpin_save_requests(connector_metadata)
 
         for request in connector_metadata.requests:
             self.lmcache_engine.lookup_unpin(request.req_id)
@@ -636,6 +654,33 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             len(token_ids) - local_present,
         )
         return local_present
+
+    def _unpin_save_requests(self, metadata):
+        req_ids = {request.req_id for request in metadata.requests}
+        req_ids.update(
+            execution.req_id for execution in getattr(metadata, "state_executions", ())
+        )
+        for req_id in req_ids:
+            self.lmcache_engine.lookup_unpin(req_id)
+
+    def _save_state_executions(self, metadata, ordering_event):
+        """Save state independently of Attention requests and save watermarks."""
+        layouts = getattr(self, "state_layouts", ())
+        if not layouts:
+            return
+        for execution in getattr(metadata, "state_executions", ()):
+            try:
+                self.lmcache_engine.store_state(
+                    execution, layouts, self.state_kv_caches, ordering_event
+                )
+            except Exception:
+                logger.exception(
+                    "State save failed: request=%s rank=%s boundary=%s",
+                    execution.req_id,
+                    self.lmcache_engine.metadata.worker_id,
+                    execution.end,
+                )
+                raise
 
     def _may_register_store_after_wait_for_save(self, request: "Request") -> bool:
         if self.kv_role == "kv_consumer":
