@@ -62,8 +62,13 @@ def local_disk_submit_put_task(self, key, memory_obj, on_complete_callback=None)
                 return None
             for candidate in candidates:
                 evicted_size = self.dict[candidate].size
-                self.batched_remove([candidate], force=False)
-                self.current_cache_size -= evicted_size
+                try:
+                    self.batched_remove([candidate], force=False)
+                finally:
+                    # remove drops the index before unlinking the file. An
+                    # unlink error must not leave that removed entry charged.
+                    if candidate not in self.dict:
+                        self.current_cache_size -= evicted_size
         self.cache_policy.update_on_put(key)
         self.disk_worker.insert_put_task(key)
         self.current_cache_size += size

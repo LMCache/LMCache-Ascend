@@ -608,6 +608,28 @@ def test_disk_capacity_rejection_can_retry_after_unpin(disk_tiers):
         assert disk.current_cache_size == disk.usage == size
 
 
+def test_state_eviction_missing_file_keeps_capacity_reusable(disk_tiers):
+    cpu, disk, _, pending = disk_tiers
+    first = checkpoint_key()
+    second = state_checkpoint_key(CheckpointRef(prefix(), 64, 1))
+    with allocate_state_checkpoint(layout(), cpu, busy_loop=False) as owner:
+        size = owner.memory_obj.get_size()
+        disk.max_cache_size = size
+        disk.submit_put_task(first, owner.memory_obj)
+        complete_disk_write(pending)
+        os.remove(disk.dict[first].path)
+        with pytest.raises(FileNotFoundError):
+            disk.submit_put_task(second, owner.memory_obj)
+        assert not disk.dict and not pending
+        assert disk.current_cache_size == disk.usage == 0
+        assert not disk.exists_in_put_tasks(second)
+        assert owner.memory_obj.meta.ref_count == 1
+        disk.submit_put_task(second, owner.memory_obj)
+        complete_disk_write(pending)
+        assert disk.contains(second)
+        assert disk.current_cache_size == disk.usage == size
+
+
 def test_state_tiers_support_disk_only_staging_and_explicit_location(disk_tiers):
     cpu, _, manager, _ = disk_tiers
     assert state_store_locations(manager) == ["LocalCPUBackend", "LocalDiskBackend"]
