@@ -65,10 +65,9 @@ def plane_major(entries):
 
 
 def assert_bytes_equal(actual, expected):
-    assert torch.equal(
-        actual.cpu().contiguous().view(torch.uint8),
-        expected.cpu().contiguous().view(torch.uint8),
-    )
+    # Snapshot CPU payload before expected.cpu() can synchronize the NPU stream.
+    actual_bytes = actual.cpu().contiguous().view(torch.uint8).clone()
+    assert torch.equal(actual_bytes, expected.cpu().contiguous().view(torch.uint8))
 
 
 def operation(entries, buffer, direction, block=1, boundary=16):
@@ -219,3 +218,93 @@ def test_operation_revalidates_borrowed_inputs(pool, invalid):
                 transfer_state(store)
             for payload in buffer.planes:
                 assert torch.all(payload == -7)
+
+
+@pytest.mark.parametrize(
+    "conv_numel, ssm_numel, layers",
+    [
+        pytest.param(8192, 4096, 1, id="16KiB"),
+        pytest.param(16384, 8192, 5, id="32KiB-five-layers"),
+        pytest.param(8208, 4104, 1, id="tile-plus-32-byte-tail"),
+        pytest.param(8193, 4097, 1, id="probe-unaligned-tail"),
+        pytest.param(3, 4, 1, id="probe-small-payload-with-padding"),
+    ],
+)
+def test_transfer_tile_boundaries(pool, conv_numel, ssm_numel, layers):
+    # The probes must produce evidence; do not xfail or silently skip failures.
+    source = runtime_tensors(((1, conv_numel), (ssm_numel, 1)), layers=layers)
+    target = tuple(tuple(torch.full_like(t, -1) for t in entry) for entry in source)
+    layout = group_layout(source)
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        raw = buffer.memory_obj.raw_tensor
+        raw.fill_(91)
+        transfer_state(operation(source, buffer, "store", block=3))
+        assert torch.npu.current_stream().query()
+        assert_payload_matches(buffer, source, 3)
+        for left, right in zip(layout.planes, layout.planes[1:], strict=False):
+            assert torch.all(raw[left.offset + left.nbytes : right.offset] == 91)
+        transfer_state(operation(target, buffer, "load", block=0))
+        assert torch.npu.current_stream().query()
+        for original, restored in zip(source, target, strict=True):
+            for src, dst in zip(original, restored, strict=True):
+                assert_bytes_equal(dst[0], src[3])
+                assert torch.all(dst[1:].cpu() == -1)
+
+
+def test_transfer_completion_and_reuse(pool):
+    source = runtime_tensors()
+    layout = group_layout(source)
+    current = torch.npu.current_stream()
+    producer = torch.npu.Stream()
+    producer.wait_stream(current)
+    # A simultaneously owned checkpoint must survive repeated pool reuse.
+    with allocate_state_checkpoint(layout, pool) as retained:
+        for payload in retained.planes:
+            payload.fill_(-9)
+        for iteration in range(3):
+            with allocate_state_checkpoint(layout, pool) as buffer:
+                with torch.npu.stream(producer):
+                    for layer, entry in enumerate(source):
+                        for plane, tensor in enumerate(entry):
+                            tensor.fill_(iteration * 10 + layer * 2 + plane)
+                current.wait_stream(producer)
+                transfer_state(operation(source, buffer, "store"))
+                assert current.query()
+                for plane, payload in enumerate(buffer.planes):
+                    for layer in range(len(source)):
+                        assert torch.all(
+                            payload[layer] == iteration * 10 + layer * 2 + plane
+                        )
+                for payload in retained.planes:
+                    assert torch.all(payload == -9)
+            # The previous call completed before its allocation was released.
+
+
+def test_transfer_drains_failed_submission(pool, monkeypatch):
+    source = runtime_tensors()
+    original = lmc_ops.multi_layer_gdn_state_transfer
+    submitted = torch.npu.Event()
+
+    def submit_then_fail(*args):
+        original(*args)
+        submitted.record()
+        raise RuntimeError("injected post-submission failure")
+
+    monkeypatch.setattr(lmc_ops, "multi_layer_gdn_state_transfer", submit_then_fail)
+    with allocate_state_checkpoint(group_layout(source), pool) as buffer:
+        with pytest.raises(RuntimeError, match="injected post-submission failure"):
+            transfer_state(operation(source, buffer, "store"))
+        assert submitted.query()
+        # Failure is propagated; this buffer is released, never published.
+
+
+def test_kernel_rejects_cross_npu_runtime(pool):
+    if torch.npu.device_count() < 2:
+        pytest.skip("Two NPUs required for cross-device rejection")
+    source = runtime_tensors()
+    with allocate_state_checkpoint(group_layout(source), pool) as buffer:
+        states = plane_major(source)
+        other = (states[0].device.index + 1) % torch.npu.device_count()
+        states[-1] = states[-1].to(f"npu:{other}")
+        with pytest.raises(RuntimeError, match="same NPU"):
+            lmc_ops.multi_layer_gdn_state_transfer(list(buffer.planes), states, 1, True)
