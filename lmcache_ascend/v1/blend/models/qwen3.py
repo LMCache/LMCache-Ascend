@@ -29,9 +29,11 @@ class LMCQwen3Model(LMCModel):
     # ref: https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L353 # noqa: E501
     # https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py#L268 # noqa: E501
     def compute_layer(
-        self, input_ids: torch.Tensor, mask: Optional[torch.Tensor] = None
+        self,
+        input_ids: torch.Tensor,
+        mask: Optional[torch.Tensor] = None,
     ):
-        hidden_states = self.vllm_model.get_input_embeddings(input_ids.npu())
+        hidden_states = self.embed_input_ids(input_ids.npu())
         residual = None
 
         # TODO (Jiayi): reduce the number of calls
@@ -127,7 +129,6 @@ class LMCQwen3Model(LMCModel):
             v = v.view(-1, num_kv_heads * head_size)
 
             hidden_states, _ = layer.self_attn.o_proj(attn_output)
-
             # # According to hf transformers
             # hidden_states = residual + hidden_states
             # residual = hidden_states

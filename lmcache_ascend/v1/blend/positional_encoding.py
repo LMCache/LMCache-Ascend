@@ -102,21 +102,63 @@ class FusedRope:
         self.rope = rope
         self.is_neox_style = is_neox_style
         self.head_size = rope.head_size
-        self.cos_sin_cache = rope.cos_sin_cache
 
     def fused_encode(self, old_positions, new_positions, k):
+        cos_sin_cache = self.rope.cos_sin_cache.to(k.device)
         lmc_ops.rotary_embedding_k_fused(
             old_positions,
             new_positions,
             k,
             self.head_size,
-            self.cos_sin_cache.to(k.device),
+            cos_sin_cache,
             self.is_neox_style,
         )
         return k
 
     def __call__(self, old_positions, new_positions, k):
         return self.fused_encode(old_positions, new_positions, k)
+
+
+def _validate_fused_relocation(
+    rope,
+    fused_rope,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    old_positions: torch.Tensor,
+    new_positions: torch.Tensor,
+) -> bool:
+    """Validate that fused RoPE relocation matches direct encoding."""
+    q_no_pos = q.clone()
+    k_no_pos = k.clone()
+    _, k_new_ref = rope(new_positions, q_no_pos, k_no_pos)
+
+    q_no_pos = q.clone()
+    k_no_pos = k.clone()
+    _, k_old = rope(old_positions, q_no_pos, k_no_pos)
+    k_new_fused = fused_rope(old_positions, new_positions, k_old.clone())
+
+    max_k_error_fused = (k_new_ref - k_new_fused).abs().max()
+    logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
+
+    return bool(max_k_error_fused < 0.1)
+
+
+def validate_fused_correctness(rope, fused_rope, head_size: int) -> bool:
+    hidden_dim = head_size * 8
+    num_tokens = 10
+    dumb_q = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    dumb_k = torch.rand((num_tokens, hidden_dim), device="npu", dtype=torch.bfloat16)
+    old_positions = torch.arange(num_tokens, device="npu")
+    new_positions = torch.arange(100, 100 + num_tokens, device="npu")
+
+    return _validate_fused_relocation(
+        rope,
+        fused_rope,
+        dumb_q,
+        dumb_k,
+        old_positions,
+        new_positions,
+    )
 
 
 def validate_rope_params(
@@ -165,20 +207,19 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     logger.info(f"Max Q error: {max_q_error.item()}")
     logger.info(f"Max K error: {max_k_error.item()}")
 
-    q_no_pos = dumb_q.clone()
-    k_no_pos = dumb_k.clone()
     positions2 = torch.arange(100, 100 + num_tokens, device="npu")
-    _, k_pos2 = rope(positions2, q_no_pos, k_no_pos)
-
-    k_no_pos = dumb_k.clone()
-    _, k_pos1 = rope(positions, q_no_pos, k_no_pos)
-    k_pos2_fused = fused_rope(positions, positions2, k_pos1)
-
-    max_k_error_fused = (k_pos2 - k_pos2_fused).abs().max()
-
-    logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
-
-    return max_q_error < 0.1 and max_k_error < 0.1 and max_k_error_fused < 0.1
+    return (
+        bool(max_q_error < 0.1)
+        and bool(max_k_error < 0.1)
+        and _validate_fused_relocation(
+            rope,
+            fused_rope,
+            dumb_q,
+            dumb_k,
+            positions,
+            positions2,
+        )
+    )
 
 
 # Main interface
@@ -236,6 +277,15 @@ def get_fused_rope(
     with set_forward_context(dummy_attn_metadata, dummy_vllm_config):
         forward_context = get_forward_context()
         forward_context.is_first_layer = False
+        # vllm-ascend >=0.18's RoPE forward_oot reads Ascend-specific fields
+        # from the forward context that generic set_forward_context does not
+        # populate. Set them manually for this init-time validation path to
+        # avoid threading a full real vllm_config into the blend helpers.
+        forward_context.is_draft_model = False
+        forward_context.flash_comm_v1_enabled = False
+        forward_context.flashcomm_v2_enabled = False
+        forward_context.capturing = False
+        forward_context.num_tokens = 0
 
         correct = validate_reverse_correctness(
             rope, reverse_rope, fused_rope, head_size
@@ -244,6 +294,58 @@ def get_fused_rope(
     if not correct:
         logger.error(
             "Fused/reverse rotary encoding is not correct! Will disable blending!"
+        )
+        return None
+
+    return fused_rope
+
+
+def get_fused_rope_from_rotary_emb(rotary_emb) -> Optional[Callable[..., Any]]:
+    required_attrs = ("head_size", "is_neox_style", "cos_sin_cache")
+    missing_attrs = [attr for attr in required_attrs if not hasattr(rotary_emb, attr)]
+    if missing_attrs:
+        logger.error(
+            "Cannot build fused rope from rotary_emb; missing attrs: %s",
+            missing_attrs,
+        )
+        return None
+
+    if rotary_emb.cos_sin_cache.device.type != "npu":
+        rotary_emb.cos_sin_cache = rotary_emb.cos_sin_cache.to("npu")
+
+    fused_rope = FusedRope(rotary_emb, rotary_emb.is_neox_style)
+
+    # NOTE(niming): vllm-ascend's RoPE operator requires a forward context to
+    # cache cos/sin values. During initialization-time accuracy validation,
+    # this context is absent, causing execution failure. We mock a dummy
+    # context here to bypass this requirement without affecting runtime services.
+    dummy_vllm_config = MagicMock()
+    dummy_vllm_config.parallel_config.data_parallel_size = 1
+    dummy_vllm_config.compilation_config.static_forward_context = False
+    dummy_attn_metadata = MagicMock()
+
+    with set_forward_context(dummy_attn_metadata, dummy_vllm_config):
+        forward_context = get_forward_context()
+        forward_context.is_first_layer = False
+        # vllm-ascend >=0.18's RoPE forward_oot reads Ascend-specific fields
+        # from the forward context that generic set_forward_context does not
+        # populate. Set them manually for this init-time validation path to
+        # avoid threading a full real vllm_config into the blend helpers.
+        forward_context.is_draft_model = False
+        forward_context.flash_comm_v1_enabled = False
+        forward_context.flashcomm_v2_enabled = False
+        forward_context.capturing = False
+        forward_context.num_tokens = 0
+        correct = validate_fused_correctness(
+            rotary_emb,
+            fused_rope,
+            rotary_emb.head_size,
+        )
+
+    if not correct:
+        logger.error(
+            "Fused rotary encoding is not correct for the live rotary_emb! "
+            "Will disable blending!"
         )
         return None
 

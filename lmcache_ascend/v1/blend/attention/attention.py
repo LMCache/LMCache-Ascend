@@ -11,7 +11,7 @@ from torch_npu import npu_fused_infer_attention_score
 from transformers.integrations.npu_flash_attention import (
     npu_flash_attn_varlen_func as flash_attn_varlen_func,
 )
-from vllm.attention import Attention
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 import torch
 
@@ -24,6 +24,19 @@ def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         slen, num_key_value_heads, n_rep, head_dim
     )
     return hidden_states.reshape(slen, num_key_value_heads * n_rep, head_dim)
+
+
+def build_causal_bool_mask(
+    q_positions: torch.Tensor,
+    kv_seq_len: int,
+) -> torch.Tensor:
+    k_positions = torch.arange(
+        kv_seq_len,
+        device=q_positions.device,
+        dtype=q_positions.dtype,
+    )
+    mask_condition = q_positions.unsqueeze(1) < k_positions.unsqueeze(0)
+    return mask_condition.unsqueeze(0).unsqueeze(0).to(torch.bool)
 
 
 # ref from transformers.models.llama.modeling_llama import eager_attention_forward
@@ -257,18 +270,12 @@ class ZLMCFlashAttnBackend(AttentionInterface):
             # Note: For flattened 3D input, q_seq_len is the total token count
             q_positions = torch.arange(q_seq_len, device=query.device, dtype=torch.long)
 
-        k_positions = torch.arange(kv_seq_len, device=query.device, dtype=torch.long)
-
         # 5. Construct Custom Boolean Mask for NPU
         if q_positions.dim() == 1:
-            mask_condition = q_positions.unsqueeze(1) < k_positions.unsqueeze(0)
-            # Reshape to (1, 1, Q, K) to broadcast over Batch and Heads
-            atten_mask = mask_condition.unsqueeze(0).unsqueeze(0)
+            atten_mask = build_causal_bool_mask(q_positions, kv_seq_len)
         else:
             # If q_positions is [Batch, Seq]
             raise NotImplementedError
-
-        atten_mask = atten_mask.to(torch.bool)
 
         result_tuple = npu_fused_infer_attention_score(
             query=query_input,  # Use the prepared input
