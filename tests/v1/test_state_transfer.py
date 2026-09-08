@@ -5,13 +5,20 @@
 from math import prod
 
 # Third Party
+from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import PinMemoryAllocator
 import pytest
 import torch
 
 # First Party
+from lmcache_ascend.v1.state_checkpoint import (
+    CheckpointRef,
+    StateBlockBinding,
+    StateOperation,
+)
 from lmcache_ascend.v1.state_layout import build_state_group_layout
 from lmcache_ascend.v1.state_memory import allocate_state_checkpoint
+from lmcache_ascend.v1.state_transfer import transfer_state
 import lmcache_ascend.c_ops as lmc_ops
 
 
@@ -62,6 +69,23 @@ def assert_bytes_equal(actual, expected):
         actual.cpu().contiguous().view(torch.uint8),
         expected.cpu().contiguous().view(torch.uint8),
     )
+
+
+def operation(entries, buffer, direction, block=1, boundary=16):
+    ref = CheckpointRef.from_chunk(
+        CacheEngineKey("qwen-test", 1, 0, 123, torch.bfloat16),
+        chunk_end=boundary,
+        boundary=boundary,
+        chunk_size=16,
+        group_index=buffer.layout.group_index,
+    )
+    return StateOperation(ref, StateBlockBinding(entries, block), buffer, direction)
+
+
+def assert_payload_matches(buffer, entries, block):
+    for plane, payload in enumerate(buffer.planes):
+        for layer, entry in enumerate(entries):
+            assert_bytes_equal(payload[layer], entry[plane][block])
 
 
 @pytest.mark.parametrize(
@@ -153,3 +177,45 @@ def test_kernel_rejects_invalid_inputs_before_copy(pool, invalid):
         torch.npu.current_stream().synchronize()
         for payload in buffer.planes:
             assert torch.all(payload == -7)
+
+
+@pytest.mark.parametrize("source_block, target_block", [(0, 3), (1, 2)])
+def test_operation_round_trip(pool, source_block, target_block):
+    source = runtime_tensors()
+    target = tuple(tuple(torch.full_like(t, -1) for t in entry) for entry in source)
+    with allocate_state_checkpoint(group_layout(source), pool) as buffer:
+        transfer_state(operation(source, buffer, "store", source_block))
+        # Read registered CPU payload immediately: transfer_state must have waited.
+        assert_payload_matches(buffer, source, source_block)
+        transfer_state(operation(target, buffer, "load", target_block))
+        for source_entry, target_entry in zip(source, target, strict=True):
+            for source_plane, target_plane in zip(
+                source_entry, target_entry, strict=True
+            ):
+                assert_bytes_equal(
+                    target_plane[target_block], source_plane[source_block]
+                )
+                for block in set(range(4)) - {target_block}:
+                    assert torch.all(target_plane[block].cpu() == -1)
+
+
+@pytest.mark.parametrize("invalid", ["released", "noncontiguous", "block"])
+def test_operation_revalidates_borrowed_inputs(pool, invalid):
+    source = runtime_tensors()
+    with allocate_state_checkpoint(group_layout(source), pool) as buffer:
+        store = operation(source, buffer, "store")
+        if invalid == "released":
+            buffer.close()
+            with pytest.raises(RuntimeError, match="released"):
+                transfer_state(store)
+        else:
+            for payload in buffer.planes:
+                payload.fill_(-7)
+            if invalid == "noncontiguous":
+                source[0][1].transpose_(-1, -2)
+            else:
+                source[0][0].resize_(1, *source[0][0].shape[1:])
+            with pytest.raises(ValueError, match="runtime layout|out of range"):
+                transfer_state(store)
+            for payload in buffer.planes:
+                assert torch.all(payload == -7)
