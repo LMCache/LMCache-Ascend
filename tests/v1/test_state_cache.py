@@ -13,6 +13,12 @@ import os
 
 # Third Party
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MixedMemoryAllocator,
+    PagedTensorMemoryAllocator,
+    TensorMemoryAllocator,
+)
 from lmcache.v1.storage_backend.cache_policy import get_cache_policy
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
 from lmcache.v1.storage_backend.local_disk_backend import (
@@ -20,12 +26,6 @@ from lmcache.v1.storage_backend.local_disk_backend import (
     LocalDiskWorker,
 )
 from lmcache.v1.storage_backend.storage_manager import StorageManager
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MixedMemoryAllocator,
-    PagedTensorMemoryAllocator,
-    TensorMemoryAllocator,
-)
 import pytest
 import torch
 

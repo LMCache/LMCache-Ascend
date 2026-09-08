@@ -19,7 +19,6 @@ from lmcache_ascend.v1.state_memory import (
 from lmcache_ascend.v1.state_transfer import transfer_state
 from lmcache_ascend.v1.storage_backend.storage_manager import state_store_locations
 
-
 logger = init_logger(__name__)
 
 

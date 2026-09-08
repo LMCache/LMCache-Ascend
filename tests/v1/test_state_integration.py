@@ -15,15 +15,15 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
-    LMCacheAscendConnectorV1Impl,
-)
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     AscendConnectorMetadata,
     LMCacheConnectorV1ImplMultiGroup,
     ReqMeta,
     RequestTracker,
     StateExecution,
+)
+from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
+    LMCacheAscendConnectorV1Impl,
 )
 from lmcache_ascend.v1.state_checkpoint import StateBlockBinding
 from lmcache_ascend.v1.state_layout import build_state_group_layout
@@ -36,6 +36,7 @@ from lmcache_ascend.v1.state_memory import (
 
 @pytest.fixture
 def caplog(caplog):
+    # First Party
     from lmcache_ascend.integration.vllm import vllm_v1_adapter
     from lmcache_ascend.v1 import state_cache
 
@@ -52,6 +53,7 @@ def caplog(caplog):
 
 
 def _scheduler(monkeypatch, candidates, local=1024, skip=0, minimum=0):
+    # First Party
     from lmcache_ascend.integration.vllm import multi_group_vllm_adapter as module
 
     connector = LMCacheConnectorV1ImplMultiGroup.__new__(
@@ -128,7 +130,10 @@ def test_hybrid_multimodal_request_is_rejected_before_lookup(monkeypatch):
 
 
 def _load_worker(monkeypatch, ret_mask=None):
+    # Third Party
     from lmcache.integration.vllm.vllm_v1_adapter import LoadSpec
+
+    # First Party
     from lmcache_ascend.integration.vllm import vllm_v1_adapter as module
     from lmcache_ascend.v1 import state_cache
 
@@ -183,6 +188,7 @@ def _load_worker(monkeypatch, ret_mask=None):
         assert lock._is_owned()
         return torch.ones(32, dtype=torch.bool) if ret_mask is None else ret_mask
 
+    # Third Party
     from lmcache.utils import CacheEngineKey
 
     key = CacheEngineKey("model", 2, 1, 123, torch.float32)
@@ -333,6 +339,7 @@ def test_allocation_preserves_selected_boundary_or_releases_it(monkeypatch, exte
 def test_ordinary_scheduler_still_delegates(monkeypatch):
     # The normal bootstrap replaces the upstream module's exported class.
     # Patch the original base retained by the multi-group adapter instead.
+    # First Party
     from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
         LMCacheConnectorV1Impl,
     )
@@ -347,7 +354,10 @@ def test_ordinary_scheduler_still_delegates(monkeypatch):
 
 
 def test_scheduler_cancel_before_allocation_releases_selection(monkeypatch):
+    # Third Party
     from vllm.v1.request import RequestStatus
+
+    # First Party
     from lmcache_ascend.integration.vllm import vllm_v1_adapter as module
 
     connector = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
@@ -477,6 +487,7 @@ def test_retained_buffer_reference_is_released_on_failure(monkeypatch):
 
 
 def test_state_load_device_preflight_rejects_host_runtime():
+    # First Party
     from lmcache_ascend.v1.state_cache import _validate_load_device
 
     with pytest.raises(ValueError, match="one NPU"):
@@ -485,6 +496,7 @@ def test_state_load_device_preflight_rejects_host_runtime():
 
 @pytest.mark.parametrize("drain_error", [False, True])
 def test_hybrid_attention_copy_error_drains_and_releases_get_reference(drain_error):
+    # First Party
     from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
 
     engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)
@@ -642,14 +654,15 @@ def test_state_mapping_rejects_unaligned_missing_and_wrong_restore_boundary():
 
 def test_allocation_callback_copies_full_grouped_table(monkeypatch):
     # The Ascend outer connector must not lose the full table as upstream does.
-    from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
-        LMCacheConnectorV1Impl,
-    )
+    # First Party
     from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
         LMCacheAscendConnector,
     )
     from lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1 import (
         LMCacheAscendConnectorV1Dynamic,
+    )
+    from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+        LMCacheConnectorV1Impl,
     )
 
     monkeypatch.setattr(
@@ -764,6 +777,7 @@ def test_worker_state_copy_error_propagates():
 )
 @pytest.mark.parametrize("failure", [True, False])
 def test_hybrid_attention_acquisition_releases_prior_reads(locations, failure):
+    # First Party
     from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
 
     first = Mock()
@@ -796,6 +810,7 @@ def test_hybrid_attention_acquisition_releases_prior_reads(locations, failure):
 
 
 def test_hybrid_attention_does_not_fetch_unselected_key():
+    # First Party
     from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
 
     engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)

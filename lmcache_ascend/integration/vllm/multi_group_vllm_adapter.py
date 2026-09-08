@@ -16,13 +16,13 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     LoadSpec,
-    extract_request_configs,
 )
 from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta as UpstreamReqMeta
 from lmcache.integration.vllm.vllm_v1_adapter import (
     RequestTracker as UpstreamRequestTracker,
 )
 from lmcache.integration.vllm.vllm_v1_adapter import (
+    extract_request_configs,
     logger,
 )
 from lmcache.utils import _lmcache_nvtx_annotate

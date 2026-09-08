@@ -2,27 +2,27 @@
 """Adapter integration checks for the Ascend host acceptance suite."""
 
 # Standard
-from types import SimpleNamespace
 from dataclasses import replace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 # Third Party
-from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.token_database import ChunkedTokenDatabase
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec
 import pytest
 import torch
 
 # First Party
-from lmcache_ascend.integration.vllm.vllm_v1_adapter import LMCacheAscendConnectorV1Impl
+from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+    LMCacheConnectorV1ImplMultiGroup,
+)
 from lmcache_ascend.integration.vllm.state_groups import (
     select_state_primary,
     validate_state_config,
 )
-from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
-    LMCacheConnectorV1ImplMultiGroup,
-)
+from lmcache_ascend.integration.vllm.vllm_v1_adapter import LMCacheAscendConnectorV1Impl
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 
@@ -72,6 +72,7 @@ def _registration(monkeypatch, state_first=True, merged=False):
     metadata = SimpleNamespace(kv_layer_groups_manager=None, chunk_size=256)
     gpu = VLLMPagedMemNPUConnectorV2.__new__(VLLMPagedMemNPUConnectorV2)
     gpu.metadata, gpu.layout_hints, gpu.use_mla, gpu.num_layers = metadata, {}, False, 4
+    # First Party
     from lmcache_ascend.v1.npu_connector import npu_connectors
 
     monkeypatch.setattr(npu_connectors, "is_310p", lambda: False)
@@ -216,6 +217,7 @@ def test_supported_local_config_allows_default_skip_policy(monkeypatch, disk_onl
 def test_scheduler_initialization_checks_real_lookup_client_before_query(
     monkeypatch, failure
 ):
+    # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
     connector, _ = _registration(monkeypatch)
