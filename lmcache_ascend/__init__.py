@@ -932,6 +932,10 @@ if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "pytorch":
         _patch_memory_object_tensor()
         _patch_paged_allocator_sync_group_prefix()
+        # First Party
+        from lmcache_ascend.v1.memory_management import patch_mixed_allocator_binary
+
+        patch_mixed_allocator_binary()
         _patch_storage_backend_init()
         _patch_storage_manager()
         _patch_transfer_channel()

@@ -51,20 +51,35 @@ class StateCheckpointBuffer:
         self.close()
 
 
-def allocate_state_checkpoint(
-    layout: StateGroupLayout, allocator: MemoryAllocatorInterface
-) -> StateCheckpointBuffer:
-    """Allocate one payload from a tensor-backed pool accepting BINARY objects.
+def state_checkpoint_metadata(layout: StateGroupLayout) -> dict:
+    """Portable CPU/disk metadata; persist this field before publishing a disk key.
 
-    Composite typed segments and explicit uint8 padding preserve payload offsets.
-    This entry does not route through token-shaped StorageManager allocation.
-    Raises MemoryError on pool exhaustion and releases allocations on view failure.
+    Disk readers must restore ``meta.state_checkpoint`` before adoption, alongside
+    plural shapes/dtypes (including padding). No process-local layout is required
+    in storage metadata. The caller still supplies its expected runtime layout.
     """
+
+    def portable(value):
+        return [portable(item) for item in value] if isinstance(value, tuple) else value
+
+    return {"group_index": layout.group_index, "layout": portable(layout.signature)}
+
+
+def _state_segments(layout: StateGroupLayout):
     shapes, dtypes, plane_indices = [], [], []
+    if layout.alignment <= 0 or not layout.planes or not layout.layer_names:
+        raise ValueError("Invalid state payload layout")
     end = 0
     for plane in layout.planes:
-        if plane.offset < end or plane.offset % layout.alignment:
-            raise ValueError("Invalid state payload offsets/alignment")
+        if (
+            not plane.shape
+            or plane.shape[0] != len(layout.layer_names)
+            or any(size <= 0 for size in plane.shape)
+            or plane.offset < end
+            or plane.offset % layout.alignment
+            or plane.offset % plane.dtype.itemsize
+        ):
+            raise ValueError("Invalid state payload offsets/alignment or shape")
         if plane.offset > end:
             shapes.append(torch.Size([plane.offset - end]))
             dtypes.append(torch.uint8)
@@ -74,16 +89,38 @@ def allocate_state_checkpoint(
         end = plane.offset + plane.nbytes
     if end != layout.nbytes:
         raise ValueError("State payload size does not match its planes")
-    obj = allocator.allocate(shapes, dtypes, fmt=MemoryFormat.BINARY)
-    if obj is None:
-        raise MemoryError(
-            f"Cannot allocate {layout.nbytes} bytes for a state checkpoint"
-        )
+    return shapes, dtypes, plane_indices
+
+
+def adopt_state_checkpoint(
+    layout: StateGroupLayout, owned_memory_obj: MemoryObj
+) -> StateCheckpointBuffer:
+    """Consume exactly one owned reference, releasing it on validation failure.
+
+    Backend get returns that reference. Never pass a borrowed backend object.
+    Success transfers it to the buffer with no retain, allocation or payload copy.
+    """
+    obj = owned_memory_obj
     try:
-        # Also supports reused composite metadata from the existing paged pool.
+        shapes, dtypes, plane_indices = _state_segments(layout)
+        if (
+            not obj.is_valid()
+            or obj.meta.fmt != MemoryFormat.BINARY
+            or getattr(obj.meta, "state_checkpoint", None)
+            != state_checkpoint_metadata(layout)
+            or obj.meta.shapes != shapes
+            or obj.meta.dtypes != dtypes
+        ):
+            raise ValueError("Incompatible state checkpoint metadata")
         sync_group_prefix_sum(obj)
         raw = obj.raw_tensor
-        if raw is None or raw.numel() * raw.element_size() < layout.nbytes:
+        if (
+            raw is None
+            or raw.device.type != "cpu"
+            or not raw.is_contiguous()
+            or raw.numel() * raw.element_size() < layout.nbytes
+            or obj.get_size() != layout.nbytes
+        ):
             raise ValueError(
                 "Allocator returned an undersized/non-tensor state payload"
             )
@@ -94,6 +131,7 @@ def allocate_state_checkpoint(
                 view is None
                 or tuple(view.shape) != plane.shape
                 or view.dtype != plane.dtype
+                or not view.is_contiguous()
                 or view.data_ptr() != raw.data_ptr() + plane.offset
                 or view.data_ptr() % layout.alignment
             ):
@@ -103,3 +141,17 @@ def allocate_state_checkpoint(
     except Exception:
         obj.ref_count_down()
         raise
+
+
+def allocate_state_checkpoint(
+    layout: StateGroupLayout, allocator: MemoryAllocatorInterface
+) -> StateCheckpointBuffer:
+    """Allocate a managed BINARY payload, including explicit padding segments."""
+    shapes, dtypes, _ = _state_segments(layout)
+    obj = allocator.allocate(shapes, dtypes, fmt=MemoryFormat.BINARY)
+    if obj is None:
+        raise MemoryError(
+            f"Cannot allocate {layout.nbytes} bytes for a state checkpoint"
+        )
+    obj.meta.state_checkpoint = state_checkpoint_metadata(layout)
+    return adopt_state_checkpoint(layout, obj)

@@ -104,3 +104,31 @@ class StateOperation:
             raise ValueError("Checkpoint group does not match buffer layout")
         _ = self.buffer.planes  # Verify the borrowed buffer is still owned and valid.
         self.runtime.validate(self.buffer.layout)
+
+
+_STATE_TAGS = ("state.domain", "state.group", "state.boundary")
+
+
+def state_checkpoint_key(checkpoint: CheckpointRef) -> CacheEngineKey:
+    """Derive an independent backend object key without changing the prefix key."""
+    key = checkpoint.key
+    configs = dict(key.request_configs or {})
+    if any("lmcache.tag." + name in configs for name in _STATE_TAGS) or any(
+        name in _STATE_TAGS for name, _ in (key.tags or ())
+    ):
+        raise ValueError("State key input contains reserved internal tags")
+    if checkpoint.group_index < 0 or checkpoint.boundary <= 0:
+        raise ValueError("State key requires a nonnegative group and positive boundary")
+    # Preserve captured tag order and values, including keys decoded from a backend.
+    result = copy(key)
+    internal = tuple(
+        zip(
+            _STATE_TAGS,
+            ("checkpoint", str(checkpoint.group_index), str(checkpoint.boundary)),
+            strict=True,
+        )
+    )
+    configs.update(("lmcache.tag." + name, value) for name, value in internal)
+    result.request_configs = configs
+    result.tags = tuple(key.tags or ()) + internal
+    return result
