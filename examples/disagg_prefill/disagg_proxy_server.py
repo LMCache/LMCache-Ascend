@@ -104,6 +104,9 @@ async def lifespan(app: FastAPI):
     """
     Lifespan context manager to handle startup and shutdown events.
     """
+    global run_proxy
+    run_proxy = True
+
     # Startup: Initialize clients
     app.state.prefill_clients = []
     app.state.decode_clients = []
@@ -259,17 +262,19 @@ async def lifespan(app: FastAPI):
             global_args.pd_buffer_size,
         )
 
-    yield
-
-    # Shutdown: Close clients
-    for client in app.state.prefill_clients:
-        await client.client.aclose()
-    for client in app.state.decode_clients:
-        await client.client.aclose()
-
-    global run_proxy
-    run_proxy = False
-    await app.state.zmq_task  # Wait for background task to finish
+    try:
+        yield
+    finally:
+        run_proxy = False
+        # Changing the loop flag cannot wake a pending socket.recv().
+        app.state.zmq_task.cancel()
+        try:
+            await app.state.zmq_task
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for client in app.state.total_clients:
+                await client.client.aclose()
 
 
 # Update FastAPI app initialization to use lifespan
@@ -569,44 +574,45 @@ async def zmq_pull_server():
     socket = zmq_ctx.socket(zmq.PULL)
     proxy_url = f"{global_args.proxy_host}:{global_args.proxy_port}"
     try:
-        socket.bind(f"tcp://{proxy_url}")
-    except zmq.ZMQError:
-        logger.exception("ZMQ proxy server failed to bind on %s", proxy_url)
-        return
-    logger.info("ZMQ proxy server started on %s", proxy_url)
-
-    while run_proxy:
         try:
-            msg_bytes = await socket.recv()
-        except zmq.Again:
-            await asyncio.sleep(0.01)  # Avoid busy loop
-            continue
-        except zmq.ZMQError as exc:
-            if exc.errno in (zmq.ETERM, zmq.ENOTSOCK):
-                break
-            logger.warning("ZMQ recv error: %s", exc)
-            await asyncio.sleep(0.05)
-            continue
+            socket.bind(f"tcp://{proxy_url}")
+        except zmq.ZMQError:
+            logger.exception("ZMQ proxy server failed to bind on %s", proxy_url)
+            return
+        logger.info("ZMQ proxy server started on %s", proxy_url)
 
-        try:
-            msg = msgspec.msgpack.decode(msg_bytes, type=PDMsg)
-        except msgspec.DecodeError as exc:
-            logger.warning("ZMQ received non-PD message: %s", exc)
-            continue
-        except Exception as exc:
-            logger.exception("ZMQ message decode failed: %s", exc)
-            continue
+        while run_proxy:
+            try:
+                msg_bytes = await socket.recv()
+            except zmq.Again:
+                await asyncio.sleep(0.01)  # Avoid busy loop
+                continue
+            except zmq.ZMQError as exc:
+                if exc.errno in (zmq.ETERM, zmq.ENOTSOCK):
+                    break
+                logger.warning("ZMQ recv error: %s", exc)
+                await asyncio.sleep(0.05)
+                continue
 
-        if not isinstance(msg, ProxyNotif):
-            logger.debug("ZMQ ignored message type: %s", type(msg).__name__)
-            continue
+            try:
+                msg = msgspec.msgpack.decode(msg_bytes, type=PDMsg)
+            except msgspec.DecodeError as exc:
+                logger.warning("ZMQ received non-PD message: %s", exc)
+                continue
+            except Exception as exc:
+                logger.exception("ZMQ message decode failed: %s", exc)
+                continue
 
-        req_id = msg.req_id
-        app.state.finished_reqs[req_id] += 1
-        logger.debug("Prefill of req %s done.", req_id)
+            if not isinstance(msg, ProxyNotif):
+                logger.debug("ZMQ ignored message type: %s", type(msg).__name__)
+                continue
 
-    socket.close()
-    logger.info("ZMQ PULL server stopped.")
+            req_id = msg.req_id
+            app.state.finished_reqs[req_id] += 1
+            logger.debug("Prefill of req %s done.", req_id)
+    finally:
+        socket.close(linger=0)
+        logger.info("ZMQ PULL server stopped.")
 
 
 async def send_request_to_service(
@@ -1337,7 +1343,7 @@ async def handle_completions(request: Request):
 
         return StreamingResponse(generate_stream(), media_type="application/json")
 
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         if prefiller_state is not None and not prefiller_released:
             release_state = await release_prefiller(
                 prefiller_state,
@@ -1582,7 +1588,7 @@ async def handle_chat_completions(request: Request):
             headers=headers,
         )
 
-    except Exception as e:
+    except (Exception, asyncio.CancelledError) as e:
         if prefiller_state is not None and not prefiller_released:
             release_state = await release_prefiller(
                 prefiller_state,

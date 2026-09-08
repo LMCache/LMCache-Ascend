@@ -280,6 +280,7 @@ def test_chat_endpoint_preserves_native_stream_and_nonstream_responses(
         response = await proxy.handle_chat_completions(FakeRequest(request_data))
 
         if stream:
+            release_decoder.assert_not_awaited()
             body = await collect_streaming_response(response)
             assert b'"tool_calls"' in body
             assert body.endswith(b"data: [DONE]\n\n")
@@ -299,7 +300,7 @@ def test_chat_endpoint_preserves_native_stream_and_nonstream_responses(
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("failure_stage", ["prefill", "stream"])
+@pytest.mark.parametrize("failure_stage", ["prefill", "cancelled_prefill", "stream"])
 def test_request_failure_and_cancellation_release_resources_once(
     monkeypatch,
     failure_stage,
@@ -314,6 +315,8 @@ def test_request_failure_and_cancellation_release_resources_once(
                 return FakeResponse({"tokens": [10, 20]})
             if failure_stage == "prefill":
                 raise RuntimeError("prefill failed")
+            if failure_stage == "cancelled_prefill":
+                raise asyncio.CancelledError
             return FakeResponse(_prefill_response())
 
         async def cancelled_stream(_client, _endpoint, _req_data):
@@ -364,6 +367,9 @@ def test_request_failure_and_cancellation_release_resources_once(
         if failure_stage == "prefill":
             with pytest.raises(RuntimeError, match="prefill failed"):
                 await proxy.handle_completions(request)
+        elif failure_stage == "cancelled_prefill":
+            with pytest.raises(asyncio.CancelledError):
+                await proxy.handle_completions(request)
         else:
             response = await proxy.handle_completions(request)
             with pytest.raises(asyncio.CancelledError):
@@ -376,5 +382,175 @@ def test_request_failure_and_cancellation_release_resources_once(
             failure_stage == "stream"
         )
         assert release_decoder.await_args.kwargs["success"] is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exit_error", [False, True])
+def test_lifespan_closes_idle_zmq_socket_and_can_restart(monkeypatch, exit_error):
+    async def scenario():
+        sockets = []
+        clients = []
+        receiving = asyncio.Event()
+
+        async def recv():
+            receiving.set()
+            await asyncio.Event().wait()
+
+        def make_socket(_socket_type):
+            socket = SimpleNamespace(bind=Mock(), recv=recv, close=Mock())
+            sockets.append(socket)
+            return socket
+
+        def make_client(**_kwargs):
+            client = SimpleNamespace(aclose=AsyncMock())
+            clients.append(client)
+            return client
+
+        monkeypatch.setattr(proxy.app, "state", SimpleNamespace())
+        monkeypatch.setattr(proxy, "run_proxy", True)
+        monkeypatch.setattr(proxy, "zmq_ctx", SimpleNamespace(socket=make_socket))
+        monkeypatch.setattr(proxy.httpx, "AsyncClient", make_client)
+        monkeypatch.setattr(
+            proxy,
+            "global_args",
+            SimpleNamespace(
+                prefiller_host=["localhost"],
+                prefiller_port=[8000],
+                num_prefillers=1,
+                decoder_host=["localhost"],
+                decoder_port=[8100],
+                num_decoders=1,
+                decoder_init_port=[7100],
+                decoder_alloc_port=[7200],
+                pd_transfer_mode="delay_pull",
+                pd_buffer_size=1024,
+                proxy_host="localhost",
+                proxy_port=9999,
+            ),
+            raising=False,
+        )
+
+        async def enter_and_exit():
+            async with proxy.lifespan(proxy.app):
+                await receiving.wait()
+                if exit_error:
+                    raise RuntimeError("lifespan body failed")
+
+        for _ in range(2):
+            receiving.clear()
+            if exit_error:
+                with pytest.raises(RuntimeError, match="lifespan body failed"):
+                    await asyncio.wait_for(enter_and_exit(), timeout=1)
+            else:
+                await asyncio.wait_for(enter_and_exit(), timeout=1)
+            assert proxy.app.state.zmq_task.done()
+            assert not proxy.run_proxy
+            sockets[-1].close.assert_called_once()
+
+        assert len(sockets) == 2
+        assert len(clients) == 4
+        for client in clients:
+            client.aclose.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("transfer_mode", "stream", "cancel_stage"),
+    [
+        ("eager_pull", False, "kv_ready"),
+        ("eager_pull", False, "decode"),
+        ("eager_pull", True, "prefill"),
+        ("delay_pull", False, "kv_ready"),
+    ],
+)
+def test_chat_cancellation_releases_accounting_and_permits(
+    monkeypatch, transfer_mode, stream, cancel_stage
+):
+    async def scenario():
+        prefiller = _prefiller_state()
+        decoder = _decoder_state()
+        decoder.pd_transfer_mode = transfer_mode
+        if transfer_mode == "eager_pull":
+            decoder.pd_buffer_semaphore = proxy.WeightedSemaphore(2)
+        reached = asyncio.Event()
+
+        async def block_until_cancelled():
+            reached.set()
+            await asyncio.Event().wait()
+
+        async def send_request(_client, endpoint, _data):
+            if endpoint.endswith("/render"):
+                return FakeResponse(
+                    {"token_ids": [10, 20], "sampling_params": {"max_tokens": 32}}
+                )
+            if endpoint == "/v1/completions":
+                if cancel_stage == "prefill":
+                    await block_until_cancelled()
+                return FakeResponse({"choices": [{"text": "discarded"}]})
+            assert endpoint == "/v1/chat/completions"
+            await block_until_cancelled()
+
+        async def wait_ready(*_args):
+            if cancel_stage == "kv_ready":
+                await block_until_cancelled()
+
+        release_prefiller = AsyncMock(wraps=proxy.release_prefiller)
+        release_decoder = AsyncMock(wraps=proxy.release_decoder)
+        release_slots = AsyncMock(wraps=proxy.release_pd_buffer_slots)
+        monkeypatch.setattr(
+            proxy.app,
+            "state",
+            SimpleNamespace(
+                prefill_clients=[prefiller.client_info],
+                prefiller_states=[prefiller],
+                decoder_states=[decoder],
+                prefiller_lock=asyncio.Lock(),
+                decoder_lock=asyncio.Lock(),
+                prefiller_select_seq=0,
+                decoder_select_seq=0,
+            ),
+        )
+        monkeypatch.setattr(
+            proxy, "global_args", SimpleNamespace(chunk_size=1), raising=False
+        )
+        monkeypatch.setattr(proxy, "stats_calculator", SimpleNamespace(add=Mock()))
+        monkeypatch.setattr(proxy, "send_request_to_service", send_request)
+        monkeypatch.setattr(proxy, "wait_decode_kv_ready", wait_ready)
+        monkeypatch.setattr(proxy, "release_prefiller", release_prefiller)
+        monkeypatch.setattr(proxy, "release_decoder", release_decoder)
+        monkeypatch.setattr(proxy, "release_pd_buffer_slots", release_slots)
+        monkeypatch.setattr(proxy, "log_route_event", Mock())
+        request = FakeRequest(
+            {
+                "model": "test-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": stream,
+            }
+        )
+        task = asyncio.create_task(proxy.handle_chat_completions(request))
+        try:
+            await asyncio.wait_for(reached.wait(), timeout=1)
+            assert decoder.active_decode_requests == 1
+            assert decoder.active_decode_tokens == 2
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert decoder.active_decode_requests == decoder.active_decode_tokens == 0
+        assert prefiller.active_prefill_requests == prefiller.active_prefill_tokens == 0
+        release_decoder.assert_awaited_once()
+        assert release_decoder.await_args.kwargs["success"] is False
+        release_prefiller.assert_awaited_once()
+        assert release_prefiller.await_args.kwargs["success"] is (
+            cancel_stage != "prefill"
+        )
+        if transfer_mode == "eager_pull":
+            release_slots.assert_awaited_once_with(decoder, 2)
+            assert decoder.pd_buffer_semaphore.available == 2
+        else:
+            release_slots.assert_not_awaited()
 
     asyncio.run(scenario())
