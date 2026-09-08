@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
@@ -8,6 +9,7 @@ from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorMetadata,
     KVConnectorRole,
 )
 from vllm.distributed.parallel_state import get_pp_group
@@ -30,9 +32,17 @@ if TYPE_CHECKING:
     # Third Party
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class LMCacheAscendConnectorMetadata(LMCacheConnectorMetadata):
+    """Multi-group LMCache requests plus scheduler preemption hints."""
+
+    preempted_req_ids: set[str] = field(default_factory=set)
 
 
 class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
@@ -58,6 +68,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         self._finished_req_ids_waiting_for_save: set[str] = set()
         self._late_finished_sending: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
+
+    @_lmcache_nvtx_annotate
+    def build_connector_meta(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> KVConnectorMetadata:
+        """Preserve multi-group request metadata and carry preemptions to workers."""
+        metadata = super().build_connector_meta(scheduler_output)
+        assert isinstance(metadata, LMCacheConnectorMetadata)
+        return LMCacheAscendConnectorMetadata(
+            requests=metadata.requests,
+            preempted_req_ids=set(
+                getattr(scheduler_output, "preempted_req_ids", None) or ()
+            ),
+        )
 
     @_lmcache_nvtx_annotate
     def register_kv_caches(
@@ -486,6 +510,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 else:
                     skip_leading_tokens = 0
 
+                skip_leading_tokens = self._pd_producer_skip_leading_tokens(
+                    skip_leading_tokens, request
+                )
+
                 if skip_leading_tokens == len(token_ids):
                     continue
                 skip_leading_tokens = (
@@ -573,6 +601,23 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         self._wait_for_save_done = True
         self._replay_finished_stores_after_save()
+
+    def _pd_producer_skip_leading_tokens(
+        self, skip_leading_tokens: int, request
+    ) -> int:
+        """Clamp producer store skip to tokens already transferred to D.
+
+        ``skip_leading_tokens`` may come from local/P2P cache hits, but PD
+        handoff can only skip tokens that the paired decoder has already
+        received for this request. This preserves the upstream LMCache producer
+        guard while keeping Ascend's LocalCPU backfill skip calculation.
+        """
+        if self.kv_role == "kv_producer" and request.disagg_spec:
+            return min(
+                skip_leading_tokens,
+                request.disagg_spec.num_transferred_tokens,
+            )
+        return skip_leading_tokens
 
     def _local_persist_skip(self, request, token_ids) -> Optional[int]:
         """Decide whether a remote-loaded prefix must be persisted locally.
@@ -681,7 +726,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         )
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
-        if self.lmcache_engine is None:
+        if self.lmcache_engine is None or not preempted_req_ids:
             return
 
         logger.debug(
