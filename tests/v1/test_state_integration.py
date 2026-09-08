@@ -473,7 +473,7 @@ def test_hybrid_attention_copy_error_drains_and_releases_get_reference(drain_err
         on_retrieve_request=lambda count: profile, on_retrieve_finished=Mock()
     )
     memory = Mock()
-    engine._process_tokens_internal = Mock(
+    engine._process_hybrid_tokens = Mock(
         return_value=([(object(), memory, 0, 16)], 16)
     )
     copy_error = RuntimeError("Attention copy failed")
@@ -631,6 +631,7 @@ def test_allocation_callback_copies_full_grouped_table(monkeypatch):
     )
     impl = LMCacheConnectorV1ImplMultiGroup.__new__(LMCacheConnectorV1ImplMultiGroup)
     impl._allocated_blocks = {}
+    impl._state_primary_kv_group_idx = None
     impl._num_kv_groups = 2
     ids = ([5, 6], [0, 82])
     blocks = SimpleNamespace(get_block_ids=lambda: ids)
@@ -721,3 +722,55 @@ def test_worker_state_copy_error_propagates():
     meta = SimpleNamespace(state_executions=[SimpleNamespace(req_id="r", end=32)])
     with pytest.raises(RuntimeError, match="device copy failed"):
         worker._save_state_executions(meta, object())
+
+
+@pytest.mark.parametrize(
+    "locations",
+    [("LocalCPUBackend", "LocalDiskBackend"), ("LocalDiskBackend", "LocalDiskBackend")],
+)
+@pytest.mark.parametrize("failure", [True, False])
+def test_hybrid_attention_acquisition_releases_prior_reads(locations, failure):
+    from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
+
+    first = Mock()
+    first.get_size.return_value = 32
+    engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)
+    pins = {}
+    for key, location in zip(("a", "b"), locations, strict=True):
+        pins.setdefault(location, []).append(key)
+    engine.lookup_pins = {"r": pins}
+    engine.token_database = SimpleNamespace(
+        process_tokens=lambda **kwargs: [(0, 16, "a"), (16, 32, "b")]
+    )
+    engine.storage_manager = SimpleNamespace(
+        get=Mock(side_effect=[first, OSError("read failed") if failure else None])
+    )
+    mask = torch.zeros(32, dtype=torch.bool)
+    if failure:
+        with pytest.raises(OSError, match="read failed"):
+            engine._process_hybrid_tokens(range(32), None, mask, req_id="r")
+        first.ref_count_down.assert_called_once()
+    else:
+        chunks, size = engine._process_hybrid_tokens(range(32), None, mask, req_id="r")
+        assert chunks == [("a", first, 0, 16)] and size == 32
+        assert mask[:16].all() and not mask[16:].any()
+        first.ref_count_down.assert_not_called()  # Returned owner belongs to retrieve.
+        first.ref_count_down()
+    assert [
+        call.kwargs["location"] for call in engine.storage_manager.get.call_args_list
+    ] == list(locations)
+
+
+def test_hybrid_attention_does_not_fetch_unselected_key():
+    from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
+
+    engine = AscendLMCacheEngine.__new__(AscendLMCacheEngine)
+    engine.lookup_pins = {}
+    engine.token_database = SimpleNamespace(
+        process_tokens=lambda **kwargs: [(0, 16, "not-selected")]
+    )
+    engine.storage_manager = SimpleNamespace(get=Mock())
+    mask = torch.zeros(16, dtype=torch.bool)
+    assert engine._process_hybrid_tokens(range(16), None, mask, req_id="r") == ([], 0)
+    engine.storage_manager.get.assert_not_called()
+    assert not mask.any()

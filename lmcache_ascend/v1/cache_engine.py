@@ -612,6 +612,34 @@ class AscendLMCacheEngine(LMCacheEngine):
                     except Exception:
                         pass
 
+    def _process_hybrid_tokens(self, tokens, mask, ret_mask, **kwargs):
+        """Acquire the selected Attention prefix with explicit ownership per get."""
+        assert self.storage_manager is not None
+        locations = {
+            key: location
+            for location, keys in self.lookup_pins.get(kwargs.get("req_id"), {}).items()
+            for key in keys
+        }
+        chunks = []
+        try:
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens, mask=mask, request_configs=kwargs.get("request_configs")
+            ):
+                location = locations.get(key)
+                if location is None:
+                    break
+                memory_obj = self.storage_manager.get(key, location=location)
+                if memory_obj is None:
+                    break
+                # Record ownership before inspecting or acquiring the next object.
+                chunks.append((key, memory_obj, start, end))
+                ret_mask[start:end] = True
+            return chunks, sum(obj.get_size() for _, obj, _, _ in chunks)
+        except BaseException:
+            for _, memory_obj, _, _ in chunks:
+                memory_obj.ref_count_down()
+            raise
+
     @torch.inference_mode()
     def retrieve(
         self,
@@ -679,6 +707,10 @@ class AscendLMCacheEngine(LMCacheEngine):
                         mask,
                         ret_mask,
                         **kwargs,
+                    )
+                elif getattr(self, "state_layouts", ()):
+                    reordered_chunks, tot_kv_size = self._process_hybrid_tokens(
+                        tokens, mask, ret_mask, **kwargs
                     )
                 else:
                     reordered_chunks, tot_kv_size = self._process_tokens_internal(

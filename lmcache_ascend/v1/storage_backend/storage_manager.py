@@ -171,7 +171,13 @@ def get(
             ):
                 local_cpu_backend = self.storage_backends["LocalCPUBackend"]
                 assert isinstance(local_cpu_backend, LocalCPUBackend)
-                local_cpu_backend.submit_put_task(key, memory_obj)
+                try:
+                    local_cpu_backend.submit_put_task(key, memory_obj)
+                except BaseException:
+                    # get has not handed its owned reference to the caller yet.
+                    # A complete object already admitted to CPU keeps its own ref.
+                    memory_obj.ref_count_down()
+                    raise
             return memory_obj
 
     return None

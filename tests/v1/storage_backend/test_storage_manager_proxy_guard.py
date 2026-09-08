@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 # Third Party
 from lmcache.v1.storage_backend.local_cpu_backend import LocalCPUBackend
+import pytest
 
 # First Party
 from lmcache_ascend.v1.storage_backend.storage_manager import batched_get, get
@@ -46,6 +47,23 @@ def test_get_non_proxy_is_written_back_to_local():
 
     assert get(manager, "key") is obj
     local.submit_put_task.assert_called_once()
+
+
+def test_get_writeback_failure_releases_only_get_reference():
+    obj = _obj(is_proxy=False)
+    manager, local = _manager("LocalDiskBackend", blocking=obj)
+    refs = [1]  # Owned by get before optional CPU admission.
+
+    def admit_then_fail(*args):
+        refs[0] += 1  # Backend retains the complete object before bookkeeping fails.
+        raise RuntimeError("notification failed")
+
+    obj.ref_count_down.side_effect = lambda: refs.__setitem__(0, refs[0] - 1)
+    local.submit_put_task.side_effect = admit_then_fail
+    with pytest.raises(RuntimeError, match="notification failed"):
+        get(manager, "key")
+    obj.ref_count_down.assert_called_once()
+    assert refs[0] == 1  # CPU still owns its valid admitted object.
 
 
 def test_get_proxy_is_not_written_back():
