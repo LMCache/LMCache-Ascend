@@ -228,6 +228,8 @@ def test_operation_revalidates_borrowed_inputs(pool, invalid):
         pytest.param(8208, 4104, 1, id="tile-plus-32-byte-tail"),
         pytest.param(8193, 4097, 1, id="probe-unaligned-tail"),
         pytest.param(3, 4, 1, id="probe-small-payload-with-padding"),
+        pytest.param(8193, 4097, 3, id="unaligned-tail-three-layers"),
+        pytest.param(3, 4, 3, id="small-payload-three-layers"),
     ],
 )
 def test_transfer_tile_boundaries(pool, conv_numel, ssm_numel, layers):
