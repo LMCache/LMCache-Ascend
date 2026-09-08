@@ -1,5 +1,6 @@
 #include "utils.h"
 #include "dcmi_management.h"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
