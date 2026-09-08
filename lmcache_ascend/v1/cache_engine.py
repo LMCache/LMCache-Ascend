@@ -1123,8 +1123,8 @@ class AscendLMCacheEngine(LMCacheEngine):
         """Synchronously save a planned endpoint after the worker's forward gate."""
         if self._is_passive() or not self.is_healthy() or self.is_frozen():
             return
-        if self.store_location not in (None, "LocalCPUBackend"):
-            raise ValueError("State disk publication is not integrated yet")
+        if self.store_location not in (None, "LocalCPUBackend", "LocalDiskBackend"):
+            raise ValueError("State save supports only local CPU/disk")
         assert self.storage_manager is not None
         assert self.gpu_connector is not None
         with self._engine_state_lock:
@@ -1136,6 +1136,7 @@ class AscendLMCacheEngine(LMCacheEngine):
                 kv_caches,
                 self.gpu_connector.store_stream,
                 ordering_event,
+                location=self.store_location,
             )
 
     @torch.inference_mode()

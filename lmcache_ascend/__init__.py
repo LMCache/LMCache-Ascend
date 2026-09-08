@@ -457,6 +457,18 @@ def _patch_storage_manager():
     ascend_local_disk._orig_async_save_bytes_to_disk = (
         lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk
     )
+    ascend_local_disk._orig_submit_put_task = (
+        lm_local_disk_backend.LocalDiskBackend.submit_put_task
+    )
+    lm_local_disk_backend.LocalDiskBackend.submit_put_task = (
+        ascend_local_disk.local_disk_submit_put_task
+    )
+    ascend_local_disk._orig_get_blocking = (
+        lm_local_disk_backend.LocalDiskBackend.get_blocking
+    )
+    lm_local_disk_backend.LocalDiskBackend.get_blocking = (
+        ascend_local_disk.local_disk_get_blocking
+    )
     lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk = (
         ascend_local_disk.local_disk_async_save_bytes_to_disk
     )

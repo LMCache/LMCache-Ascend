@@ -81,6 +81,24 @@ from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 logger = init_logger(__name__)
 
 
+def state_store_locations(manager, location=None) -> list[str]:
+    """Select supported state tiers that share the existing CPU allocator."""
+    if location is not None and location not in manager.storage_backends:
+        raise ValueError("State store location is unavailable")
+    result = []
+    for name, backend in manager.storage_backends.items():
+        if location is not None and name != location:
+            continue
+        if name not in ("LocalCPUBackend", "LocalDiskBackend"):
+            raise ValueError("State save supports only local CPU/disk")
+        if backend.get_allocator_backend() is not manager.allocator_backend:
+            raise ValueError("State tiers must share the local CPU allocator")
+        if name == "LocalCPUBackend" and not backend.use_hot:
+            continue
+        result.append(name)
+    return result
+
+
 def allocate_and_copy_objects(
     allocator_backend: AllocatorBackendInterface,
     keys: Sequence[CacheEngineKey],

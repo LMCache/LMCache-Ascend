@@ -17,6 +17,7 @@ from lmcache_ascend.v1.state_memory import (
     state_checkpoint_metadata,
 )
 from lmcache_ascend.v1.state_transfer import transfer_state
+from lmcache_ascend.v1.storage_backend.storage_manager import state_store_locations
 
 
 logger = init_logger(__name__)
@@ -116,7 +117,9 @@ class StateCache:
                 raise
         return operations
 
-    def save(self, execution, layouts, kv_caches, store_stream, producer_event):
+    def save(
+        self, execution, layouts, kv_caches, store_stream, producer_event, location=None
+    ):
         blocks = execution.save_blocks(self.chunk_size)
         if not blocks:
             return
@@ -124,8 +127,9 @@ class StateCache:
         cpu = manager.storage_backends["LocalCPUBackend"]
         if manager.allocator_backend is not cpu:
             raise ValueError("State save requires the local CPU allocator backend")
-        if not cpu.use_hot:
-            return  # Disk publication is added by the state disk integration.
+        locations = state_store_locations(manager, location)
+        if not locations:
+            return
         key = None
         for _, end, candidate in self.token_database.process_tokens(
             list(execution.token_ids), request_configs=execution.request_configs
@@ -146,7 +150,12 @@ class StateCache:
                 group_index=group,
             )
             state_key = state_checkpoint_key(checkpoint)
-            if cpu.contains(state_key):
+            missing_locations = [
+                name
+                for name in locations
+                if not manager.storage_backends[name].contains(state_key)
+            ]
+            if not missing_locations:
                 continue
             runtime = StateBlockBinding(
                 tuple(tuple(kv_caches[name]) for name in layout.layer_names), block_id
@@ -168,15 +177,15 @@ class StateCache:
                 with torch.npu.stream(store_stream):
                     store_stream.wait_event(producer_event)
                     transfer_state(operation)
-                # The manager consumes this extra reference only on normal return.
-                # One CPU-only submission uses the original allocator, so there are
-                # no copied allocations or partially consumed reference batches.
+                # Each manager call consumes its extra reference on normal return.
+                # All supported tiers share this allocator; there are no copies or
+                # partially consumed reference batches. Async disk owns its own ref.
                 obj = buffer.memory_obj
-                obj.ref_count_up()
-                try:
-                    manager.batched_put([state_key], [obj], location="LocalCPUBackend")
-                except BaseException:
-                    obj.ref_count_down()
-                    # A backend may raise after admitting the fully copied object;
-                    # its retained reference belongs to the backend, not this owner.
-                    raise
+                for name in missing_locations:
+                    obj.ref_count_up()
+                    try:
+                        manager.batched_put([state_key], [obj], location=name)
+                    except BaseException:
+                        obj.ref_count_down()
+                        # Earlier complete backend entries retain their own refs.
+                        raise
