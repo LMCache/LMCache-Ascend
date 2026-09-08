@@ -43,7 +43,7 @@ def _scheduler(monkeypatch, candidates, local=1024, skip=0, minimum=0):
     connector._state_primary_kv_group_idx = 1
     connector.kv_role = "kv_both"
     connector.worker_count = 2
-    connector.lookup_client = Mock()
+    connector._manager = SimpleNamespace(lookup_client=Mock())
     connector._requests_priority = {}
     connector.load_specs = {}
     connector.skip_last_n_tokens = skip
@@ -180,7 +180,7 @@ def _load_worker(monkeypatch, ret_mask=None):
         metadata=SimpleNamespace(worker_id=1),
     )
     worker = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
-    worker.lmcache_engine = engine
+    worker._manager = SimpleNamespace(lmcache_engine=engine)
     worker._failed_state_loads = set()
     worker._finished_state_loads = set()
     worker.state_layouts = (layout,)
@@ -314,7 +314,11 @@ def test_allocation_preserves_selected_boundary_or_releases_it(monkeypatch, exte
 
 
 def test_ordinary_scheduler_still_delegates(monkeypatch):
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    # The normal bootstrap replaces the upstream module's exported class.
+    # Patch the original base retained by the multi-group adapter instead.
+    from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+        LMCacheConnectorV1Impl,
+    )
 
     connector, request, lookup, _ = _scheduler(monkeypatch, [])
     connector._state_primary_kv_group_idx = None
@@ -331,8 +335,7 @@ def test_scheduler_cancel_before_allocation_releases_selection(monkeypatch):
 
     connector = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
     connector._state_primary_kv_group_idx = 0
-    connector.lookup_client = Mock()
-    connector.lmcache_engine = None
+    connector._manager = SimpleNamespace(lookup_client=Mock(), lmcache_engine=None)
     connector.load_specs = {"r": object()}
     connector._allocated_blocks = {"r": ((1,), (2,))}
     connector.use_layerwise = connector.async_loading = connector.store_async = False
@@ -622,7 +625,9 @@ def test_state_mapping_rejects_unaligned_missing_and_wrong_restore_boundary():
 
 def test_allocation_callback_copies_full_grouped_table(monkeypatch):
     # The Ascend outer connector must not lose the full table as upstream does.
-    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+    from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+        LMCacheConnectorV1Impl,
+    )
     from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
         LMCacheAscendConnector,
     )
@@ -669,13 +674,15 @@ def test_state_save_runs_without_attention_requests(
     worker.kv_caches = {"attention": object()}
     worker.state_layouts = (object(),)
     worker.state_kv_caches = {"gdn": object()}
-    worker.lmcache_engine = SimpleNamespace(
-        _is_passive=lambda: passive,
-        store_state=Mock(
-            side_effect=RuntimeError("copy failed") if copy_error else None
-        ),
-        lookup_unpin=Mock(),
-        metadata=SimpleNamespace(worker_id=0),
+    worker._manager = SimpleNamespace(
+        lmcache_engine=SimpleNamespace(
+            _is_passive=lambda: passive,
+            store_state=Mock(
+                side_effect=RuntimeError("copy failed") if copy_error else None
+            ),
+            lookup_unpin=Mock(),
+            metadata=SimpleNamespace(worker_id=0),
+        )
     )
     worker._replay_finished_stores_after_save = Mock()
     event = Mock()
@@ -701,7 +708,9 @@ def test_generator_finally_forward_failure_skips_hybrid_publication():
     worker = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
     worker._parent = SimpleNamespace(_get_connector_metadata=AscendConnectorMetadata)
     worker.state_layouts = (object(),)
-    worker.lmcache_engine = SimpleNamespace(store_state=Mock())
+    worker._manager = SimpleNamespace(
+        lmcache_engine=SimpleNamespace(store_state=Mock())
+    )
 
     @contextmanager
     def forward_context():
@@ -721,9 +730,11 @@ def test_worker_state_copy_error_propagates():
     worker = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
     worker.state_layouts = (object(),)
     worker.state_kv_caches = {}
-    worker.lmcache_engine = SimpleNamespace(
-        metadata=SimpleNamespace(worker_id=2),
-        store_state=Mock(side_effect=RuntimeError("device copy failed")),
+    worker._manager = SimpleNamespace(
+        lmcache_engine=SimpleNamespace(
+            metadata=SimpleNamespace(worker_id=2),
+            store_state=Mock(side_effect=RuntimeError("device copy failed")),
+        )
     )
     meta = SimpleNamespace(state_executions=[SimpleNamespace(req_id="r", end=32)])
     with pytest.raises(RuntimeError, match="device copy failed"):
