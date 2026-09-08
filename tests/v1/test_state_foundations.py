@@ -350,19 +350,31 @@ def make_ref(layout, boundary=16, key=None):
 
     key = key or CacheEngineKey("qwen-test", 2, 0, 123, torch.bfloat16)
     return CheckpointRef.from_chunk(
-        key, chunk_end=boundary, boundary=boundary, chunk_size=16, layout=layout
+        key,
+        chunk_end=boundary,
+        boundary=boundary,
+        chunk_size=16,
+        group_index=layout.group_index,
     )
 
 
 def test_ref_reuses_key_identity_without_allocating_or_claiming_availability():
     layout = make_layout()
-    ref = make_ref(layout)
-    assert ref.prefix_hash == 123
+    key = CacheEngineKey(
+        "qwen-test", 2, 0, 123, torch.bfloat16, {"lmcache.tag.tenant": "test"}
+    )
+    ref = make_ref(layout, key=key)
+    assert ref.key == key
     assert ref.boundary == 16
-    assert (ref.model_name, ref.world_size, ref.worker_id) == ("qwen-test", 2, 0)
-    assert ref != CacheEngineKey("qwen-test", 2, 0, 123, torch.bfloat16)
-    assert ref != make_ref(replace(layout, group_index=1))
-    assert ref != make_ref(replace(layout, version=2))
+    assert ref != key
+    assert ref != make_ref(replace(layout, group_index=1), key=key)
+    assert ref != make_ref(layout, boundary=32, key=key)
+    # Changing caller-owned key fields must not change the captured identity.
+    captured_hash = hash(ref)
+    key.worker_id = 1
+    assert ref.key.worker_id == 0
+    assert hash(ref) == captured_hash
+    assert ref.key.tags == (("tenant", "test"),)
 
 
 @pytest.mark.parametrize("chunk_end, boundary", [(16, 15), (16, 32), (15, 15), (0, 0)])
@@ -376,7 +388,7 @@ def test_ref_requires_the_exact_complete_chunk_boundary(chunk_end, boundary):
             chunk_end=chunk_end,
             boundary=boundary,
             chunk_size=16,
-            layout=make_layout(),
+            group_index=0,
         )
 
 
@@ -395,13 +407,13 @@ def test_existing_chained_prefix_keys_are_preserved():
     keys_b = list(database.process_tokens(tokens=[2] * 16 + [3] * 16))
     ref_a = make_ref(make_layout(), keys_a[-1][1], keys_a[-1][2])
     ref_b = make_ref(make_layout(), keys_b[-1][1], keys_b[-1][2])
-    assert ref_a.prefix_hash == keys_a[-1][2].chunk_hash
-    assert ref_b.prefix_hash == keys_b[-1][2].chunk_hash
+    assert ref_a.key == keys_a[-1][2]
+    assert ref_b.key == keys_b[-1][2]
     assert ref_a != ref_b
 
 
-@pytest.mark.parametrize("load", [False, True])
-def test_operation_preserves_r_without_copying_or_inventing_e(load):
+@pytest.mark.parametrize("direction", ["store", "load"])
+def test_operation_preserves_r_without_copying(direction):
     # First Party
     from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
 
@@ -416,19 +428,18 @@ def test_operation_preserves_r_without_copying_or_inventing_e(load):
             plane.fill_(9)
         operation = StateOperation(
             make_ref(layout),
-            layout,
-            buffer if load else binding,
-            binding if load else buffer,
-            attention_end=32,
+            binding,
+            buffer,
+            direction=direction,
         )
         assert operation.checkpoint.boundary == 16
-        assert operation.executed_end is None
-        assert operation.attention_end == 32
+        assert operation.runtime.block_id == 1
+        assert operation.direction == direction
         assert all(torch.all(plane == 9) for plane in buffer.planes)
     assert pool.num_active_allocations == 0
 
 
-def test_operation_rejects_wrong_layout_and_out_of_range_block():
+def test_operation_rejects_wrong_group_and_out_of_range_block():
     # First Party
     from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
 
@@ -437,14 +448,50 @@ def test_operation_rejects_wrong_layout_and_out_of_range_block():
     entries = tuple(tuple(tensors[name]) for name in layout.layer_names)
     pool = TensorMemoryAllocator(torch.zeros(8192, dtype=torch.uint8))
     with allocate_state_checkpoint(layout, pool) as buffer:
-        with pytest.raises(ValueError, match="layout"):
+        with pytest.raises(ValueError, match="group"):
             StateOperation(
-                make_ref(replace(layout, version=2)),
-                layout,
+                make_ref(replace(layout, group_index=1)),
                 StateBlockBinding(entries, 0),
                 buffer,
+                direction="store",
             )
         with pytest.raises(ValueError, match="block"):
             StateOperation(
-                make_ref(layout), layout, StateBlockBinding(entries, 5), buffer
+                make_ref(layout),
+                StateBlockBinding(entries, 5),
+                buffer,
+                direction="load",
             )
+
+
+@pytest.mark.parametrize("mismatch", ["dtype", "stride"])
+def test_operation_checks_runtime_against_buffer_layout(pool, mismatch):
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
+
+    layout = make_layout()
+    _, tensors = layout_inputs(padded=mismatch == "stride")
+    if mismatch == "dtype":
+        tensors["gdn.0"][1] = tensors["gdn.0"][1].to(torch.bfloat16)
+    binding = StateBlockBinding(
+        tuple(tuple(tensors[name]) for name in layout.layer_names), 0
+    )
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        with pytest.raises(ValueError, match="runtime layout"):
+            StateOperation(make_ref(layout), binding, buffer, direction="store")
+
+
+def test_operation_rejects_invalid_direction_and_released_buffer(pool):
+    # First Party
+    from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
+
+    layout = make_layout()
+    _, tensors = layout_inputs()
+    binding = StateBlockBinding(
+        tuple(tuple(tensors[name]) for name in layout.layer_names), 0
+    )
+    with allocate_state_checkpoint(layout, pool) as buffer:
+        with pytest.raises(ValueError, match="direction"):
+            StateOperation(make_ref(layout), binding, buffer, direction="invalid")
+    with pytest.raises(RuntimeError, match="released"):
+        StateOperation(make_ref(layout), binding, buffer, direction="load")

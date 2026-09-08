@@ -2,7 +2,9 @@
 """Checkpoint identity and structural operations; no availability or execution."""
 
 # Standard
-from dataclasses import dataclass, field
+from copy import copy
+from dataclasses import dataclass
+from typing import Literal
 
 # Third Party
 from lmcache.utils import CacheEngineKey
@@ -19,18 +21,13 @@ class CheckpointRef:
 
     Construct via from_chunk; the raw dataclass initializer does not validate
     the prefix boundary contract. Do not replace identity fields directly.
+    The captured key must be treated as read-only, like existing cache keys.
+    Payload compatibility belongs to its layout, not this logical identity.
     """
 
-    model_name: str
-    world_size: int
-    worker_id: int
-    prefix_hash: int
-    key_dtype: torch.dtype
-    tags: tuple | None
+    key: CacheEngineKey
     boundary: int
     group_index: int
-    layout_signature: tuple
-    kind: str = field(default="gdn_state", init=False)
 
     @classmethod
     def from_chunk(
@@ -40,7 +37,7 @@ class CheckpointRef:
         chunk_end: int,
         boundary: int,
         chunk_size: int,
-        layout: StateGroupLayout,
+        group_index: int,
     ) -> "CheckpointRef":
         """Reuse a default chained chunk key whose prefix ends exactly at R.
 
@@ -52,17 +49,8 @@ class CheckpointRef:
             raise ValueError("Checkpoint boundary must equal the positive chunk end")
         if boundary % chunk_size:
             raise ValueError("Checkpoint boundary must end at a complete chunk")
-        return cls(
-            key.model_name,
-            key.world_size,
-            key.worker_id,
-            key.chunk_hash,
-            key.dtype,
-            key.tags,
-            boundary,
-            layout.group_index,
-            layout.signature,
-        )
+        # Capture identity fields without tracking later changes to the caller's key.
+        return cls(copy(key), boundary, group_index)
 
 
 @dataclass(frozen=True)
@@ -98,43 +86,21 @@ class StateBlockBinding:
 class StateOperation:
     """Describe a load or save without copying data or claiming S(R) is available.
 
-    Exactly one endpoint is runtime state and the other is a managed buffer.
-    E/K are optional context, never substitutes for the checkpoint's explicit R.
+    Store copies runtime to buffer; load copies buffer to runtime.
+    The buffer layout defines the expected runtime geometry and payload format.
+    E/K belong to the scheduling caller, not this transfer description.
     Callers retain buffer ownership and protect runtime sources before execution.
     """
 
     checkpoint: CheckpointRef
-    layout: StateGroupLayout
-    source: StateBlockBinding | StateCheckpointBuffer
-    target: StateBlockBinding | StateCheckpointBuffer
-    executed_end: int | None = None
-    attention_end: int | None = None
+    runtime: StateBlockBinding
+    buffer: StateCheckpointBuffer
+    direction: Literal["store", "load"]
 
     def __post_init__(self) -> None:
-        if (
-            self.checkpoint.group_index != self.layout.group_index
-            or self.checkpoint.layout_signature != self.layout.signature
-        ):
-            raise ValueError("Checkpoint does not match operation layout")
-        if isinstance(self.source, StateBlockBinding) and isinstance(
-            self.target, StateCheckpointBuffer
-        ):
-            runtime, buffer = self.source, self.target
-        elif isinstance(self.target, StateBlockBinding) and isinstance(
-            self.source, StateCheckpointBuffer
-        ):
-            runtime, buffer = self.target, self.source
-        else:
-            raise ValueError("State operation requires runtime and buffer endpoints")
-        if (
-            buffer.layout.group_index != self.layout.group_index
-            or buffer.layout.signature != self.layout.signature
-        ):
-            raise ValueError("Checkpoint buffer does not match operation layout")
-        _ = buffer.planes  # Verify the borrowed buffer is still owned and valid.
-        runtime.validate(self.layout)
-        if any(
-            end is not None and end < 0
-            for end in (self.executed_end, self.attention_end)
-        ):
-            raise ValueError("Execution/save endpoints cannot be negative")
+        if self.direction not in ("store", "load"):
+            raise ValueError("State operation direction must be store or load")
+        if self.checkpoint.group_index != self.buffer.layout.group_index:
+            raise ValueError("Checkpoint group does not match buffer layout")
+        _ = self.buffer.planes  # Verify the borrowed buffer is still owned and valid.
+        self.runtime.validate(self.buffer.layout)
