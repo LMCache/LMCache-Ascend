@@ -1056,6 +1056,21 @@ class AscendLMCacheEngine(LMCacheEngine):
     ) -> int:
         # Serialize against the store-worker thread's
         with self._engine_state_lock:
+            # First Party
+            from lmcache_ascend.v1.state_lookup import OP_KEY, dispatch_state_lookup
+
+            if OP_KEY in (request_configs or {}):
+                configs = dict(request_configs)
+                operation = configs.pop(OP_KEY)
+                return dispatch_state_lookup(
+                    self,
+                    lookup_id,
+                    operation,
+                    configs,
+                    tokens=tokens,
+                    hashes=hashes,
+                    offsets=offsets,
+                )
             return super().lookup(
                 tokens=tokens,
                 hashes=hashes,
@@ -1068,7 +1083,27 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def lookup_unpin(self, lookup_id: str) -> None:
         with self._engine_state_lock:
+            # First Party
+            from lmcache_ascend.v1.state_lookup import release_engine_selection
+
+            release_engine_selection(self, lookup_id)
             super().lookup_unpin(lookup_id)
+
+    def get_state_lookup(self, lookup_id: str, boundary: int):
+        """Borrow selected state while holding _engine_state_lock through transfer.
+
+        Cancel the probe lease on consumption. lookup_unpin remains mandatory
+        after transfer completion, including errors. A missing/expired selection
+        is a restore failure, never permission to invent a new recovery boundary.
+        """
+        with self._engine_state_lock:
+            selection = getattr(self, "_state_lookup_selections", {}).get(lookup_id)
+            if selection is None or selection.boundary != boundary:
+                return None
+            if selection.timer is not None:
+                selection.timer.cancel()
+                selection.timer = None
+            return selection
 
     @torch.inference_mode()
     def store_state(self, execution, layouts, kv_caches, ordering_event):
@@ -1230,4 +1265,10 @@ class AscendLMCacheEngine(LMCacheEngine):
             except Exception:
                 logger.exception("Error stopping Ascend store worker")
 
+        # First Party
+        from lmcache_ascend.v1.state_lookup import release_engine_selection
+
+        with self._engine_state_lock:
+            for lookup_id in list(getattr(self, "_state_lookup_selections", {})):
+                release_engine_selection(self, lookup_id)
         super().close()
