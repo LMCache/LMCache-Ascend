@@ -66,20 +66,30 @@ def _make_mock_mem_obj(
     return mock
 
 
-def _make_consumed_proxy() -> ProxyMemoryObj:
-    """Create a ProxyMemoryObj that is already consumed."""
+def _make_proxy(
+    context: MagicMock | None = None,
+    chunk_index: int = 0,
+) -> ProxyMemoryObj:
+    if context is None:
+        context = MagicMock()
     proxy = ProxyMemoryObj(
         backing_obj=None,
         transfer_channel=MagicMock(),
         target_peer_url="fake_url",
-        remote_buffer_uuid="fake_uuid",
-        remote_mem_index=0,
-        transfer_context=MagicMock(),
-        chunk_index=0,
+        remote_buffer_uuid=f"fake_uuid_{chunk_index}",
+        remote_mem_index=chunk_index,
+        transfer_context=context,
+        chunk_index=chunk_index,
         shapes=[DEFAULT_SHAPE],
         dtypes=[DEFAULT_DTYPE],
         fmt=MemoryFormat.KV_2LTD,
     )
+    return proxy
+
+
+def _make_consumed_proxy() -> ProxyMemoryObj:
+    """Create a ProxyMemoryObj that is already consumed."""
+    proxy = _make_proxy()
     proxy.mark_consumed()
     return proxy
 
@@ -96,10 +106,22 @@ def _make_pd_backend_stub(
 ):
     """Create a mock object with the minimal attributes needed by PD backend methods."""
     # First Party
-    from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+    from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend, PDEntry
 
     backend = MagicMock()
-    backend.data = {}
+    backend._pd_entries = {}
+    backend._pd_request_keys = {}
+
+    class _PDDataDict(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            backend._pd_entries[key] = PDEntry(base_obj=value)
+
+        def pop(self, key, default=None):
+            backend._pd_entries.pop(key, None)
+            return super().pop(key, default)
+
+    backend.data = _PDDataDict()
     backend.data_lock = threading.Lock()
     backend.pd_config = MagicMock()
     backend.pd_config.role = role
@@ -126,6 +148,22 @@ def _make_pd_backend_stub(
     )
     backend._partition_keys = lambda keys: AscendPDBackend._partition_keys(
         backend, keys
+    )
+    backend._ensure_request_lease_locked = (
+        lambda key, entry, request_id: AscendPDBackend._ensure_request_lease_locked(
+            backend,
+            key,
+            entry,
+            request_id,
+        )
+    )
+    backend._delete_pd_entry_locked = (
+        lambda key, entry, release_obj: AscendPDBackend._delete_pd_entry_locked(
+            backend,
+            key,
+            entry,
+            release_obj,
+        )
     )
 
     return backend
@@ -343,6 +381,68 @@ class TestAscendPDBackend:
         proxy.ref_count_down()
         context.decref.assert_called_once()
 
+    def test_pd_backend_keeps_shared_entry_until_last_request_lease_released(self):
+        """A shared PD hit is deleted only after every request lease is released."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+
+        backend = _make_pd_backend_stub()
+        key = _make_key("shared_lease")
+        mem_obj = _make_mock_mem_obj()
+        AscendPDBackend.put(backend, key, mem_obj)
+
+        assert AscendPDBackend.batched_contains_and_lease(backend, [key], "req-1") == 1
+        assert AscendPDBackend.batched_contains_and_lease(backend, [key], "req-2") == 1
+
+        AscendPDBackend.release_request_lease(backend, "req-1")
+
+        assert key in backend.data
+        assert key in backend._pd_entries
+        assert backend._pd_entries[key].owners == {"req-2"}
+        mem_obj.ref_count_down.assert_not_called()
+
+        AscendPDBackend.release_request_lease(backend, "req-2")
+
+        assert key not in backend.data
+        assert key not in backend._pd_entries
+        assert backend._pd_request_keys == {}
+        mem_obj.ref_count_down.assert_called_once()
+
+    def test_pd_backend_proxy_leases_are_request_local(self):
+        """Consuming one request's proxy clone must not poison shared PD hits."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+
+        backend = _make_pd_backend_stub()
+        key = _make_key("shared_proxy")
+        transfer_context = MagicMock()
+        base_proxy = _make_proxy(transfer_context)
+        AscendPDBackend.put(backend, key, base_proxy)
+
+        assert AscendPDBackend.batched_contains_and_lease(backend, [key], "req-1") == 1
+        assert AscendPDBackend.batched_contains_and_lease(backend, [key], "req-2") == 1
+
+        entry = backend._pd_entries[key]
+        req1_proxy = entry.proxy_leases["req-1"]
+        req2_proxy = entry.proxy_leases["req-2"]
+
+        assert req1_proxy is not base_proxy
+        assert req2_proxy is not base_proxy
+        assert req1_proxy is not req2_proxy
+        transfer_context.acquire_request.assert_any_call("req-1")
+        transfer_context.acquire_request.assert_any_call("req-2")
+
+        req1_proxy.mark_consumed()
+
+        assert req1_proxy.consumed is True
+        assert base_proxy.consumed is False
+        assert req2_proxy.consumed is False
+        assert AscendPDBackend.batched_get_blocking_for_request(
+            backend,
+            [key],
+            "req-2",
+        ) == [req2_proxy]
+
     def test_push_mode_allocate_and_put(self):
         """Push-mode allocate_and_put returns UUID-based refs."""
         # First Party
@@ -404,6 +504,48 @@ class TestAscendPDBackend:
         assert isinstance(resp, AscendAllocResponse)
         assert resp.alloc_failed is True
         backend.put.assert_not_called()
+
+    def test_push_mode_partial_alloc_failure_cleans_pd_entries(self):
+        """Partial push allocation rollback removes both receiver indexes."""
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+        from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import (
+            AscendPDReceiverMixin,
+        )
+
+        backend = _make_pd_backend_stub()
+        backend.data = {}
+        backend._pd_entries = {}
+        backend.put = lambda key, mem_obj: AscendPDBackend.put(backend, key, mem_obj)
+        allocated_obj = _make_mock_mem_obj()
+        backend.transfer_channel.get_local_buffer_refs.return_value = (
+            ["uuid-alloc"],
+            [42],
+        )
+        key0 = _make_key("partial-alloc-0")
+        key1 = _make_key("partial-alloc-1")
+
+        alloc_req = AllocRequest(
+            keys=[key0.to_string(), key1.to_string()],
+            fmt=MemoryFormat.KV_2LTD.value,
+            shape=list(DEFAULT_SHAPE),
+            dtype="bfloat16",
+            last_chunk_toks=256,
+        )
+
+        with patch(
+            "lmcache_ascend.v1.storage_backend.pd.receiver_mixin.allocate_with_retry",
+            side_effect=[allocated_obj, None],
+        ):
+            resp = AscendPDReceiverMixin._allocate_and_put(backend, alloc_req)
+
+        assert isinstance(resp, AscendAllocResponse)
+        assert resp.alloc_failed is True
+        assert key0 not in backend.data
+        assert key0 not in backend._pd_entries
+        assert key1 not in backend.data
+        assert key1 not in backend._pd_entries
+        allocated_obj.ref_count_down.assert_called_once()
 
     def test_pull_eager_flow(self):
         """Pull-eager: allocates, reads from sender, returns ack + callback."""

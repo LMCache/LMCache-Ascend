@@ -108,7 +108,11 @@ class AscendPDReceiverMixin:
                 )
                 with self.data_lock:
                     for k in allocated_keys:
-                        self.data.pop(k, None)
+                        entry = self._pd_entries.get(k)
+                        if entry is not None:
+                            self._delete_pd_entry_locked(k, entry, release_obj=False)
+                        else:
+                            self.data.pop(k, None)
                 release_memory_objects(allocated_objs + already_sent_objs)
                 return AscendAllocResponse(
                     already_sent_indexes=already_sent_indexes,

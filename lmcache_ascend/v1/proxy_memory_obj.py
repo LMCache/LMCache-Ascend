@@ -94,6 +94,7 @@ class ProxyMemoryObj(MemoryObj):
         # Temporary lookup pins increment this count but must not consume the
         # base owner when they are released.
         self._ref_count = 1
+        self._lease_request_id: Optional[str] = None
 
         # Store allocation metadata for deferred buffer operations
         if backing_obj is not None:
@@ -143,6 +144,28 @@ class ProxyMemoryObj(MemoryObj):
             self._consumed = True
             self._released = True
             self._ref_count = 0
+
+    def clone_for_request(self, request_id: str) -> "ProxyMemoryObj":
+        """Create a request-local proxy over the same remote buffer reference.
+
+        The backend keeps an unconsumed prototype so other requests can still
+        declare hits for the same PD key.  The connector consumes only this
+        clone, making ``mark_consumed()`` request-local.
+        """
+        proxy = ProxyMemoryObj(
+            backing_obj=None,
+            transfer_channel=self._transfer_channel,
+            target_peer_url=self._target_peer_url,
+            remote_buffer_uuid=self._remote_buffer_uuid,
+            remote_mem_index=self._remote_mem_index,
+            transfer_context=self._transfer_context,
+            chunk_index=self._chunk_index,
+            shapes=self._shapes,
+            dtypes=self._dtypes,
+            fmt=self._fmt,
+        )
+        proxy._lease_request_id = request_id
+        return proxy
 
     @property
     def backing_obj(self) -> Optional[MemoryObj]:
