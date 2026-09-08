@@ -3,6 +3,7 @@
 #include "utils.h"
 #include <ATen/ATen.h>
 #include <Python.h>
+#include <acl/acl.h>
 #include <pybind11/pybind11.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
