@@ -34,6 +34,23 @@ from lmcache_ascend.v1.state_memory import (
 )
 
 
+@pytest.fixture
+def caplog(caplog):
+    from lmcache_ascend.integration.vllm import vllm_v1_adapter
+    from lmcache_ascend.v1 import state_cache
+
+    # LMCache loggers do not propagate to pytest's root capture handler.
+    loggers = (vllm_v1_adapter.logger, state_cache.logger)
+    for logger in loggers:
+        caplog.set_level("INFO", logger=logger.name)
+        logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        for logger in loggers:
+            logger.removeHandler(caplog.handler)
+
+
 def _scheduler(monkeypatch, candidates, local=1024, skip=0, minimum=0):
     from lmcache_ascend.integration.vllm import multi_group_vllm_adapter as module
 
