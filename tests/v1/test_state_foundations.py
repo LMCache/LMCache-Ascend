@@ -161,14 +161,14 @@ def test_gdn_cannot_enter_attention_flattening(monkeypatch):
     require_no_state_transfer(())
 
 
-def layout_inputs(layers=2, padded=False):
+def layout_inputs(layers=2, block_gaps=False):
     spec = gdn_spec(shapes=((1, 3), (2, 2)), page_size_padded=256)
     config = config_for(spec=spec)
     config.kv_cache_groups[0].layer_names = [f"gdn.{i}" for i in range(layers)]
     tensors = {}
     for name in config.kv_cache_groups[0].layer_names:
         conv = torch.empty(5, 1, 3, dtype=torch.bfloat16)
-        if padded:
+        if block_gaps:
             conv = torch.empty(25, dtype=torch.bfloat16).as_strided(
                 (5, 1, 3), (5, 3, 1)
             )
@@ -176,11 +176,11 @@ def layout_inputs(layers=2, padded=False):
     return config, tensors
 
 
-def make_layout(layers=2, padded=False):
+def make_layout(layers=2):
     # First Party
     from lmcache_ascend.integration.vllm.state_groups import build_state_layouts
 
-    config, tensors = layout_inputs(layers, padded)
+    config, tensors = layout_inputs(layers)
     return build_state_layouts(config, tensors)[0]
 
 
@@ -204,12 +204,13 @@ def test_mixed_dtype_offsets_include_only_required_padding():
     assert sum(p.nbytes for p in layout.planes) == 22
 
 
-def test_source_stride_is_not_payload_compatibility():
-    packed = make_layout()
-    padded = make_layout(padded=True)
-    assert packed.planes[0].block_stride_bytes == (6, 6)
-    assert padded.planes[0].block_stride_bytes == (10, 10)
-    assert packed.signature == padded.signature
+def test_runtime_block_gaps_are_rejected():
+    # First Party
+    from lmcache_ascend.integration.vllm.state_groups import build_state_layouts
+
+    config, tensors = layout_inputs(block_gaps=True)
+    with pytest.raises(ValueError, match="contiguous"):
+        build_state_layouts(config, tensors)
 
 
 def test_plane_dtype_changes_compatibility():
@@ -231,7 +232,7 @@ def test_noncontiguous_state_elements_are_explicitly_rejected():
 
     config, tensors = layout_inputs()
     tensors["gdn.0"][1] = tensors["gdn.0"][1].transpose(1, 2)
-    with pytest.raises(ValueError, match="stride|contiguous"):
+    with pytest.raises(ValueError, match="contiguous"):
         build_state_layouts(config, tensors)
 
 
@@ -464,15 +465,17 @@ def test_operation_rejects_wrong_group_and_out_of_range_block():
             )
 
 
-@pytest.mark.parametrize("mismatch", ["dtype", "stride"])
+@pytest.mark.parametrize("mismatch", ["dtype", "block_gaps", "transposed"])
 def test_operation_checks_runtime_against_buffer_layout(pool, mismatch):
     # First Party
     from lmcache_ascend.v1.state_checkpoint import StateBlockBinding, StateOperation
 
     layout = make_layout()
-    _, tensors = layout_inputs(padded=mismatch == "stride")
+    _, tensors = layout_inputs(block_gaps=mismatch == "block_gaps")
     if mismatch == "dtype":
         tensors["gdn.0"][1] = tensors["gdn.0"][1].to(torch.bfloat16)
+    elif mismatch == "transposed":
+        tensors["gdn.0"][1] = tensors["gdn.0"][1].transpose(1, 2)
     binding = StateBlockBinding(
         tuple(tuple(tensors[name]) for name in layout.layer_names), 0
     )

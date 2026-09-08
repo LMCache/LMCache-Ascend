@@ -55,7 +55,7 @@ class CheckpointRef:
 
 @dataclass(frozen=True)
 class StateBlockBinding:
-    """Borrowed runtime tensors in layout layer/plane order and one group block ID.
+    """Borrowed contiguous tensors in layer/plane order and one group block ID.
 
     Binding does not pin the block or establish the state boundary/readiness.
     Those conditions belong to the future transfer caller.
@@ -65,17 +65,17 @@ class StateBlockBinding:
     block_id: int
 
     def validate(self, layout: StateGroupLayout) -> None:
-        """Reject out-of-range blocks or tensors incompatible with source geometry."""
+        """Check shape, dtype, continuity and block bounds for the HMA copy path."""
         if len(self.tensors) != len(layout.layer_names):
             raise ValueError("State binding layer count does not match layout")
-        for layer_index, entry in enumerate(self.tensors):
+        for entry in self.tensors:
             if len(entry) != len(layout.planes):
                 raise ValueError("State binding plane count does not match layout")
             for tensor, plane in zip(entry, layout.planes, strict=True):
                 if (
                     tuple(tensor.shape[1:]) != plane.shape[1:]
                     or tensor.dtype != plane.dtype
-                    or tuple(tensor.stride()) != plane.source_strides[layer_index]
+                    or not tensor.is_contiguous()
                 ):
                     raise ValueError("State binding does not match runtime layout")
                 if not 0 <= self.block_id < tensor.shape[0]:
