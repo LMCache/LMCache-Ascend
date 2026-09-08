@@ -8,8 +8,11 @@
 #endif
 #include "driver/ascend_hal.h"
 #include "driver/ascend_hal_define.h"
+#include <cstring>
 #include <dlfcn.h>
+#include <errno.h>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <sys/mman.h>
 
@@ -31,16 +34,16 @@ HostRegisteredMemoryManager::~HostRegisteredMemoryManager() {
 };
 
 void HostRegisteredMemoryManager::unregisterAll() {
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
 
-  // Iterate through each key-value pair in the map.
-  for (const auto &pair : this->allocatedMap) {
+  // Iterate through each key-value pair in the registeredMap.
+  for (const auto &pair : this->registeredMap) {
     void *hostPtr = pair.first;
     aclrtHostUnregister(hostPtr);
   }
 
   // After unregistering all pointers, clear the map completely.
-  this->allocatedMap.clear();
+  this->registeredMap.clear();
 };
 
 // Register a pointer through high level APIs (aclrt) return devPtr
@@ -51,11 +54,11 @@ RegisteredMemoryRecord *HostRegisteredMemoryManager::registerHostPtr(
   LMCACHE_ASCEND_CHECK(
       !(hostPtr == nullptr || bufferSize == 0),
       "Error: hostPtr cannot be null and bufferSize must be greater than 0.");
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
 
   // Check if the host pointer is already registered
-  if (this->allocatedMap.count(hostPtr)) {
-    return &this->allocatedMap[hostPtr];
+  if (this->registeredMap.count(hostPtr)) {
+    return &this->registeredMap[hostPtr];
   }
 
   void *devPtr;
@@ -67,12 +70,12 @@ RegisteredMemoryRecord *HostRegisteredMemoryManager::registerHostPtr(
     return nullptr;
   }
 
-  this->allocatedMap.emplace(
+  this->registeredMap.emplace(
       hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr),
                                       reinterpret_cast<uintptr_t>(devPtr),
                                       bufferSize, -1});
 
-  return &this->allocatedMap[hostPtr];
+  return &this->registeredMap[hostPtr];
 };
 
 // Register an existing host-device pointer mapping to the memory manager
@@ -84,19 +87,19 @@ HostRegisteredMemoryManager::registerMappedMem(void *hostPtr, void *devPtr,
       !(hostPtr == nullptr || devPtr == nullptr || bufferSize == 0),
       "Error: hostPtr and devPtr cannot be null and bufferSize must be greater "
       "than 0.");
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
 
   // Check if the host pointer is already registered
   LMCACHE_ASCEND_CHECK(
-      !(this->allocatedMap.count(hostPtr)),
+      !(this->registeredMap.count(hostPtr)),
       "Error: hostPtr already registered to host memory manager.");
 
-  this->allocatedMap.emplace(
+  this->registeredMap.emplace(
       hostPtr, RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr),
                                       reinterpret_cast<uintptr_t>(devPtr),
                                       bufferSize, -1});
 
-  return &this->allocatedMap[hostPtr];
+  return &this->registeredMap[hostPtr];
 };
 
 // Register a pointer through low level APIs (HAL). Allocates a new pinned host
@@ -109,7 +112,7 @@ HostRegisteredMemoryManager::halRegisterHostPtr(void *hostPtr,
   // Essentially, the halHostRegister function requires a ptr given by mmap.
   LMCACHE_ASCEND_CHECK((bufferSize >= 0),
                        "Error: bufferSize must be greater than 0.");
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
 
   void *devPtr;
   int device = get_device();
@@ -140,13 +143,13 @@ HostRegisteredMemoryManager::halRegisterHostPtr(void *hostPtr,
                                     std::to_string(lockErr))
   }
 
-  this->allocatedMap.emplace(
+  this->registeredMap.emplace(
       hostPtr,
       RegisteredMemoryRecord{reinterpret_cast<uintptr_t>(hostPtr),
                              reinterpret_cast<uintptr_t>(devPtr), bufferSize,
                              static_cast<int32_t>(device)});
 
-  return &this->allocatedMap[hostPtr];
+  return &this->registeredMap[hostPtr];
 };
 
 int HostRegisteredMemoryManager::aclUnregisterHostPtr(void *hostPtr) {
@@ -154,28 +157,86 @@ int HostRegisteredMemoryManager::aclUnregisterHostPtr(void *hostPtr) {
 
   // we don't actually mind if it doesn't unregister,
   // at context destroy it should be unregister anyway.
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
-  if (this->allocatedMap.count(hostPtr) == 0) {
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
+  if (this->registeredMap.count(hostPtr) == 0) {
     // we probably did not register anyway
     return 0;
   }
   aclError err = aclrtHostUnregister(hostPtr);
-  this->allocatedMap.erase(hostPtr);
+  this->registeredMap.erase(hostPtr);
   return static_cast<int>(err);
 };
 
 int HostRegisteredMemoryManager::halUnregisterHostPtr(void *hostPtr) {
   LMCACHE_ASCEND_CHECK(hostPtr != nullptr, "Error: hostPtr cannot be null.");
-  const std::unique_lock<std::shared_mutex> guard(this->mux);
-  if (this->allocatedMap.count(hostPtr) == 0) {
+  const std::unique_lock<std::shared_mutex> guard(this->regMux);
+  if (this->registeredMap.count(hostPtr) == 0) {
     // we probably did not register anyway
     return 0;
   }
-  auto record = this->allocatedMap[hostPtr];
+  auto record = this->registeredMap[hostPtr];
   auto err = halHostUnregisterEx(reinterpret_cast<void *>(hostPtr),
                                  static_cast<UINT32>(record.device),
                                  HOST_MEM_MAP_DEV_PCIE_TH);
   return static_cast<int>(err);
+}
+
+// Track a memory allocation - allocate and lock memory
+AllocatedMemoryRecord *HostRegisteredMemoryManager::allocMem(size_t size) {
+  LMCACHE_ASCEND_CHECK(size > 0, "Error: size must be greater than 0.");
+  const std::unique_lock<std::shared_mutex> guard(this->allocMux);
+
+  // Allocate pinned memory using mmap
+  void *ptr = mmap(nullptr, size, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (ptr == MAP_FAILED) {
+    throw std::runtime_error(std::string("[allocMem] mmap failed: ") +
+                             strerror(errno));
+  }
+
+  memset(ptr, 0, size);
+
+  // Lock the memory to ensure it's pinned
+  if (mlock(ptr, size) != 0) {
+    std::cerr << "[allocMem] mlock failed: " << strerror(errno)
+              << " (errno=" << errno
+              << "). Continuing without pinned memory.\n";
+    // Continue without pinning in the environments where mlock is restricted.
+    // This preserves allocations but degrades guaranteed pinning semantics.
+  }
+
+  // Check if already tracked
+  if (this->allocatedMap.count(ptr)) {
+    return &this->allocatedMap[ptr];
+  }
+
+  this->allocatedMap.emplace(
+      ptr, AllocatedMemoryRecord{reinterpret_cast<uintptr_t>(ptr), size});
+
+  return &this->allocatedMap[ptr];
+}
+
+// Free memory allocated by allocMem
+void HostRegisteredMemoryManager::freeMem(void *hostPtr) {
+  LMCACHE_ASCEND_CHECK(hostPtr != nullptr, "Error: hostPtr cannot be null.");
+  const std::unique_lock<std::shared_mutex> guard(this->allocMux);
+
+  auto it = this->allocatedMap.find(hostPtr);
+  if (it == this->allocatedMap.end()) {
+    throw std::runtime_error("[freeMem] pointer not found in memory manager");
+  }
+
+  size_t size = it->second.buffSize;
+
+  // Unmap the memory
+  int err = munmap(hostPtr, size);
+  if (err != 0) {
+    throw std::runtime_error(std::string("[freeMem] munmap failed: ") +
+                             strerror(errno));
+  }
+
+  // Remove from map
+  this->allocatedMap.erase(it);
 }
 
 /*
@@ -188,11 +249,11 @@ void *HostRegisteredMemoryManager::getDevicePtr(void *hostPtr) {
   if (hostPtr == nullptr) {
     return nullptr;
   }
-  const std::shared_lock<std::shared_mutex> guard(this->mux);
+  const std::shared_lock<std::shared_mutex> guard(this->regMux);
 
   const uintptr_t hostAddrPtr = reinterpret_cast<uintptr_t>(hostPtr);
 
-  for (const auto &pair : this->allocatedMap) {
+  for (const auto &pair : this->registeredMap) {
     const RegisteredMemoryRecord &record = pair.second;
 
     if (hostAddrPtr >= record.ptr &&
@@ -212,11 +273,11 @@ size_t HostRegisteredMemoryManager::getRecordSize(void *hostPtr) {
   if (hostPtr == nullptr) {
     return 0;
   }
-  const std::shared_lock<std::shared_mutex> guard(this->mux);
+  const std::shared_lock<std::shared_mutex> guard(this->regMux);
 
   const uintptr_t hostAddrPtr = reinterpret_cast<uintptr_t>(hostPtr);
 
-  for (const auto &pair : this->allocatedMap) {
+  for (const auto &pair : this->registeredMap) {
     const RegisteredMemoryRecord &record = pair.second;
 
     if (hostAddrPtr >= record.ptr &&
@@ -394,3 +455,14 @@ void *get_device_ptr(void *ptr) {
   auto &hmm = lmc::HostRegisteredMemoryManager::GetInstance();
   return hmm.getDevicePtr(ptr);
 };
+
+void *alloc_mem(size_t size) {
+  auto &hmm = lmc::HostRegisteredMemoryManager::GetInstance();
+  return reinterpret_cast<void *>(hmm.allocMem(size)->ptr);
+}
+
+// Generic memory deallocation
+void free_mem(void *ptr) {
+  auto &hmm = lmc::HostRegisteredMemoryManager::GetInstance();
+  hmm.freeMem(ptr);
+}
