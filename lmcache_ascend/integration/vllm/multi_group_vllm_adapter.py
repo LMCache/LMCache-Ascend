@@ -16,6 +16,7 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
     LMCacheConnectorMetadata,
     LMCacheConnectorV1Impl,
     LoadSpec,
+    extract_request_configs,
 )
 from lmcache.integration.vllm.vllm_v1_adapter import ReqMeta as UpstreamReqMeta
 from lmcache.integration.vllm.vllm_v1_adapter import (
@@ -41,6 +42,7 @@ from lmcache_ascend.integration.vllm.state_groups import (
     state_group_index,
 )
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
+from lmcache_ascend.v1.state_lookup import cancel_state_lookup, lookup_state
 
 if TYPE_CHECKING:
     # Third Party
@@ -645,10 +647,67 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         self, request: Any, num_external_tokens: int, blocks: Any = None
     ) -> None:
         super().update_state_after_alloc(request, num_external_tokens)
+        if (
+            getattr(self, "_state_primary_kv_group_idx", None) is not None
+            and num_external_tokens == 0
+        ):
+            # Allocation may reject a previously selected external candidate.
+            spec = self.load_specs.get(request.request_id)
+            if (
+                spec is not None
+                and spec.lmcache_cached_tokens > spec.vllm_cached_tokens
+            ):
+                cancel_state_lookup(self.lookup_client, request.request_id)
+                spec.lmcache_cached_tokens = 0
         if blocks is not None:
             self._allocated_blocks[request.request_id] = _normalize_block_ids(
                 blocks.get_block_ids(), self._num_kv_groups
             )
+
+    def get_num_new_matched_tokens(self, request: Any, num_computed_tokens: int):
+        if self._state_primary_kv_group_idx is None:
+            return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if request.request_id.startswith("mock_req"):
+            return 0
+        if self.kv_role == "kv_producer" and not hasattr(
+            self.lookup_client, "supports_producer_reuse"
+        ):
+            return 0
+        req_id = request.request_id
+        self._requests_priority[req_id] = getattr(request, "priority", 0)
+        # Preserve the complete prefix for preemption and chained state identity.
+        # Full-hit logits recomputation constrains the query, never the chosen R.
+        token_ids = list(request.all_token_ids)
+        upper = max(
+            0, min(request.num_tokens - 1, len(token_ids) - self.skip_last_n_tokens)
+        )
+        boundary = lookup_state(
+            self.lookup_client,
+            token_ids,
+            lookup_id=req_id,
+            local_cached=num_computed_tokens,
+            upper=upper,
+            required_world_size=self.worker_count,
+            request_configs=extract_request_configs(request.sampling_params),
+        )
+        external = max(0, boundary - num_computed_tokens)
+        if external and external < self.config.min_retrieve_tokens:
+            cancel_state_lookup(self.lookup_client, req_id)
+            boundary, external = 0, 0
+        self.load_specs[req_id] = LoadSpec(
+            vllm_cached_tokens=num_computed_tokens,
+            lmcache_cached_tokens=boundary if external else 0,
+            can_load=False,
+        )
+        logger.info(
+            "Hybrid lookup: request=%s C=%s R=%s external=%s upper=%s",
+            req_id,
+            num_computed_tokens,
+            boundary if external else 0,
+            external,
+            upper,
+        )
+        return external
 
     def _apply_allocated_blocks(self, tracker: RequestTracker) -> None:
         # New/resumed allocation callbacks contain the complete table. Never

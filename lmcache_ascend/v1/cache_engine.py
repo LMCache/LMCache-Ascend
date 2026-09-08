@@ -702,9 +702,22 @@ class AscendLMCacheEngine(LMCacheEngine):
         elif len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
                 _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                self.gpu_connector.batched_to_gpu(
-                    list(memory_objs), list(starts), list(ends), **kwargs
-                )
+                try:
+                    self.gpu_connector.batched_to_gpu(
+                        list(memory_objs), list(starts), list(ends), **kwargs
+                    )
+                except BaseException as error:
+                    if getattr(self, "state_layouts", ()):
+                        # Hybrid owns local synchronous get references. A failed
+                        # submission can still have queued work borrowing them.
+                        try:
+                            self.gpu_connector.load_stream.synchronize()
+                        except BaseException as drain_error:
+                            raise error from drain_error
+                        finally:
+                            for memory_obj in memory_objs:
+                                memory_obj.ref_count_down()
+                    raise
 
         # --- Cleanup ---
         # When save_only_first_rank is set, the sharded-broadcast pipeline

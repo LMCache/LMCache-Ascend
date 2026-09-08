@@ -31,6 +31,9 @@ from lmcache_ascend.integration.vllm.state_groups import (
     request_primary,
     require_no_state_transfer,
 )
+from lmcache_ascend.v1.state_cache import StateCache, StateLoadError
+from lmcache_ascend.v1.state_lookup import cancel_state_lookup
+from lmcache_ascend.v1.state_transfer import transfer_state
 
 if TYPE_CHECKING:
     # Third Party
@@ -63,6 +66,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         self._wait_for_save_done = True
         self._finished_req_ids_waiting_for_save: set[str] = set()
         self._late_finished_sending: set[str] = set()
+        self._failed_state_loads: set[str] = set()
+        self._finished_state_loads: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
 
     @_lmcache_nvtx_annotate
@@ -186,6 +191,25 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         metadata = self._parent._get_connector_metadata()
         assert isinstance(metadata, LMCacheConnectorMetadata)
+
+        if getattr(self, "state_layouts", ()):
+            executions = {item.req_id: item for item in metadata.state_executions}
+            try:
+                for request in metadata.requests:
+                    spec = request.load_spec
+                    if spec is None or not spec.can_load:
+                        continue
+                    if forward_context.attn_metadata is None:
+                        self._record_state_load_failure(
+                            request, "all", "Missing Attention forward metadata"
+                        )
+                        continue
+                    self._load_hybrid_request(request, executions.get(request.req_id))
+            finally:
+                # start_load exceptions bypass the runner's normal save finally.
+                # Release even the selections of requests not reached in this batch.
+                self._unpin_save_requests(metadata)
+            return
 
         assert len(self.kv_caches) > 0
         kvcaches = list(self.kv_caches.values())
@@ -324,6 +348,142 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         self._mark_failed_p2p_loads_for_recompute()
 
+    def _record_state_load_failure(self, request, group, reason, *, exc_info=False):
+        self._failed_state_loads.add(request.req_id)
+        logger.error(
+            "Hybrid load failed: request=%s rank=%s group=%s R=%s reason=%s",
+            request.req_id,
+            self.lmcache_engine.metadata.worker_id,
+            group,
+            request.load_spec.lmcache_cached_tokens,
+            reason,
+            exc_info=exc_info,
+        )
+
+    def _prepare_hybrid_attention(self, request, boundary):
+        """Validate required Attention slots before allocating transfer mappings."""
+        state_groups = {layout.group_index for layout in self.state_layouts}
+        local = request.load_spec.vllm_cached_tokens
+        slots = []
+        for group in range(request.num_kv_groups):
+            if group in state_groups:
+                slots.append(torch.empty(0, dtype=torch.long))
+                continue
+            mapping = request.get_slot_mapping(group)
+            if (
+                not isinstance(mapping, torch.Tensor)
+                or mapping.ndim != 1
+                or len(mapping) < boundary
+                or bool((mapping[local:boundary] < 0).any())
+            ):
+                raise StateLoadError("Missing Attention target mapping", group)
+            slots.append(mapping)
+        cpu_slots = tuple(slot.pin_memory() for slot in slots)
+        with torch.npu.stream(self.lmcache_engine.gpu_connector.load_stream):
+            npu_slots = tuple(
+                slot.to(device="npu", dtype=torch.long, non_blocking=True)
+                for slot in cpu_slots
+            )
+            result = {
+                "kvcaches": list(self.kv_caches.values()),
+                "slot_mapping": npu_slots[request.primary_kv_group_idx],
+                "slot_mappings_by_group": cpu_slots,
+                "slot_mappings_npu_by_group": npu_slots,
+                "vllm_cached_tokens": local,
+                "request_configs": request.request_configs,
+                "req_id": request.req_id,
+            }
+            if request.filtered_slot_by_group is not None:
+                result["filtered_slot_mappings_npu"] = tuple(
+                    slot.to(device="npu", dtype=torch.long, non_blocking=True)
+                    for slot in request.filtered_slot_by_group
+                )
+            if request.slot_valid_prefix_by_group is not None:
+                result["slot_valid_prefix_by_group"] = (
+                    request.slot_valid_prefix_by_group
+                )
+        return result
+
+    def _load_hybrid_request(self, request, execution):
+        """Restore one selected R locally; detected failure is logged, not recovery."""
+        spec = request.load_spec
+        if spec is None or not spec.can_load:
+            return False
+        engine = self.lmcache_engine
+        boundary, local = spec.lmcache_cached_tokens, spec.vllm_cached_tokens
+        group = "all"
+        with engine._engine_state_lock:
+            try:
+                selection = engine.get_state_lookup(request.req_id, boundary)
+                if not 0 <= local < boundary <= len(request.token_ids):
+                    raise StateLoadError("Inconsistent scheduler load boundary")
+                if execution is not None and (
+                    tuple(request.token_ids[:boundary])
+                    != execution.token_ids[:boundary]
+                    or request.request_configs != execution.request_configs
+                ):
+                    raise StateLoadError("Mismatched execution prefix identity")
+                operations = StateCache(
+                    engine.storage_manager,
+                    engine.token_database,
+                    self._lmcache_chunk_size,
+                ).prepare_load(
+                    execution,
+                    boundary,
+                    self.state_layouts,
+                    self.state_kv_caches,
+                    selection,
+                )
+                group = "attention"
+                retrieve_kwargs = self._prepare_hybrid_attention(request, boundary)
+                mask = torch.ones(boundary, dtype=torch.bool)
+                mask[: local // self._lmcache_chunk_size * self._lmcache_chunk_size] = (
+                    False
+                )
+                ret_mask = engine.retrieve(
+                    request.token_ids[:boundary], mask, **retrieve_kwargs
+                )
+                engine.gpu_connector.load_stream.synchronize()
+                # The engine may reload the chunk overlapping C. A total count
+                # can hide missing tokens above C behind copied ones below C.
+                if (
+                    ret_mask.ndim != 1
+                    or len(ret_mask) != boundary
+                    or not bool(ret_mask[local:boundary].all())
+                ):
+                    raise StateLoadError(
+                        "Incomplete Attention coverage of [C,R)", group
+                    )
+                with torch.npu.stream(engine.gpu_connector.load_stream):
+                    for operation in operations:
+                        group = operation.checkpoint.group_index
+                        transfer_state(operation)
+                engine.gpu_connector.load_stream.synchronize()
+                logger.info(
+                    "Hybrid load complete: request=%s rank=%s groups=%s "
+                    "R=%s C=%s targets=%s",
+                    request.req_id,
+                    engine.metadata.worker_id,
+                    [op.checkpoint.group_index for op in operations],
+                    boundary,
+                    local,
+                    [
+                        (op.checkpoint.group_index, op.runtime.block_id)
+                        for op in operations
+                    ],
+                )
+                return True
+            except StateLoadError as error:
+                self._record_state_load_failure(request, error.group, str(error))
+                return False
+            except Exception as error:
+                self._record_state_load_failure(
+                    request, group, str(error), exc_info=True
+                )
+                raise
+            finally:
+                engine.lookup_unpin(request.req_id)
+
     def _mark_failed_p2p_loads_for_recompute(self) -> None:
         gpu_connector = getattr(self.lmcache_engine, "gpu_connector", None)
         drain = getattr(gpu_connector, "drain_failed_load_req_ids", None)
@@ -342,6 +502,12 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 continue
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:
+                continue
+
+            if getattr(self, "state_layouts", ()):
+                self._record_state_load_failure(
+                    request, "attention", "P2P pull failure"
+                )
                 continue
 
             tokens = request.token_ids
@@ -384,12 +550,14 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         if forward_failed and getattr(self, "state_layouts", ()):
             self._unpin_save_requests(connector_metadata)
             self._wait_for_save_done = True
+            self._retire_finished_state_loads()
             return
 
         if self.kv_role == "kv_consumer":
             if self.lmcache_engine is not None:
                 self._unpin_save_requests(connector_metadata)
             self._wait_for_save_done = True
+            self._retire_finished_state_loads()
             return
 
         # lmcache-ascend start: skip save on passive ranks ---------------------
@@ -439,6 +607,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
 
         for request in connector_metadata.requests:
             self.lmcache_engine.lookup_unpin(request.req_id)
+
+            if request.req_id in getattr(self, "_failed_state_loads", set()):
+                # A suffix computed from failed recurrent state is not publishable
+                # as either Attention KV or a new state checkpoint.
+                continue
 
             try:
                 save_spec = request.save_spec
@@ -669,6 +842,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         if not layouts:
             return
         for execution in getattr(metadata, "state_executions", ()):
+            if execution.req_id in getattr(self, "_failed_state_loads", set()):
+                continue
             try:
                 self.lmcache_engine.store_state(
                     execution, layouts, self.state_kv_caches, ordering_event
@@ -683,6 +858,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 raise
 
     def _may_register_store_after_wait_for_save(self, request: "Request") -> bool:
+        if request.req_id in getattr(self, "_failed_state_loads", set()):
+            return False
         if self.kv_role == "kv_consumer":
             return False
         save_spec = request.save_spec
@@ -692,7 +869,13 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             return False
         return save_spec.skip_leading_tokens != len(request.token_ids)
 
+    def _retire_finished_state_loads(self) -> None:
+        if getattr(self, "_finished_state_loads", None):
+            self._failed_state_loads.difference_update(self._finished_state_loads)
+            self._finished_state_loads.clear()
+
     def _replay_finished_stores_after_save(self) -> None:
+        self._retire_finished_state_loads()
         if not self._finished_req_ids_waiting_for_save or self.lmcache_engine is None:
             return
 
@@ -709,6 +892,15 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if self.lmcache_engine is None:
             return None, None
+        if getattr(self, "state_layouts", ()):
+            for req_id in finished_req_ids:
+                self.lmcache_engine.lookup_unpin(req_id)
+            if self._wait_for_save_done:
+                self._failed_state_loads.difference_update(finished_req_ids)
+            else:
+                # Some runner paths report finished before wait_for_save; keep
+                # failed IDs until that final save opportunity has been skipped.
+                self._finished_state_loads.update(finished_req_ids)
         query_req_ids = set(finished_req_ids)
         if not self._wait_for_save_done:
             # NOTE (gingfung): The is a workaround logic for the case
@@ -765,6 +957,13 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        if getattr(self, "_state_primary_kv_group_idx", None) is not None:
+            try:
+                if self.lookup_client is not None:
+                    cancel_state_lookup(self.lookup_client, request.request_id)
+            finally:
+                self.load_specs.pop(request.request_id, None)
+                self._allocated_blocks.pop(request.request_id, None)
         # Add patch from upstream LMCache#3340 (regression LMCache#3337)
         if getattr(self, "use_layerwise", False) and hasattr(
             self, "_layerwise_save_storers"
@@ -872,6 +1071,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     ) -> tuple[bool, dict[str, Any] | None]:
         """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
         if not block_ids:
+            if getattr(self, "_state_primary_kv_group_idx", None) is not None:
+                return self.request_finished(request, [])
             return False, None
         state_primary = self._state_primary_kv_group_idx
         if state_primary is not None:
