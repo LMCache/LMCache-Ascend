@@ -528,6 +528,10 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 return True
             except StateLoadError as error:
                 self._record_state_load_failure(request, error.group, str(error))
+                # The scheduler has already counted these tokens as externally computed.
+                # Propagate until upstream supports hybrid load-failure recovery.
+                # Returning False is safe only when the caller handles it through that
+                # recovery protocol instead of continuing forward with incomplete state.
                 raise
             except Exception as error:
                 self._record_state_load_failure(
