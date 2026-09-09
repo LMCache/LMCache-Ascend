@@ -221,8 +221,28 @@ def _load_worker(monkeypatch, ret_mask=None):
 
 
 def test_hybrid_restore_uses_selection_and_pre_movement_target(monkeypatch, caplog):
+    # First Party
+    from lmcache_ascend.integration.vllm import vllm_v1_adapter as module
+
     caplog.set_level("INFO")
     worker, request, execution, selection, copy = _load_worker(monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(module, "perf_counter", lambda: clock[0])
+
+    def advance(seconds):
+        clock[0] += seconds
+
+    original_retrieve = worker.lmcache_engine.retrieve.side_effect
+
+    def retrieve(*args, **kwargs):
+        advance(10)
+        return original_retrieve(*args, **kwargs)
+
+    worker.lmcache_engine.retrieve.side_effect = retrieve
+    copy.side_effect = lambda _: advance(2)
+    worker.lmcache_engine.gpu_connector.load_stream.synchronize.side_effect = (
+        lambda: advance(3)
+    )
     assert worker._load_hybrid_request(request, execution)
     operation = copy.call_args.args[0]
     assert operation.buffer is selection.buffers[1]
@@ -233,6 +253,14 @@ def test_hybrid_restore_uses_selection_and_pre_movement_target(monkeypatch, capl
     worker.lmcache_engine.lookup_unpin.assert_called_once_with("r")
     assert not worker._failed_state_loads
     assert "Hybrid load complete" in caplog.text
+    records = [r for r in caplog.records if "Retrieved state checkpoint" in r.msg]
+    assert len(records) == 1
+    args = records[0].args
+    assert args[:4] == ("r", 1, 32, [1])
+    assert args[4] == 20 / 1024**3
+    assert args[5] == 5000  # State copy + synchronization, excluding Attention.
+    assert args[6] == pytest.approx(args[4] / 5)
+    assert "targets=" not in caplog.text and "target_blocks=" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -295,6 +323,7 @@ def test_hybrid_underlying_errors_log_and_propagate(monkeypatch, caplog, phase):
     worker.lmcache_engine.lookup_unpin.assert_called_once_with("r")
     assert "Hybrid load complete" not in caplog.text
     assert "request=r" in caplog.text and "R=32" in caplog.text
+    assert "Retrieved state checkpoint" not in caplog.text
 
 
 def test_failure_suppresses_later_local_state_save_until_finished(monkeypatch):

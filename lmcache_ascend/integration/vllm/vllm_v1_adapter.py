@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 import sys
 
@@ -509,19 +510,50 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     raise StateLoadError(
                         "Incomplete Attention coverage of [C,R)", group
                     )
+                # Measure state copies through completion, excluding Attention
+                # retrieval and the earlier lookup/preflight of retained buffers.
+                state_load_start = perf_counter()
                 with torch.npu.stream(engine.gpu_connector.load_stream):
                     for operation in operations:
                         group = operation.checkpoint.group_index
                         transfer_state(operation)
                 engine.gpu_connector.load_stream.synchronize()
+                elapsed = perf_counter() - state_load_start
+                state_groups = [op.checkpoint.group_index for op in operations]
+                size_gb = (
+                    sum(
+                        plane.nbytes
+                        for op in operations
+                        for plane in op.buffer.layout.planes
+                    )
+                    / 1024**3
+                )
                 logger.info(
-                    "Hybrid load complete: request=%s rank=%s groups=%s "
-                    "R=%s C=%s targets=%s",
+                    "[req_id=%s] Retrieved state checkpoint: rank=%s, boundary=%s, "
+                    "groups=%s, size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s;",
                     request.req_id,
                     engine.metadata.worker_id,
-                    [op.checkpoint.group_index for op in operations],
+                    boundary,
+                    state_groups,
+                    size_gb,
+                    elapsed * 1000,
+                    size_gb / elapsed if elapsed > 0 else 0,
+                )
+                logger.info(
+                    "[req_id=%s] Hybrid load complete: rank=%s, groups=%s, "
+                    "boundary=%s, Inference Engine computed tokens: %d",
+                    request.req_id,
+                    engine.metadata.worker_id,
+                    state_groups,
                     boundary,
                     local,
+                )
+                logger.debug(
+                    "[req_id=%s] Hybrid load targets: rank=%s, boundary=%s, "
+                    "target_blocks=%s",
+                    request.req_id,
+                    engine.metadata.worker_id,
+                    boundary,
                     [
                         (op.checkpoint.group_index, op.runtime.block_id)
                         for op in operations

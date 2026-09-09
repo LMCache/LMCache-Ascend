@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Independent synchronous state saves through managed local storage."""
 
+# Standard
+from time import perf_counter
+
 # Third Party
 from lmcache.logging import init_logger
 import torch
@@ -122,6 +125,7 @@ class StateCache:
         blocks = execution.save_blocks(self.chunk_size)
         if not blocks:
             return
+        start = perf_counter()
         manager = self.storage_manager
         cpu = manager.storage_backends["LocalCPUBackend"]
         if manager.allocator_backend is not cpu:
@@ -139,6 +143,8 @@ class StateCache:
         if key is None:
             raise ValueError("State endpoint has no complete prefix chunk key")
         by_group = {layout.group_index: layout for layout in layouts}
+        stored_groups = []
+        stored_bytes = 0
         for group, block_id in blocks:
             layout = by_group[group]
             checkpoint = CheckpointRef.from_chunk(
@@ -188,3 +194,21 @@ class StateCache:
                         obj.ref_count_down()
                         # Earlier complete backend entries retain their own refs.
                         raise
+                stored_groups.append(group)
+                stored_bytes += sum(plane.nbytes for plane in layout.planes)
+        if stored_groups:
+            elapsed = perf_counter() - start
+            size_gb = stored_bytes / 1024**3
+            # transfer_state waits for the copy. Backend submission does
+            # not imply that an asynchronous disk write has completed.
+            logger.info(
+                "[req_id=%s] Stored state checkpoint: rank=%s, boundary=%s, "
+                "groups=%s, size: %.4f GB, cost %.4f ms, throughput: %.4f GB/s;",
+                execution.req_id,
+                key.worker_id,
+                execution.end,
+                stored_groups,
+                size_gb,
+                elapsed * 1000,
+                size_gb / elapsed if elapsed > 0 else 0,
+            )

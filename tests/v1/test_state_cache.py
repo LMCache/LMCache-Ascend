@@ -7,6 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace
+from unittest.mock import Mock
 import asyncio
 import json
 import os
@@ -240,6 +241,11 @@ def test_binary_routes_hold_existing_host_lock(mixed, monkeypatch):
 def test_sync_save_publication_and_manager_reference_handoff(
     mixed, monkeypatch, failure
 ):
+    # First Party
+    from lmcache_ascend.v1 import state_cache
+
+    save_log = Mock()
+    monkeypatch.setattr(state_cache.logger, "info", save_log)
     events, objects, published = [], [], {}
 
     class CPUBackend:
@@ -314,6 +320,21 @@ def test_sync_save_publication_and_manager_reference_handoff(
     else:
         with pytest.raises((MemoryError, RuntimeError)):
             cache.save(execution, (layout(),), runtime, stream, object())
+    if failure is None:
+        save_log.assert_called_once()
+        args = save_log.call_args.args
+        assert "Stored state checkpoint" in args[0]
+        assert args[1:5] == ("r", 2, 32, [1])
+        # Six conv bytes + eight SSM bytes; exclude the two padding bytes.
+        assert args[5] == 14 / 1024**3
+        assert args[6] >= 0
+        if args[6] > 0:
+            assert args[7] == pytest.approx(args[5] / (args[6] / 1000))
+        # An already-present checkpoint must not report another transfer.
+        cache.save(execution, (layout(),), runtime, stream, object())
+        save_log.assert_called_once()
+    else:
+        save_log.assert_not_called()
     if failure in (None, "admitted"):
         assert len(published) == 1
         obj = next(iter(published.values()))
