@@ -319,6 +319,7 @@ class StateExecution:
 class AscendConnectorMetadata(LMCacheConnectorMetadata):
     # Independent of reqs: Attention may have no new chunk to save this round.
     state_executions: list[StateExecution] = field(default_factory=list)
+    preempted_req_ids: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -855,7 +856,11 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
 
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
-        meta = AscendConnectorMetadata()
+        meta = AscendConnectorMetadata(
+            preempted_req_ids=set(
+                getattr(scheduler_output, "preempted_req_ids", None) or ()
+            )
+        )
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._allocated_blocks.pop(finished_req_id, None)

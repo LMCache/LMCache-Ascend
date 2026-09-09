@@ -389,13 +389,61 @@ def test_scheduler_cancel_before_allocation_releases_selection(monkeypatch):
 
 
 def test_preemption_releases_selection_and_restore_uses_new_target(monkeypatch):
+    # First Party
+    from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
+        LMCacheAscendConnector,
+    )
+
     worker, request, execution, _, copy = _load_worker(monkeypatch)
     worker.store_async = False
-    worker.handle_preemptions({"r"})
+    connector = LMCacheAscendConnector.__new__(LMCacheAscendConnector)
+    connector._lmcache_engine = worker
+    connector.handle_preemptions(AscendConnectorMetadata(preempted_req_ids={"r"}))
     worker.lmcache_engine.lookup_unpin.assert_called_once_with("r")
     remapped = replace(execution, block_ids_by_group=((8, 9, 10), (0, 6, 7)))
     assert worker._load_hybrid_request(request, remapped)
     assert copy.call_args.args[0].runtime.block_id == 6
+
+
+@pytest.mark.parametrize("preempted", [None, set(), {"r"}])
+@pytest.mark.parametrize("store_async", [False, True])
+def test_preemption_metadata_round_trip(monkeypatch, preempted, store_async):
+    # First Party
+    from lmcache_ascend.integration.vllm.lmcache_ascend_connector import (
+        LMCacheAscendConnector,
+    )
+
+    scheduler = LMCacheConnectorV1ImplMultiGroup.__new__(
+        LMCacheConnectorV1ImplMultiGroup
+    )
+    scheduler.kv_role, scheduler.force_skip_save = "kv_both", False
+    scheduler._state_primary_kv_group_idx = None
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+        preempted_req_ids=set(preempted) if preempted is not None else None,
+    )
+    metadata = scheduler.build_connector_meta(output)
+    assert metadata.preempted_req_ids == (preempted or set())
+    if preempted is not None:
+        output.preempted_req_ids.add("later")
+        assert "later" not in metadata.preempted_req_ids
+
+    worker, _, _, _, _ = _load_worker(monkeypatch)
+    worker.store_async, worker.kv_role = store_async, "kv_both"
+    worker.lmcache_engine.wait_for_pending_stores = Mock(return_value=set())
+    connector = LMCacheAscendConnector.__new__(LMCacheAscendConnector)
+    connector._lmcache_engine = worker
+    connector.handle_preemptions(metadata)
+    if preempted:
+        worker.lmcache_engine.lookup_unpin.assert_called_once_with("r")
+    else:
+        worker.lmcache_engine.lookup_unpin.assert_not_called()
+    if preempted and store_async:
+        worker.lmcache_engine.wait_for_pending_stores.assert_called_once_with({"r"})
+    else:
+        worker.lmcache_engine.wait_for_pending_stores.assert_not_called()
 
 
 @pytest.mark.parametrize(
