@@ -50,6 +50,19 @@ T *get_kernel_ptr(TENSOR_TYPE &tensor) {
   }
 }
 
+struct GDNStateTransferConfig {
+  aclrtStream stream;
+  at::ScalarType scalar_type;
+  uint32_t aiv_num;
+  int32_t num_layers;
+  int64_t slice_numel;
+  bool direction;
+};
+
+GDNStateTransferConfig prepare_gdn_state_transfer_config(
+    const torch::Tensor &memory_tensor, const torch::Device &runtime_device,
+    int32_t num_layers, int64_t slice_numel, bool direction);
+
 struct MultiLayerKVConfig {
   uint8_t *page_buffer_ptrs;
   uint8_t *slot_mapping_ptr;

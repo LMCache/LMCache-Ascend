@@ -30,6 +30,20 @@ kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
 }
 } // namespace vllm_ascend
 
+GDNStateTransferConfig prepare_gdn_state_transfer_config(
+    const torch::Tensor &memory_tensor, const torch::Device &runtime_device,
+    int32_t num_layers, int64_t slice_numel, bool direction) {
+  const c10::OptionalDeviceGuard device_guard(runtime_device);
+  GDNStateTransferConfig config;
+  config.stream = c10_npu::getCurrentNPUStream().stream();
+  config.scalar_type = memory_tensor.scalar_type();
+  config.aiv_num = static_cast<uint32_t>(std::min(num_layers, 4));
+  config.num_layers = num_layers;
+  config.slice_numel = slice_numel;
+  config.direction = direction;
+  return config;
+}
+
 MultiLayerKVConfig prepare_multi_layer_kv_config(
     const torch::Tensor &key_value, const torch::Tensor &key_value_ptrs,
     const torch::Tensor &slot_mapping, const torch::Device &paged_memory_device,

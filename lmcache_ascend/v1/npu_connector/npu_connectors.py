@@ -887,7 +887,11 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
 
         first_entry = kv_caches[0]
         if isinstance(first_entry, torch.Tensor):
-            num_blocks = int(first_entry.shape[0])
+            num_blocks = int(
+                first_entry.shape[1]
+                if first_entry.ndim == 5 and first_entry.shape[0] == 2
+                else first_entry.shape[0]
+            )
         elif isinstance(first_entry, (tuple, list)):
             num_blocks = int(first_entry[0].shape[0])
         else:

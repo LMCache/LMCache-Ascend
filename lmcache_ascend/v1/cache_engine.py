@@ -28,6 +28,7 @@ import torch
 
 # First Party
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
+from lmcache_ascend.v1.state_cache import StateCache
 
 logger = init_logger(__name__)
 
@@ -611,6 +612,34 @@ class AscendLMCacheEngine(LMCacheEngine):
                     except Exception:
                         pass
 
+    def _process_hybrid_tokens(self, tokens, mask, ret_mask, **kwargs):
+        """Acquire the selected Attention prefix with explicit ownership per get."""
+        assert self.storage_manager is not None
+        locations = {
+            key: location
+            for location, keys in self.lookup_pins.get(kwargs.get("req_id"), {}).items()
+            for key in keys
+        }
+        chunks = []
+        try:
+            for start, end, key in self.token_database.process_tokens(
+                tokens=tokens, mask=mask, request_configs=kwargs.get("request_configs")
+            ):
+                location = locations.get(key)
+                if location is None:
+                    break
+                memory_obj = self.storage_manager.get(key, location=location)
+                if memory_obj is None:
+                    break
+                # Record ownership before inspecting or acquiring the next object.
+                chunks.append((key, memory_obj, start, end))
+                ret_mask[start:end] = True
+            return chunks, sum(obj.get_size() for _, obj, _, _ in chunks)
+        except BaseException:
+            for _, memory_obj, _, _ in chunks:
+                memory_obj.ref_count_down()
+            raise
+
     @torch.inference_mode()
     def retrieve(
         self,
@@ -679,6 +708,10 @@ class AscendLMCacheEngine(LMCacheEngine):
                         ret_mask,
                         **kwargs,
                     )
+                elif getattr(self, "state_layouts", ()):
+                    reordered_chunks, tot_kv_size = self._process_hybrid_tokens(
+                        tokens, mask, ret_mask, **kwargs
+                    )
                 else:
                     reordered_chunks, tot_kv_size = self._process_tokens_internal(
                         tokens,
@@ -701,9 +734,22 @@ class AscendLMCacheEngine(LMCacheEngine):
         elif len(reordered_chunks) > 0:
             with retrieve_stats.profile_to_gpu():
                 _, memory_objs, starts, ends = zip(*reordered_chunks, strict=False)
-                self.gpu_connector.batched_to_gpu(
-                    list(memory_objs), list(starts), list(ends), **kwargs
-                )
+                try:
+                    self.gpu_connector.batched_to_gpu(
+                        list(memory_objs), list(starts), list(ends), **kwargs
+                    )
+                except BaseException as error:
+                    if getattr(self, "state_layouts", ()):
+                        # Hybrid owns local synchronous get references. A failed
+                        # submission can still have queued work borrowing them.
+                        try:
+                            self.gpu_connector.load_stream.synchronize()
+                        except BaseException as drain_error:
+                            raise error from drain_error
+                        finally:
+                            for memory_obj in memory_objs:
+                                memory_obj.ref_count_down()
+                    raise
 
         # --- Cleanup ---
         # When save_only_first_rank is set, the sharded-broadcast pipeline
@@ -1055,6 +1101,21 @@ class AscendLMCacheEngine(LMCacheEngine):
     ) -> int:
         # Serialize against the store-worker thread's
         with self._engine_state_lock:
+            # First Party
+            from lmcache_ascend.v1.state_lookup import OP_KEY, dispatch_state_lookup
+
+            if OP_KEY in (request_configs or {}):
+                configs = dict(request_configs)
+                operation = configs.pop(OP_KEY)
+                return dispatch_state_lookup(
+                    self,
+                    lookup_id,
+                    operation,
+                    configs,
+                    tokens=tokens,
+                    hashes=hashes,
+                    offsets=offsets,
+                )
             return super().lookup(
                 tokens=tokens,
                 hashes=hashes,
@@ -1067,7 +1128,48 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def lookup_unpin(self, lookup_id: str) -> None:
         with self._engine_state_lock:
+            # First Party
+            from lmcache_ascend.v1.state_lookup import release_engine_selection
+
+            release_engine_selection(self, lookup_id)
             super().lookup_unpin(lookup_id)
+
+    def get_state_lookup(self, lookup_id: str, boundary: int):
+        """Borrow selected state while holding _engine_state_lock through transfer.
+
+        Cancel the probe lease on consumption. lookup_unpin remains mandatory
+        after transfer completion, including errors. A missing/expired selection
+        is a restore failure, never permission to invent a new recovery boundary.
+        """
+        with self._engine_state_lock:
+            selection = getattr(self, "_state_lookup_selections", {}).get(lookup_id)
+            if selection is None or selection.boundary != boundary:
+                return None
+            if selection.timer is not None:
+                selection.timer.cancel()
+                selection.timer = None
+            return selection
+
+    @torch.inference_mode()
+    def store_state(self, execution, layouts, kv_caches, ordering_event):
+        """Synchronously save a planned endpoint after the worker's forward gate."""
+        if self._is_passive() or not self.is_healthy() or self.is_frozen():
+            return
+        if self.store_location not in (None, "LocalCPUBackend", "LocalDiskBackend"):
+            raise ValueError("State save supports only local CPU/disk")
+        assert self.storage_manager is not None
+        assert self.gpu_connector is not None
+        with self._engine_state_lock:
+            StateCache(
+                self.storage_manager, self.token_database, self.config.chunk_size
+            ).save(
+                execution,
+                layouts,
+                kv_caches,
+                self.gpu_connector.store_stream,
+                ordering_event,
+                location=self.store_location,
+            )
 
     @torch.inference_mode()
     def store(
@@ -1209,4 +1311,10 @@ class AscendLMCacheEngine(LMCacheEngine):
             except Exception:
                 logger.exception("Error stopping Ascend store worker")
 
+        # First Party
+        from lmcache_ascend.v1.state_lookup import release_engine_selection
+
+        with self._engine_state_lock:
+            for lookup_id in list(getattr(self, "_state_lookup_selections", {})):
+                release_engine_selection(self, lookup_id)
         super().close()
