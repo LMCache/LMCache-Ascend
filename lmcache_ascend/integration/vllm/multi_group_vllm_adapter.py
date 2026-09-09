@@ -717,12 +717,14 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             can_load=False,
         )
         logger.info(
-            "Hybrid lookup: request=%s C=%s R=%s external=%s upper=%s",
+            "Hybrid lookup: Reqid: %s, Total tokens %d, "
+            "Inference Engine computed tokens: %d, "
+            "LMCache hit tokens: %d, need to load: %d",
             req_id,
+            request.num_tokens,
             num_computed_tokens,
             boundary if external else 0,
             external,
-            upper,
         )
         return external
 
