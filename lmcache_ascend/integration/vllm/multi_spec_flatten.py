@@ -254,6 +254,23 @@ def build_layer_to_scheduler_groups(
     }
 
 
+def _matches_attention_plane(tensor: torch.Tensor, spec: Any) -> bool:
+    if tensor.ndim != 4:
+        return False
+    num_blocks, kernel_block_size, num_heads, head_size = tensor.shape
+    # Ascend can split each scheduler page into smaller contiguous kernel blocks
+    # (e.g. 1024 -> 8 x 128). This preserves the token-slot address space.
+    return (
+        num_blocks > 0
+        and kernel_block_size > 0
+        and spec.block_size % kernel_block_size == 0
+        and num_blocks % (spec.block_size // kernel_block_size) == 0
+        and (num_heads, head_size) == (spec.num_kv_heads, spec.head_size)
+        and tensor.dtype == spec.dtype
+        and tensor.is_contiguous()
+    )
+
+
 def build_flat_kv_caches(
     kv_caches: dict[str, _KVEntry],
     kv_cache_config: Any,
@@ -298,24 +315,23 @@ def build_flat_kv_caches(
                 )
             planes = _entry_planes(entry)
             spec = layer_spec(kv_cache_config.kv_cache_groups[primary], name)
-            tail = (spec.block_size, spec.num_kv_heads, spec.head_size)
             valid_shape = (
                 isinstance(entry, torch.Tensor)
                 and entry.ndim == 5
                 and entry.shape[0] == 2
-                and entry.shape[1] > 0
-                and tuple(entry.shape[2:]) == tail
+                and all(_matches_attention_plane(t, spec) for t in entry)
             ) or (
                 isinstance(entry, (tuple, list))
                 and len(entry) == len(planes) == 2
-                and all(
-                    t.ndim == 4 and t.shape[0] > 0 and tuple(t.shape[1:]) == tail
-                    for t in planes
-                )
+                and all(_matches_attention_plane(t, spec) for t in planes)
             )
-            if not valid_shape or any(t.dtype != spec.dtype for t in planes):
+            if not valid_shape:
                 raise ValueError(
-                    "Hybrid full Attention tensors do not match their spec"
+                    "Hybrid full Attention tensors do not match their spec: "
+                    f"layer={name}, scheduler_block_size={spec.block_size}, "
+                    f"num_kv_heads={spec.num_kv_heads}, head_size={spec.head_size}, "
+                    f"dtype={spec.dtype}, "
+                    f"actual={[(tuple(t.shape), t.dtype, t.stride()) for t in planes]}"
                 )
             current = (fmt, tuple((tuple(t.shape), t.dtype) for t in planes))
             if signature is not None and current != signature:

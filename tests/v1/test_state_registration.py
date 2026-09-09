@@ -26,7 +26,7 @@ from lmcache_ascend.integration.vllm.vllm_v1_adapter import LMCacheAscendConnect
 from lmcache_ascend.v1.npu_connector.npu_connectors import VLLMPagedMemNPUConnectorV2
 
 
-def _registration(monkeypatch, state_first=True, merged=False):
+def _registration(monkeypatch, state_first=True, merged=False, kernel_block_size=16):
     connector = LMCacheAscendConnectorV1Impl.__new__(LMCacheAscendConnectorV1Impl)
     spec = MambaSpec(
         block_size=16,
@@ -58,10 +58,11 @@ def _registration(monkeypatch, state_first=True, merged=False):
         for name in ("gdn.0", "gdn.1")
     }
     for name in ("attn.0", "attn.1"):
+        shape = (5 * 16 // kernel_block_size, kernel_block_size, 2, 4)
         tensors[name] = (
-            torch.empty(2, 5, 16, 2, 4, dtype=torch.bfloat16)
+            torch.empty(2, *shape, dtype=torch.bfloat16)
             if merged
-            else tuple(torch.empty(5, 16, 2, 4, dtype=torch.bfloat16) for _ in range(2))
+            else tuple(torch.empty(shape, dtype=torch.bfloat16) for _ in range(2))
         )
     connector.config = LMCacheEngineConfig.from_defaults()
     connector._vllm_config = _vllm_config()
@@ -113,10 +114,13 @@ def _vllm_config():
 
 @pytest.mark.parametrize("state_first", [True, False])
 @pytest.mark.parametrize("merged", [True, False])
+@pytest.mark.parametrize("kernel_block_size", [16, 2])
 def test_registration_preserves_native_attention_and_all_state_groups(
-    monkeypatch, state_first, merged
+    monkeypatch, state_first, merged, kernel_block_size
 ):
-    connector, tensors = _registration(monkeypatch, state_first, merged)
+    connector, tensors = _registration(
+        monkeypatch, state_first, merged, kernel_block_size
+    )
     connector.register_kv_caches(tensors)
     primary = select_state_primary(connector._kv_cache_config)
     assert primary == (1 if state_first else 0)
@@ -143,11 +147,58 @@ def test_registration_preserves_native_attention_and_all_state_groups(
     )
     assert engine.gpu_connector.num_layers == connector.num_layers == 2
     (group,) = engine.metadata.kv_layer_groups_manager.kv_layer_groups
-    assert group.shape_desc.nb == 5
+    assert group.shape_desc.nb == 5 * 16 // kernel_block_size
+    assert group.shape_desc.bs == kernel_block_size
     assert group.shape_desc.nl == 2
     assert group.shape_desc.kv_size == 2
     assert group.shape_desc.element_size == 2
     connector._manager.post_init.assert_called_once()
+
+
+@pytest.mark.parametrize("merged", [True, False])
+def test_registration_split_blocks_preserve_token_slot_addresses(monkeypatch, merged):
+    # First Party
+    from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
+        _build_slot_mapping_for_group,
+    )
+
+    connector, tensors = _registration(monkeypatch, merged=merged, kernel_block_size=2)
+    connector.register_kv_caches(tensors)
+    # Scheduler blocks 3 and 1 map to eight kernel blocks each, in token order.
+    slots = _build_slot_mapping_for_group([3, 1], 16, 32, False)
+    for entry in connector.kv_caches.values():
+        for plane in entry:
+            logical = plane.view(5, 16, 2, 4)
+            values = torch.arange(80, dtype=plane.dtype)
+            logical.copy_(values.view(5, 16, 1, 1).expand_as(logical))
+            actual = plane[slots // 2, slots % 2]
+            expected = torch.cat((logical[3], logical[1]))
+            assert torch.equal(actual, expected)
+    assert connector._block_sizes_by_group == (16, 16, 16)
+
+
+@pytest.mark.parametrize(
+    "failure", ["block_size", "partial_page", "heads", "dtype", "stride"]
+)
+def test_registration_rejects_invalid_attention_kernel_layout(monkeypatch, failure):
+    connector, tensors = _registration(monkeypatch, kernel_block_size=2)
+    shape = (40, 2, 2, 4)
+    dtype = torch.bfloat16
+    if failure == "block_size":
+        shape = (40, 3, 2, 4)
+    elif failure == "partial_page":
+        shape = (39, 2, 2, 4)
+    elif failure == "heads":
+        shape = (40, 2, 1, 4)
+    elif failure == "dtype":
+        dtype = torch.float32
+    planes = tuple(torch.empty(shape, dtype=dtype) for _ in range(2))
+    if failure == "stride":
+        planes = tuple(t.transpose(1, 2) for t in planes)
+    tensors["attn.0"] = planes
+    with pytest.raises(ValueError, match="do not match their spec"):
+        connector.register_kv_caches(tensors)
+    connector._manager.post_init.assert_not_called()
 
 
 @pytest.mark.parametrize(
