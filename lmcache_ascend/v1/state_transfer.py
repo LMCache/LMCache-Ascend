@@ -16,8 +16,8 @@ def transfer_state(operation: StateOperation) -> None:
     keep the buffer owned and the runtime block stable throughout this call.
     This function only borrows their tensors; it does not publish availability.
     After failure, a store's buffer must not be published. A load's runtime may
-    be partially copied; the caller owns failure handling. PR3 logs that failure
-    without rollback or coordinated termination, so continued inference is unsafe.
+    be partially copied; the caller logs and propagates the failure. Rollback and
+    coordinated termination are not provided, so continued inference is unsafe.
     """
     memory_tensors = list(operation.buffer.planes)
     operation.runtime.validate(operation.buffer.layout)

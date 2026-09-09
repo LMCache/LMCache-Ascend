@@ -25,6 +25,7 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
 from lmcache_ascend.integration.vllm.vllm_v1_adapter import (
     LMCacheAscendConnectorV1Impl,
 )
+from lmcache_ascend.v1.state_cache import StateLoadError
 from lmcache_ascend.v1.state_checkpoint import StateBlockBinding
 from lmcache_ascend.v1.state_layout import build_state_group_layout
 from lmcache_ascend.v1.state_lookup import StateLookupSelection
@@ -251,7 +252,8 @@ def test_hybrid_detectable_preflight_failure_does_not_copy(
         execution = replace(execution, block_ids_by_group=((1, 2, 3), (0, 0, 7)))
     else:
         execution = None
-    assert not worker._load_hybrid_request(request, execution)
+    with pytest.raises(StateLoadError):
+        worker._load_hybrid_request(request, execution)
     worker.lmcache_engine.retrieve.assert_not_called()
     copy.assert_not_called()
     assert worker._failed_state_loads == {"r"}
@@ -266,7 +268,8 @@ def test_hybrid_partial_attention_checks_needed_interval_not_sum(monkeypatch, ca
     mask = torch.ones(32, dtype=torch.bool)
     mask[31] = False  # sum=31 >= needed=16; [C,R) is still incomplete.
     worker, request, execution, _, copy = _load_worker(monkeypatch, mask)
-    assert not worker._load_hybrid_request(request, execution)
+    with pytest.raises(StateLoadError, match="Attention coverage"):
+        worker._load_hybrid_request(request, execution)
     copy.assert_not_called()
     assert worker._failed_state_loads == {"r"}
     assert not worker._invalid_block_ids
@@ -310,12 +313,21 @@ def test_failure_suppresses_later_local_state_save_until_finished(monkeypatch):
     worker.lmcache_engine.lookup_unpin.assert_called_once_with("r")
 
 
-def test_no_load_spec_does_not_restore_new_request_state(monkeypatch):
+@pytest.mark.parametrize("missing_spec", [False, True])
+def test_no_load_spec_does_not_restore_new_request_state(monkeypatch, missing_spec):
     worker, request, execution, _, copy = _load_worker(monkeypatch)
-    request.load_spec.can_load = False
+    if missing_spec:
+        request.load_spec = None
+    else:
+        request.load_spec.can_load = False
     assert not worker._load_hybrid_request(request, execution)
+    worker._num_kv_groups = 2
+    meta = AscendConnectorMetadata(requests=[request], state_executions=[execution])
+    worker._parent = SimpleNamespace(_get_connector_metadata=lambda: meta)
+    worker.start_load_kv(SimpleNamespace(attn_metadata=None))
     worker.lmcache_engine.get_state_lookup.assert_not_called()
     copy.assert_not_called()
+    assert not worker._failed_state_loads
 
 
 @pytest.mark.parametrize("external", [0, 2048])
@@ -386,26 +398,68 @@ def test_preemption_releases_selection_and_restore_uses_new_target(monkeypatch):
     assert copy.call_args.args[0].runtime.block_id == 6
 
 
-@pytest.mark.parametrize("attn_metadata", [None, object()])
-def test_start_load_cleans_all_batch_selections_on_no_metadata_or_error(
-    monkeypatch, attn_metadata
+@pytest.mark.parametrize(
+    "failure", ["selection", "attention", "forward_metadata", "copy"]
+)
+def test_start_load_propagates_failure_and_cleans_all_batch_selections(
+    monkeypatch, caplog, failure
 ):
-    worker, request, execution, _, _ = _load_worker(monkeypatch)
+    mask = torch.ones(32, dtype=torch.bool)
+    if failure == "attention":
+        mask[31] = False
+    worker, request, execution, selection, copy = _load_worker(monkeypatch, mask)
     worker._num_kv_groups = 2
+    other = SimpleNamespace(**{**vars(request), "req_id": "other"})
     meta = AscendConnectorMetadata(
-        requests=[request],
+        requests=[request, other],
         state_executions=[execution, replace(execution, req_id="other")],
     )
     worker._parent = SimpleNamespace(_get_connector_metadata=lambda: meta)
-    worker._load_hybrid_request = Mock(side_effect=RuntimeError("load failed"))
-    context = SimpleNamespace(attn_metadata=attn_metadata)
-    if attn_metadata is None:
+    buffer = selection.buffers[1]
+    retained = {"r": selection, "other": StateLookupSelection(32)}
+
+    def unpin(req_id):
+        current = retained.pop(req_id, None)
+        if current is not None:
+            current.close(worker.lmcache_engine.storage_manager)
+
+    worker.lmcache_engine.lookup_unpin.side_effect = unpin
+    if failure == "selection":
+        # The worker can no longer obtain the selection after lookup/expiry.
+        worker.lmcache_engine.get_state_lookup.side_effect = lambda *a: None
+    elif failure == "copy":
+        copy.side_effect = RuntimeError("load failed")
+    context = SimpleNamespace(
+        attn_metadata=None if failure == "forward_metadata" else object()
+    )
+    reasons = {
+        "selection": "Missing or expired selected checkpoint",
+        "attention": "Attention coverage",
+        "forward_metadata": "Missing Attention forward metadata",
+        "copy": "load failed",
+    }
+    # The scheduler has already counted [C,R) as external computed tokens.
+    assert (
+        request.load_spec.lmcache_cached_tokens > request.load_spec.vllm_cached_tokens
+    )
+    error_type = RuntimeError if failure == "copy" else StateLoadError
+    with pytest.raises(error_type, match=reasons[failure]):
         worker.start_load_kv(context)
-        worker._load_hybrid_request.assert_not_called()
-        assert "r" in worker._failed_state_loads
+    assert not retained
+    assert buffer._released
+    buffer.memory_obj.ref_count_down.assert_called_once()
+    assert worker._failed_state_loads == {"r"}
+    assert not worker._invalid_block_ids
+    assert "request=r" in caplog.text and "R=32" in caplog.text
+    assert "Hybrid load complete" not in caplog.text
+    if failure in ("selection", "forward_metadata"):
+        worker.lmcache_engine.retrieve.assert_not_called()
+    if failure != "copy":
+        copy.assert_not_called()
+    if failure == "forward_metadata":
+        worker.lmcache_engine.get_state_lookup.assert_not_called()
     else:
-        with pytest.raises(RuntimeError, match="load failed"):
-            worker.start_load_kv(context)
+        worker.lmcache_engine.get_state_lookup.assert_called_once_with("r", 32)
     assert {
         call.args[0] for call in worker.lmcache_engine.lookup_unpin.call_args_list
     } == {"r", "other"}
@@ -464,7 +518,8 @@ def test_all_required_state_groups_preflight_and_partial_copy_failure(
             worker._load_hybrid_request(request, execution)
         assert copy.call_count == 2
     else:
-        assert not worker._load_hybrid_request(request, execution)
+        with pytest.raises(StateLoadError, match="Missing selected state buffer"):
+            worker._load_hybrid_request(request, execution)
         worker.lmcache_engine.retrieve.assert_not_called()
         copy.assert_not_called()
     assert "group=2" in caplog.text

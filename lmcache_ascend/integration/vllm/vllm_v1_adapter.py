@@ -252,10 +252,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                     if spec is None or not spec.can_load:
                         continue
                     if forward_context.attn_metadata is None:
+                        error = StateLoadError("Missing Attention forward metadata")
                         self._record_state_load_failure(
-                            request, "all", "Missing Attention forward metadata"
+                            request, error.group, str(error)
                         )
-                        continue
+                        raise error
                     self._load_hybrid_request(request, executions.get(request.req_id))
             finally:
                 # start_load exceptions bypass the runner's normal save finally.
@@ -457,7 +458,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         return result
 
     def _load_hybrid_request(self, request, execution):
-        """Restore one selected R locally; detected failure is logged, not recovery."""
+        """Restore one selected R locally; log and propagate required-load failures."""
         spec = request.load_spec
         if spec is None or not spec.can_load:
             return False
@@ -527,7 +528,7 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 return True
             except StateLoadError as error:
                 self._record_state_load_failure(request, error.group, str(error))
-                return False
+                raise
             except Exception as error:
                 self._record_state_load_failure(
                     request, group, str(error), exc_info=True
