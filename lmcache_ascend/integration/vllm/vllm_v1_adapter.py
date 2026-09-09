@@ -98,14 +98,6 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
                 raise ValueError(
                     "GDN checkpoints reject save_only_first_rank/remove_after_retrieve"
                 )
-            locations = state_store_locations(engine.storage_manager)
-            if not locations:
-                raise ValueError("GDN checkpoints require a writable CPU/disk tier")
-            requested = set(self.config.retrieve_locations or ())
-            if self.config.store_location:
-                requested.add(self.config.store_location)
-            if not requested <= set(locations):
-                raise ValueError("GDN checkpoint locations must be available")
         self.state_layouts = (
             build_state_layouts(self._kv_cache_config, kv_caches)
             if self._kv_cache_config is not None
@@ -220,6 +212,16 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         if self.state_layouts:
             engine.state_layouts = self.state_layouts
         self._manager.post_init()
+        if self.state_layouts:
+            # Storage is created by post_init(), after KV group metadata is ready.
+            locations = state_store_locations(engine.storage_manager)
+            if not locations:
+                raise ValueError("GDN checkpoints require a writable CPU/disk tier")
+            requested = set(self.config.retrieve_locations or ())
+            if self.config.store_location:
+                requested.add(self.config.store_location)
+            if not requested <= set(locations):
+                raise ValueError("GDN checkpoint locations must be available")
 
     # Upstream start_load_kv only transfers the primary group's slot_mapping.
     # Multi-group retrieve needs ALL per-group slot mappings on NPU so the

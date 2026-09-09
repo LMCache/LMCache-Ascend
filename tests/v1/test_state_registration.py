@@ -84,11 +84,21 @@ def _registration(monkeypatch, state_first=True, merged=False):
         remove_after_retrieve=False,
         gpu_connector=gpu,
         metadata=metadata,
-        storage_manager=SimpleNamespace(
-            storage_backends={"LocalCPUBackend": allocator}, allocator_backend=allocator
-        ),
+        storage_manager=None,
     )
-    connector._manager = SimpleNamespace(lmcache_engine=engine, post_init=Mock())
+
+    def post_init():
+        # Match LMCache 0.4.5: storage is created only after KV groups are ready.
+        assert connector.kv_caches
+        assert engine.metadata.kv_layer_groups_manager is not None
+        assert engine.state_layouts is connector.state_layouts
+        engine.storage_manager = SimpleNamespace(
+            storage_backends={"LocalCPUBackend": allocator}, allocator_backend=allocator
+        )
+
+    connector._manager = SimpleNamespace(
+        lmcache_engine=engine, post_init=Mock(side_effect=post_init)
+    )
     return connector, tensors
 
 
@@ -265,7 +275,6 @@ def test_required_hybrid_layers_cannot_be_skipped(monkeypatch, suffix, allowlist
         "nonchunked",
         "remove",
         "first_rank",
-        "extra_backend",
         "nonuniform",
     ],
 )
@@ -282,14 +291,35 @@ def test_registration_rejects_incomplete_or_unsupported_runtime(monkeypatch, fai
         engine.remove_after_retrieve = True
     elif failure == "first_rank":
         engine.save_only_first_rank = True
-    elif failure == "extra_backend":
-        engine.storage_manager.storage_backends["RemoteBackend"] = object()
     else:
         tensors["attn.1"] = tuple(t[:4] for t in tensors["attn.1"])
     with pytest.raises(ValueError):
         connector.register_kv_caches(tensors)
     assert not hasattr(engine, "state_layouts")
     connector._manager.post_init.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "failure", ["extra_backend", "no_writable_tier", "missing_tier"]
+)
+def test_registration_validates_backends_after_post_init(monkeypatch, failure):
+    connector, tensors = _registration(monkeypatch)
+    initialize = connector._manager.post_init.side_effect
+
+    def post_init():
+        initialize()
+        backends = connector.lmcache_engine.storage_manager.storage_backends
+        if failure == "extra_backend":
+            backends["RemoteBackend"] = object()
+        elif failure == "no_writable_tier":
+            backends["LocalCPUBackend"].use_hot = False
+
+    connector._manager.post_init.side_effect = post_init
+    if failure == "missing_tier":
+        connector.config.store_location = "LocalDiskBackend"
+    with pytest.raises(ValueError, match="local CPU/disk|writable CPU/disk|available"):
+        connector.register_kv_caches(tensors)
+    connector._manager.post_init.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", ["swa", "eagle", "state_mode", "extra_attention"])
