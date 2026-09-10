@@ -1,0 +1,16 @@
+local_cpu: False # Enable local CPU RAM cache for fast access
+
+enable_pd: True
+transfer_channel: "hixl"
+pd_role: "receiver"
+pd_peer_host: "localhost" # replace with the host ip
+pd_pull_mode: False
+pd_delay_pull: False # Enable delayed pulling of data from the peer
+pd_peer_init_port: [7300] # Need to have 1 for each TP instance (TP=1 here)
+pd_peer_alloc_port: [7400] # Need to have 1 for each TP instance (TP=1 here)
+pd_buffer_size: 2415919104 # Transfer buffer size in bytes — must match sender.
+                           # = 64 pages x 36 MB, aligned with the KV page
+                           # [2, 36, 256, 1024] fp16. HCCS requires the VA to be
+                           # 2 MB aligned, and pd_buffer_size must be a multiple
+                           # of the KV page size.
+pd_buffer_device: "npu" # Use npu memory for buffering
