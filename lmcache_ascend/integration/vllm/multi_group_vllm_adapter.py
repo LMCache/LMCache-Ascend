@@ -628,6 +628,11 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
 
         meta = LMCacheConnectorMetadata()
 
+        # vLLM v1's handle_preemptions() receives only the connector metadata,
+        # not the preempted req-id set. Stash it here so the worker-side
+        # handle_preemptions() can recover it (see vllm_v1_adapter.py).
+        meta.preempted_req_ids = set(scheduler_output.preempted_req_ids or ())
+
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)

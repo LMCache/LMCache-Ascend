@@ -680,9 +680,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             None,
         )
 
-    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+    def handle_preemptions(self, kv_connector_metadata) -> None:
         if self.lmcache_engine is None:
             return
+
+        # vLLM v0.25.1rc changed handle_preemptions() to pass the
+        # KVConnectorMetadata object instead of a set[str] of req ids.
+        # build_connector_meta() stashed the preempted ids on the metadata;
+        # fall back to the legacy set[str] argument for older vLLM.
+        if hasattr(kv_connector_metadata, "preempted_req_ids"):
+            preempted_req_ids = set(kv_connector_metadata.preempted_req_ids or ())
+        elif isinstance(kv_connector_metadata, (set, list, tuple)):
+            preempted_req_ids = set(kv_connector_metadata)
+        else:
+            preempted_req_ids = set()
 
         logger.debug(
             "LMCache-Ascend handling preemptions: req_ids=%s",
