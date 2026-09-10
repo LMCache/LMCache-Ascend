@@ -20,6 +20,7 @@ from lmcache.v1.memory_management import (
     MemoryFormat,
     MemoryObj,
     PagedCpuGpuMemoryAllocator,
+    PagedTensorMemoryAllocator,
 )
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context
@@ -133,6 +134,9 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
         buffer_type = []
         align_bytes = []
         if self.pd_config.buffer_device.startswith("npu"):
+            # Note: torch.split() may return copies for non-contiguous tensors,
+            # causing allocated addresses to exceed the original buffer range.
+            # The actual buffer info comes from memory_allocator.gpu_allocator.
             buffer_ptr.append(self.memory_allocator.gpu_allocator.buffer_ptr)
             buffer_size.append(self.memory_allocator.gpu_allocator.buffer_size)
             buffer_type.append("npu")
@@ -197,12 +201,41 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             npu_aligned_byte = (
                 (config.pd_buffer_size + total_size - 1) // total_size * total_size
             )
-            paged_mem_allocator.init_gpu_memory_allocator(
-                npu_aligned_byte, sizes, dtypes, fmt, npu_corrected_device
+            npu_aligned_byte = int(npu_aligned_byte)
+            # Allocate extra 2MB to guarantee we can find a 2MB-aligned sub-buffer.
+            # torch.empty() may return a pointer that is not 2MB-aligned, which
+            # causes HCCL/HIXL registration to fail.
+            total_alloc_size = npu_aligned_byte + 2 * 1024 * 1024
+            raw_buf = torch.empty(
+                total_alloc_size,
+                dtype=torch.uint8,
+                device=npu_corrected_device,
             )
+            raw_addr = raw_buf.data_ptr()
+            # Round up to 2MB alignment boundary (0x200000)
+            aligned_addr = (raw_addr + (2 * 1024 * 1024) - 1) & ~((2 * 1024 * 1024) - 1)
+            offset = aligned_addr - raw_addr
+            # Use view (not clone) to avoid memory duplication
+            aligned_buf = raw_buf[offset : offset + npu_aligned_byte]
+            # NOTE: We deliberately do NOT call init_gpu_memory_allocator()
+            # here. That method internally creates its own (unaligned) tensor
+            # via torch.empty() and builds PagedTensorMemoryAllocator from it.
+            # Overriding buffer_ptr afterwards leaves free_blocks pointing at
+            # the unaligned internal buffer; worse, free_blocks.clear() fires
+            # TensorMemoryObj.__del__ on the stale objects, which re-appends
+            # them to the deque via parent_allocator.free(), polluting the pool
+            # with addresses outside the registered RDMA range. Construct the
+            # allocator directly from our 2MB-aligned buffer so that buffer,
+            # paged_buffers and free_blocks are all consistent.
+            paged_mem_allocator.gpu_allocator = PagedTensorMemoryAllocator(
+                aligned_buf, sizes, dtypes, fmt
+            )
+            # Keep raw_buf alive (may be needed for hugepage)
+            paged_mem_allocator._npu_raw_buf = raw_buf
             logger.info(
-                "Initialized NPU allocator: %.2f MB",
-                npu_aligned_byte / (1024 * 1024),
+                "Initialized NPU allocator: %.2f MB (aligned base: 0x%x)",
+                aligned_buf.numel() / (1024 * 1024),
+                aligned_addr,
             )
 
         if self.pd_config.buffer_device == "cpu" or self.use_cpu_offload:
