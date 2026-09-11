@@ -680,9 +680,30 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             None,
         )
 
-    def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+    def handle_preemptions(self, kv_connector_metadata) -> None:
         if self.lmcache_engine is None:
             return
+
+        # vLLM v0.25.1rc changed handle_preemptions() to pass the
+        # KVConnectorMetadata object instead of a set[str] of req ids.
+        # build_connector_meta() stashed the preempted ids on the metadata;
+        # fall back to the legacy set[str] argument for older vLLM.
+        if hasattr(kv_connector_metadata, "preempted_req_ids"):
+            # vLLM v0.25.1rc+: metadata carries the stashed id set.
+            preempted_req_ids = set(kv_connector_metadata.preempted_req_ids or ())
+        elif isinstance(kv_connector_metadata, (set, list, tuple)):
+            # Legacy vLLM passed the id set directly.
+            preempted_req_ids = set(kv_connector_metadata)
+        else:
+            # Unknown shape: fail fast instead of silently no-op'ing, so a
+            # future vLLM API change surfaces immediately rather than
+            # silently skipping preemption cleanup (lookup_unpin / async
+            # store drain), which is the exact failure mode this fix targets.
+            raise TypeError(
+                "handle_preemptions expects a KVConnectorMetadata with "
+                "'preempted_req_ids' or a set/list/tuple of req ids, got "
+                f"{type(kv_connector_metadata).__name__}"
+            )
 
         logger.debug(
             "LMCache-Ascend handling preemptions: req_ids=%s",

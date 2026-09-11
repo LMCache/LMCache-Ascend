@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import pickle
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -102,3 +103,87 @@ def test_ascend_adapter_skips_preemption_drain_when_not_required(
 
     if has_engine:
         lmcache_engine.wait_for_pending_stores.assert_not_called()
+
+
+def _import_metadata():
+    """Import LMCacheConnectorMetadata for constructing v0.25.1rc-style args."""
+    pytest.importorskip("lmcache")
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
+
+    return LMCacheConnectorMetadata
+
+
+def test_ascend_adapter_handles_v0251rc_metadata_path():
+    """v0.25.1rc passes a KVConnectorMetadata with stashed preempted_req_ids.
+
+    This is the primary fix path: ``build_connector_meta`` stashes the id set
+    on the metadata, and ``handle_preemptions`` recovers it via ``hasattr``.
+    """
+    pytest.importorskip("lmcache")
+    pytest.importorskip("vllm")
+    adapter_mod = pytest.importorskip("lmcache_ascend.integration.vllm.vllm_v1_adapter")
+    LMCacheConnectorMetadata = _import_metadata()
+
+    lmcache_engine = MagicMock()
+    lmcache_engine.wait_for_pending_stores.return_value = set()
+    adapter = _make_adapter(
+        adapter_mod,
+        store_async=True,
+        kv_role="kv_both",
+        lmcache_engine=lmcache_engine,
+    )
+
+    meta = LMCacheConnectorMetadata()
+    meta.preempted_req_ids = {"req-1", "req-2"}
+
+    adapter.handle_preemptions(meta)
+
+    # lookup_unpin is called once per preempted id (request-scoped pins).
+    assert lmcache_engine.lookup_unpin.call_count == 2
+    unpinned = {call.args[0] for call in lmcache_engine.lookup_unpin.call_args_list}
+    assert unpinned == {"req-1", "req-2"}
+    # The recovered set reaches wait_for_pending_stores, not the metadata object.
+    lmcache_engine.wait_for_pending_stores.assert_called_once_with({"req-1", "req-2"})
+
+
+def test_ascend_adapter_preemption_ids_survive_pickle_round_trip():
+    """Stashed preempted_req_ids must survive scheduler->worker pickle IPC.
+
+    ``build_connector_meta`` runs scheduler-side; ``handle_preemptions``
+    runs worker-side and receives the unpickled metadata. A plain @dataclass
+    without ``slots=True`` carries dynamically attached attributes through the
+    default ``__dict__`` pickle path — this test locks that contract so a
+    future ``slots=True`` addition does not silently drop the attribute.
+    """
+    LMCacheConnectorMetadata = _import_metadata()
+
+    meta = LMCacheConnectorMetadata()
+    meta.preempted_req_ids = {"req-1", "req-2", "req-3"}
+
+    restored = pickle.loads(pickle.dumps(meta))
+    assert hasattr(restored, "preempted_req_ids")
+    assert restored.preempted_req_ids == {"req-1", "req-2", "req-3"}
+
+
+def test_ascend_adapter_handle_preemptions_fails_fast_on_unknown_arg():
+    """An unknown argument type must raise, not silently no-op.
+
+    Silent ``set()`` would skip ``lookup_unpin`` and async store drain with no
+    signal — the exact failure mode this fix targets. Fail fast so future vLLM
+    API drift surfaces immediately.
+    """
+    pytest.importorskip("lmcache")
+    pytest.importorskip("vllm")
+    adapter_mod = pytest.importorskip("lmcache_ascend.integration.vllm.vllm_v1_adapter")
+
+    adapter = _make_adapter(
+        adapter_mod,
+        store_async=False,
+        kv_role="kv_both",
+        lmcache_engine=MagicMock(),
+    )
+
+    with pytest.raises(TypeError, match="handle_preemptions expects"):
+        adapter.handle_preemptions(object())
