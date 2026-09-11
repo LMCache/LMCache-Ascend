@@ -726,11 +726,17 @@ def _patch_vllm_v1_adapter():
 
     def handle_preemptions(self, kv_connector_metadata):
         # vLLM 0.23 passes metadata; older callers pass the request-ID set.
-        preempted_req_ids = (
-            kv_connector_metadata.preempted_req_ids
-            if isinstance(kv_connector_metadata, mg.AscendConnectorMetadata)
-            else kv_connector_metadata
-        )
+        if isinstance(kv_connector_metadata, mg.AscendConnectorMetadata):
+            preempted_req_ids = kv_connector_metadata.preempted_req_ids
+        elif isinstance(kv_connector_metadata, set):
+            preempted_req_ids = kv_connector_metadata
+        else:
+            # Validate before the empty-ID check so API drift cannot skip cleanup.
+            raise TypeError(
+                "handle_preemptions expects AscendConnectorMetadata "
+                "or a set of request IDs, got "
+                f"{type(kv_connector_metadata).__name__}"
+            )
         if not preempted_req_ids:
             return
         method = getattr(self._lmcache_engine, "handle_preemptions", None)

@@ -80,12 +80,14 @@ def test_ascend_connector_metadata_is_pickleable():
     mg = pytest.importorskip("lmcache_ascend.integration.vllm.multi_group_vllm_adapter")
 
     metadata = mg.AscendConnectorMetadata(
+        requests=[SimpleNamespace(req_id="req-1")],
         preempted_req_ids={"req-1", "req-2"},
         state_executions=[SimpleNamespace(request_id="req-1", boundary=256)],
     )
     restored = pickle.loads(pickle.dumps(metadata))
 
     assert isinstance(restored, mg.AscendConnectorMetadata)
+    assert restored.requests == metadata.requests
     assert restored.state_executions == metadata.state_executions
     assert restored.preempted_req_ids == {"req-1", "req-2"}
 
@@ -193,3 +195,55 @@ def test_ascend_adapter_skips_preemption_drain_when_not_required(
     if has_engine:
         lmcache_engine.lookup_unpin.assert_called_once_with("req-1")
         lmcache_engine.wait_for_pending_stores.assert_not_called()
+
+
+def test_lmcache_connector_metadata_path_releases_pins_and_drains_stores():
+    """The outer connector passes recovered IDs to the real worker adapter."""
+    LMCacheConnectorV1 = _import_and_patch_vllm_connector()
+    adapter_mod = pytest.importorskip("lmcache_ascend.integration.vllm.vllm_v1_adapter")
+    mg = pytest.importorskip("lmcache_ascend.integration.vllm.multi_group_vllm_adapter")
+
+    lmcache_engine = MagicMock()
+    lmcache_engine.wait_for_pending_stores.return_value = set()
+    adapter = _make_adapter(
+        adapter_mod,
+        store_async=True,
+        kv_role="kv_both",
+        lmcache_engine=lmcache_engine,
+    )
+
+    connector = object.__new__(LMCacheConnectorV1)
+    connector._lmcache_engine = adapter
+    metadata = mg.AscendConnectorMetadata(preempted_req_ids={"req-1", "req-2"})
+    connector.handle_preemptions(pickle.loads(pickle.dumps(metadata)))
+
+    # lookup_unpin is called once per preempted id (request-scoped pins).
+    assert lmcache_engine.lookup_unpin.call_count == 2
+    unpinned = {call.args[0] for call in lmcache_engine.lookup_unpin.call_args_list}
+    assert unpinned == {"req-1", "req-2"}
+    # The recovered set reaches wait_for_pending_stores, not the metadata object.
+    lmcache_engine.wait_for_pending_stores.assert_called_once_with({"req-1", "req-2"})
+
+
+@pytest.mark.parametrize(
+    "payload_kind", ["object", "none", "string", "list", "tuple", "base_metadata"]
+)
+def test_lmcache_connector_preemptions_fail_fast_on_unknown_arg(payload_kind):
+    """Reject unknown payloads before delegation, including falsey ones."""
+    LMCacheConnectorV1 = _import_and_patch_vllm_connector()
+    adapter_mod = pytest.importorskip("lmcache_ascend.integration.vllm.vllm_v1_adapter")
+    payload = {
+        "object": object(),
+        "none": None,
+        "string": "",
+        "list": [],
+        "tuple": (),
+        "base_metadata": adapter_mod.LMCacheConnectorMetadata(),
+    }[payload_kind]
+    connector = object.__new__(LMCacheConnectorV1)
+    connector._lmcache_engine = MagicMock()
+
+    with pytest.raises(TypeError, match="handle_preemptions expects") as exc:
+        connector.handle_preemptions(payload)
+    assert f"got {type(payload).__name__}" in str(exc.value)
+    connector._lmcache_engine.handle_preemptions.assert_not_called()
