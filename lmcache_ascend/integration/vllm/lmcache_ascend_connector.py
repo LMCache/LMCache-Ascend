@@ -51,6 +51,13 @@ class LMCacheAscendConnector(LMCacheConnectorV1, SupportsHMA):
         """Delegate shutdown to the single implementation instance."""
         return self._lmcache_engine.shutdown()
 
+    def update_state_after_alloc(
+        self, request: "Request", blocks: Any, num_external_tokens: int
+    ) -> None:
+        self._lmcache_engine.update_state_after_alloc(
+            request, num_external_tokens, blocks=blocks
+        )
+
     def request_finished_all_groups(
         self,
         request: Request,

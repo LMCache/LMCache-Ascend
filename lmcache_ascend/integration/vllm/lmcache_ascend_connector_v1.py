@@ -45,6 +45,13 @@ class LMCacheAscendConnectorV1Dynamic(LMCacheConnectorV1Dynamic, SupportsHMA):
             kv_cache_config=kv_cache_config,
         )
 
+    def update_state_after_alloc(
+        self, request: "Request", blocks: Any, num_external_tokens: int
+    ) -> None:
+        self._lmcache_engine.update_state_after_alloc(
+            request, num_external_tokens, blocks=blocks
+        )
+
     def request_finished_all_groups(
         self,
         request: "Request",

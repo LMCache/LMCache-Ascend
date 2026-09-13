@@ -1,4 +1,5 @@
 #pragma once
+#include "kernels/multi_layer/multi_layer_gdn_state_kernels.h"
 #include "kernels/types.h"
 #include "managed_mem.h"
 #include <torch/extension.h>
@@ -73,6 +74,13 @@ void load_and_reshape_flash_kernel(
     const int32_t numTokens, const int32_t numLayers, const int32_t layerIdx,
     const bool page2L);
 } // namespace kvcache_ops
+
+// state_tensors is plane-major; direction=true stores runtime to memory.
+// Submission is asynchronous: callers must retain tensors until stream
+// completion.
+void multi_layer_gdn_state_transfer(std::vector<torch::Tensor> &memory_tensors,
+                                    std::vector<torch::Tensor> &state_tensors,
+                                    int64_t block_id, bool direction);
 
 void multi_layer_kv_transfer(
     torch::Tensor &key_value,            // [kv, num_layer, num_tokens, hidden]

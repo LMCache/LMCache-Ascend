@@ -319,7 +319,7 @@ def build_kv_layer_groups(
         elif isinstance(rep, (tuple, list)):
             shape_desc.element_size = max(int(t.element_size()) for t in rep)
         else:
-            shape_desc.element_size = rep.element_size
+            shape_desc.element_size = rep.element_size()
         stride_hint = (layout_hints or {}).get("block_stride_elems", 0) or 0
         if not stride_hint and isinstance(rep, (tuple, list)) and rep:
             first_t = rep[0]

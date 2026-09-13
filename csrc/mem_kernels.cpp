@@ -3,12 +3,142 @@
 #include "utils.h"
 #include <ATen/ATen.h>
 #include <Python.h>
+#include <array>
+#include <cstdint>
+#include <limits>
 #include <pybind11/pybind11.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 
 namespace py = pybind11;
+
+namespace {
+
+torch::Tensor build_gdn_state_ptr_tensor_on_device(
+    const std::vector<torch::Tensor> &state_tensors, int64_t plane,
+    int64_t num_layers, const torch::Device &runtime_device) {
+  auto state_ptrs_cpu = torch::empty(
+      {num_layers},
+      torch::TensorOptions().dtype(torch::kInt64).device(torch::kCPU));
+  auto *state_ptrs_cpu_data = state_ptrs_cpu.data_ptr<int64_t>();
+  for (int64_t layer = 0; layer < num_layers; ++layer) {
+    state_ptrs_cpu_data[layer] =
+        static_cast<int64_t>(reinterpret_cast<uintptr_t>(
+            state_tensors[plane * num_layers + layer].data_ptr()));
+  }
+  return state_ptrs_cpu.to(runtime_device);
+}
+
+} // namespace
+
+void multi_layer_gdn_state_transfer(std::vector<torch::Tensor> &memory_tensors,
+                                    std::vector<torch::Tensor> &state_tensors,
+                                    const int64_t block_id,
+                                    const bool direction) {
+  TORCH_CHECK(memory_tensors.size() == 2,
+              "GDN transfer expects exactly 2 memory tensors.");
+  TORCH_CHECK(!state_tensors.empty() && state_tensors.size() % 2 == 0,
+              "GDN transfer expects two non-empty runtime tensor families.");
+  TORCH_CHECK(block_id >= 0, "GDN block_id must be non-negative.");
+  const auto num_layers = static_cast<int64_t>(state_tensors.size() / 2);
+  TORCH_CHECK(num_layers <= std::numeric_limits<int32_t>::max(),
+              "GDN num_layers exceeds the kernel limit.");
+  TORCH_CHECK(state_tensors[0].defined(),
+              "GDN runtime tensor must be defined.");
+  const auto runtime_device = state_tensors[0].device();
+  TORCH_CHECK(runtime_device.is_privateuseone() && runtime_device.index() >= 0,
+              "GDN runtime tensors must be on an actual NPU device.");
+  const c10::OptionalDeviceGuard device_guard(runtime_device);
+
+  std::array<uint8_t *, 2> memory_ptrs;
+  std::array<GDNStateTransferConfig, 2> configs;
+  // Validate both planes before submitting either copy. In particular, a bad
+  // SSM mapping must not leave an otherwise valid conv payload half-written.
+  for (int64_t plane = 0; plane < 2; ++plane) {
+    auto &memory = memory_tensors[plane];
+    TORCH_CHECK(memory.defined(), "GDN memory tensor must be defined.");
+    TORCH_CHECK(memory.dim() >= 2 && memory.size(0) == num_layers,
+                "GDN memory shape must be [num_layers, *state_shape].");
+    TORCH_CHECK(memory.is_contiguous() && memory.numel() > 0,
+                "GDN memory tensor must be non-empty and contiguous.");
+    TORCH_CHECK(
+        memory.device().is_cpu() || memory.device() == runtime_device,
+        "GDN memory must be registered CPU memory or on the runtime NPU.");
+    const auto dtype = memory.scalar_type();
+    TORCH_CHECK(dtype == at::ScalarType::Float ||
+                    dtype == at::ScalarType::BFloat16,
+                "GDN transfer supports only FP32 and BF16, got ", dtype, ".");
+    TORCH_CHECK(
+        kvcache_ops::gdn_state_transfer_supports_dtype(
+            vllm_ascend::get_dtype_from_torch(dtype)),
+        "GDN dtype is not supported by this kernel build; BF16 requires "
+        "ASCEND_AICORE_ARCH >= 220.");
+    for (int64_t layer = 0; layer < num_layers; ++layer) {
+      const auto &state = state_tensors[plane * num_layers + layer];
+      TORCH_CHECK(state.defined(), "GDN runtime tensor must be defined.");
+      TORCH_CHECK(state.device() == runtime_device,
+                  "All GDN runtime tensors must be on the same NPU device.");
+      TORCH_CHECK(state.is_contiguous(),
+                  "GDN runtime tensor must be contiguous.");
+      TORCH_CHECK(state.scalar_type() == dtype,
+                  "GDN runtime and memory dtype mismatch at plane ", plane,
+                  ", layer ", layer, ".");
+      TORCH_CHECK(state.dim() == memory.dim(), "GDN runtime rank mismatch.");
+      TORCH_CHECK(state.sizes() == state_tensors[plane * num_layers].sizes(),
+                  "GDN runtime shapes must match across layers of each plane.");
+      TORCH_CHECK(block_id < state.size(0),
+                  "GDN block_id out of range at plane ", plane, ", layer ",
+                  layer, ".");
+      for (int64_t dim = 1; dim < memory.dim(); ++dim) {
+        TORCH_CHECK(state.size(dim) == memory.size(dim),
+                    "GDN runtime and memory tail shape mismatch at plane ",
+                    plane, ", layer ", layer, ".");
+      }
+    }
+    memory_ptrs[plane] = get_kernel_ptr<uint8_t, torch::Tensor>(memory);
+    if (memory.device().is_cpu()) {
+      const auto last_byte = memory.nbytes() - 1;
+      auto *host_ptr = static_cast<uint8_t *>(memory.data_ptr());
+      TORCH_CHECK(
+          get_device_ptr(host_ptr + last_byte) ==
+              memory_ptrs[plane] + last_byte,
+          "GDN memory tensor must lie entirely in registered CPU memory.");
+    }
+    configs[plane] = prepare_gdn_state_transfer_config(
+        memory, runtime_device, static_cast<int32_t>(num_layers),
+        memory.numel() / num_layers, direction);
+  }
+
+  // Allocate on the same current stream used for both launches. Capturing each
+  // table retains it until OpCommand submits the kernel; stream-ordered NPU
+  // allocator reuse protects the storage after submission. The caller retains
+  // runtime/payload tensors and waits for this stream before reusing them.
+  std::array<torch::Tensor, 2> state_ptrs;
+  for (int64_t plane = 0; plane < 2; ++plane) {
+    state_ptrs[plane] = build_gdn_state_ptr_tensor_on_device(
+        state_tensors, plane, num_layers, runtime_device);
+  }
+  for (int64_t plane = 0; plane < 2; ++plane) {
+    const auto config = configs[plane];
+    auto *memory_ptr = memory_ptrs[plane];
+    auto state_ptrs_on_device = state_ptrs[plane];
+    auto *state_ptrs_ptr =
+        static_cast<uint8_t *>(state_ptrs_on_device.data_ptr());
+    at_npu::native::OpCommand cmd;
+    cmd.Name("multi_layer_gdn_state_transfer_kernel");
+    cmd.SetCustomHandler([config, memory_ptr, state_ptrs_ptr, block_id,
+                          state_ptrs_on_device]() -> int {
+      (void)state_ptrs_on_device;
+      kvcache_ops::multi_layer_gdn_state_transfer_kernel(
+          vllm_ascend::get_dtype_from_torch(config.scalar_type), config.aiv_num,
+          config.stream, memory_ptr, state_ptrs_ptr, block_id,
+          config.num_layers, config.slice_numel, config.direction);
+      return 0;
+    });
+    cmd.Run();
+  }
+}
 
 /**
  * Quickly offload KV cache from vLLM paged memory to the offloading buffer

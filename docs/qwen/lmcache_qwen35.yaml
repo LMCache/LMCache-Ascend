@@ -1,0 +1,21 @@
+# Qwen3.5: prefill checkpoint reuse + MTP decode, align, synchronous store.
+# Verify the effective runtime Mamba block size in the startup log.
+chunk_size: 1024
+
+# Cache capacity per TP rank; TP8 reserves about 64 GiB in total.
+local_cpu: true
+max_local_cpu_size: 8
+
+store_async: false
+enable_async_loading: false
+save_decode_cache: false
+save_unfull_chunk: false
+use_layerwise: false
+enable_blending: false
+
+# Optional disk tier: keep disabled for the first CPU-only test.
+# Uncomment both settings when testing disk. Use a separate directory for
+# each MTP token count; never reuse the non-MTP or MTP1 cache for MTP3.
+# TODO: Replace /xxx/ with your storage path before enabling the disk tier.
+# local_disk: "/xxx/lmcache_disk/qwen35-mtp3-chunk1024"
+# max_local_disk_size: 16

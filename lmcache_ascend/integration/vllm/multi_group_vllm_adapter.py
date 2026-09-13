@@ -7,6 +7,7 @@ Ascend-specific overrides remain in ``vllm_v1_adapter.LMCacheAscendConnectorV1Im
 """
 
 # Standard
+from copy import deepcopy
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -21,10 +22,12 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
     RequestTracker as UpstreamRequestTracker,
 )
 from lmcache.integration.vllm.vllm_v1_adapter import (
+    extract_request_configs,
     logger,
 )
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.config import LMCacheEngineConfig
+from lmcache.v1.token_database import ChunkedTokenDatabase
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
@@ -34,7 +37,18 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
+from lmcache_ascend.integration.vllm.state_groups import (
+    request_primary,
+    select_state_primary,
+    state_group_index,
+    validate_state_config,
+)
 from lmcache_ascend.v1.slot_mapping_utils import build_filtered_slot_mappings
+from lmcache_ascend.v1.state_lookup import (
+    cancel_state_lookup,
+    lookup_state,
+    validate_state_lookup_client,
+)
 
 if TYPE_CHECKING:
     # Third Party
@@ -244,10 +258,76 @@ def _build_slot_mappings_by_group(
     return tuple(mappings)
 
 
+@dataclass(frozen=True)
+class StateExecution:
+    """One scheduled non-speculative execution; never proof of forward success.
+
+    The prefix and E survive Attention chunk clipping (K). Only the current
+    endpoint may become a checkpoint after the worker confirms completion.
+    Block tables are snapshots, not evidence of historical checkpoint validity.
+    """
+
+    req_id: str
+    token_ids: tuple[int, ...]
+    start: int
+    end: int
+    attention_end: int
+    block_ids_by_group: tuple[tuple[int, ...], ...]
+    state_block_sizes: tuple[tuple[int, int], ...]
+    can_load: bool
+    can_save: bool
+    request_configs: dict | None = None
+
+    def _blocks_at(self, boundary: int) -> tuple[tuple[int, int], ...]:
+        blocks = []
+        for group, size in self.state_block_sizes:
+            if boundary <= 0 or boundary % size:
+                return ()
+            index = boundary // size - 1
+            table = self.block_ids_by_group[group]
+            if index >= len(table) or table[index] <= 0:
+                return ()
+            blocks.append((group, table[index]))
+        return tuple(blocks)
+
+    def save_blocks(self, chunk_size: int) -> tuple[tuple[int, int], ...]:
+        """Candidate sources after successful forward, at E only (never K)."""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        if (
+            not self.can_save
+            or self.end <= self.start
+            or self.end % chunk_size
+            or len(self.token_ids) != self.end
+        ):
+            return ()
+        return self._blocks_at(self.end)
+
+    def load_blocks(self, boundary: int) -> tuple[tuple[int, int], ...]:
+        """Load the new/resumed prefix before Ascend's deferred Mamba copy.
+
+        preprocess_mamba reads (start - 1) // B on new/resumed requests;
+        do_mamba_copy_block then moves this to ceil(E / B) - 1 before forward.
+        Loading directly into the latter would be overwritten by that copy.
+        """
+        if not self.can_load or boundary != self.start:
+            return ()
+        return self._blocks_at(boundary)
+
+
+@dataclass
+class AscendConnectorMetadata(LMCacheConnectorMetadata):
+    # Independent of reqs: Attention may have no new chunk to save this round.
+    state_executions: list[StateExecution] = field(default_factory=list)
+    preempted_req_ids: set[str] = field(default_factory=set)
+
+
 @dataclass
 class RequestTracker(UpstreamRequestTracker):
     # Block ids grouped by KV cache group (multi-group path).
     allocated_block_ids_by_group: "tuple[list[int], ...]" = field(default_factory=tuple)
+    # Per-step hybrid policy, separate from the persistent request skip flag.
+    save_in_current_step: bool = True
 
     @property
     def num_kv_groups(self) -> int:
@@ -316,6 +396,7 @@ class RequestTracker(UpstreamRequestTracker):
         lmcache_cached_tokens: int = 0,
         vllm_cached_tokens: int = 0,
         all_token_ids: Optional[list[int]] = None,
+        state_speculative_blocks: tuple[int, ...] = (),
     ) -> None:
         """Update the request tracker when a running request is scheduled again.
 
@@ -354,10 +435,23 @@ class RequestTracker(UpstreamRequestTracker):
         if preempted:
             self.allocated_block_ids_by_group = new_block_ids_by_group
         else:
+            # MambaManager returns only the appended tail. Moving old spec
+            # blocks into that tail also nulls their old slots, which are not
+            # included in the delta. The tail ends with one newly allocated
+            # block; any preceding entries can contain moved spec blocks.
+            updated_groups = [list(ids) for ids in old_block_ids_by_group]
+            for group, num_spec in enumerate(state_speculative_blocks):
+                delta = new_block_ids_by_group[group]
+                if not num_spec or not delta:
+                    continue
+                old = updated_groups[group]
+                begin = len(old) - num_spec
+                moved = min(len(delta) - 1, num_spec)
+                old[begin : begin + moved] = [0] * moved
             self.allocated_block_ids_by_group = tuple(
                 old_group_ids + new_group_ids
                 for old_group_ids, new_group_ids in zip(
-                    old_block_ids_by_group,
+                    updated_groups,
                     new_block_ids_by_group,
                     strict=True,
                 )
@@ -371,9 +465,8 @@ class ReqMeta(UpstreamReqMeta):
     slot_mappings_by_group: "tuple[torch.Tensor, ...]" = field(default_factory=tuple)
     # Allocated block ids grouped by KV cache group.
     allocated_block_ids_by_group: "tuple[list[int], ...]" = field(default_factory=tuple)
-    # Index of the KV group whose block table covers the most logical tokens
-    # (dense / full-sequence path). Used for store/retrieve when only one
-    # group's slot_mapping can drive the LMCache engine (Phase 2: all groups).
+    # GDN uses the full-attention group chosen from specs at initialization.
+    # Other models retain their existing per-request primary policy.
     primary_kv_group_idx: int = 0
     # Per-sched-group dense slot mappings (no -1) and valid-slot prefix arrays.
     filtered_slot_by_group: Optional[tuple[torch.Tensor, ...]] = None
@@ -399,6 +492,7 @@ class ReqMeta(UpstreamReqMeta):
         save_decode_cache: bool = False,
         compress_ratios: "tuple[int, ...] | None" = None,
         sliding_window_size_by_group: "tuple[int | None, ...] | None" = None,
+        primary_kv_group_idx: int | None = None,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -415,17 +509,13 @@ class ReqMeta(UpstreamReqMeta):
                 "partial-chunk store/load is not supported for state and "
                 "sliding windowgroups."
             )
-        if tracker.num_kv_groups == 1:
-            primary_kv_group_idx = 0
-        else:
-            primary_kv_group_idx = max(
-                range(tracker.num_kv_groups),
-                key=lambda i: (
-                    len(tracker.allocated_block_ids_by_group[i]) * block_sizes[i]
-                ),
-            )
+        primary_kv_group_idx = request_primary(
+            tracker.allocated_block_ids_by_group, block_sizes, primary_kv_group_idx
+        )
 
         saved_allocated_block_ids = tracker.allocated_block_ids
+        saved_skip_save = tracker.skip_save
+        tracker.skip_save = saved_skip_save or not tracker.save_in_current_step
         tracker.allocated_block_ids = list(
             tracker.allocated_block_ids_by_group[primary_kv_group_idx]
         )
@@ -440,6 +530,7 @@ class ReqMeta(UpstreamReqMeta):
             )
         finally:
             tracker.allocated_block_ids = saved_allocated_block_ids
+            tracker.skip_save = saved_skip_save
 
         if base is None:
             return None
@@ -494,6 +585,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     # Annotated here for mypy: assigned in upstream __init__/_init_connector_state
     # and temporarily overridden in record_failed_blocks (per-group block_size).
     _block_size: int
+    _state_mtp: bool = False
+    _state_speculative_blocks_by_group: tuple[int, ...] = ()
 
     def __init__(
         self,
@@ -515,7 +608,31 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         vllm_config: "VllmConfig",
         config: LMCacheEngineConfig,
     ) -> None:
+        primary = (
+            select_state_primary(self._kv_cache_config)
+            if self._kv_cache_config is not None
+            else None
+        )
+        if primary is not None:
+            validate_state_config(config, vllm_config)
+            if role == KVConnectorRole.SCHEDULER:
+                validate_state_lookup_client(self.lookup_client, self.worker_count)
+                if type(self.lookup_client.token_database) is not ChunkedTokenDatabase:
+                    raise ValueError("GDN checkpoints require ChunkedTokenDatabase")
         super()._init_connector_state(role, vllm_config, config)
+        self._allocated_blocks: dict[str, tuple[list[int], ...]] = {}
+        self._state_primary_kv_group_idx: int | None = primary
+        self._state_mtp = (
+            primary is not None and vllm_config.speculative_config is not None
+        )
+        if primary is not None:
+            self._state_speculative_blocks_by_group = tuple(
+                max(
+                    getattr(spec, "num_speculative_blocks", 0)
+                    for spec in _iter_layer_specs(group.kv_cache_spec)
+                )
+                for group in self._kv_cache_config.kv_cache_groups
+            )
         if self._kv_cache_config is not None and getattr(
             self._kv_cache_config, "kv_cache_groups", None
         ):
@@ -524,21 +641,12 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 group.kv_cache_spec.block_size
                 for group in self._kv_cache_config.kv_cache_groups
             )
-            try:
-                groups = self._kv_cache_config.kv_cache_groups
-                mems = [
-                    g.kv_cache_spec.max_memory_usage_bytes(vllm_config) for g in groups
-                ]
-                max_mem_hint_idx = int(mems.index(max(mems)))
-            except Exception:
-                max_mem_hint_idx = 0
             logger.info(
                 "LMCache KV cache groups: count=%d, block_sizes_by_group=%s, "
-                "max_memory_usage_hint_idx=%d (per-request primary_kv_group_idx "
-                "uses argmax(len(block_ids)*block_size))",
+                "state_primary_kv_group_idx=%s (None uses existing KV policy)",
                 self._num_kv_groups,
                 self._block_sizes_by_group,
-                max_mem_hint_idx,
+                self._state_primary_kv_group_idx,
             )
         else:
             self._num_kv_groups = 1
@@ -581,6 +689,186 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 "partial-chunk store/load is not supported for state and "
                 "sliding windowgroups."
             )
+
+    def update_state_after_alloc(
+        self, request: Any, num_external_tokens: int, blocks: Any = None
+    ) -> None:
+        super().update_state_after_alloc(request, num_external_tokens)
+        if (
+            getattr(self, "_state_primary_kv_group_idx", None) is not None
+            and num_external_tokens == 0
+        ):
+            # Allocation may reject a previously selected external candidate.
+            spec = self.load_specs.get(request.request_id)
+            if (
+                spec is not None
+                and spec.lmcache_cached_tokens > spec.vllm_cached_tokens
+            ):
+                cancel_state_lookup(self.lookup_client, request.request_id)
+                spec.lmcache_cached_tokens = 0
+        if blocks is not None:
+            self._allocated_blocks[request.request_id] = _normalize_block_ids(
+                blocks.get_block_ids(), self._num_kv_groups
+            )
+
+    def get_num_new_matched_tokens(self, request: Any, num_computed_tokens: int):
+        if self._state_primary_kv_group_idx is None:
+            return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if getattr(request, "mm_features", None):
+            raise ValueError("GDN checkpoints support only text requests")
+        if request.request_id.startswith("mock_req"):
+            return 0
+        if self.kv_role == "kv_producer" and not hasattr(
+            self.lookup_client, "supports_producer_reuse"
+        ):
+            return 0
+        req_id = request.request_id
+        self._requests_priority[req_id] = getattr(request, "priority", 0)
+        # Preserve the complete prefix for preemption and chained state identity.
+        # Full-hit logits recomputation constrains the query, never the chosen R.
+        token_ids = list(request.all_token_ids)
+        upper = max(
+            0, min(request.num_tokens - 1, len(token_ids) - self.skip_last_n_tokens)
+        )
+        boundary = lookup_state(
+            self.lookup_client,
+            token_ids,
+            lookup_id=req_id,
+            local_cached=num_computed_tokens,
+            upper=upper,
+            required_world_size=self.worker_count,
+            request_configs=extract_request_configs(request.sampling_params),
+        )
+        external = max(0, boundary - num_computed_tokens)
+        if external and external < self.config.min_retrieve_tokens:
+            cancel_state_lookup(self.lookup_client, req_id)
+            boundary, external = 0, 0
+        self.load_specs[req_id] = LoadSpec(
+            vllm_cached_tokens=num_computed_tokens,
+            lmcache_cached_tokens=boundary if external else 0,
+            can_load=False,
+        )
+        logger.info(
+            "Hybrid lookup: Reqid: %s, Total tokens %d, "
+            "Inference Engine computed tokens: %d, "
+            "LMCache hit tokens: %d, need to load: %d",
+            req_id,
+            request.num_tokens,
+            num_computed_tokens,
+            boundary if external else 0,
+            external,
+        )
+        return external
+
+    def _apply_allocated_blocks(self, tracker: RequestTracker) -> None:
+        # New/resumed allocation callbacks contain the complete table. Never
+        # append them to a previous attempt or to this round's allocation delta.
+        blocks = self._allocated_blocks.pop(tracker.req_id, None)
+        if blocks is not None:
+            tracker.allocated_block_ids_by_group = blocks
+            tracker._sync_primary_allocated_block_ids()
+
+    def _prepare_state_request(
+        self, tracker: RequestTracker, start: int, output: SchedulerOutput
+    ) -> None:
+        """Set hybrid store policy before ReqMeta advances the saved prefix."""
+        if self._state_primary_kv_group_idx is None:
+            return
+        drafts = output.scheduled_spec_decode_tokens.get(tracker.req_id)
+        if tracker.mm_hashes or (drafts and not self._state_mtp):
+            raise ValueError("State execution requires supported text requests")
+        tracker.is_decode_phase = start >= tracker.prompt_len
+        end = start + output.num_scheduled_tokens[tracker.req_id]
+        # Scheduled draft tokens are not accepted state. A draft forward after
+        # prefill, on the other hand, does not make that prefill step a decode.
+        tracker.save_in_current_step = not self._state_mtp or (
+            not tracker.is_decode_phase and not drafts and end <= tracker.prompt_len
+        )
+        tables = [list(ids) for ids in tracker.allocated_block_ids_by_group]
+        for index, group in enumerate(self._kv_cache_config.kv_cache_groups):
+            if not any(
+                state_group_index(self._kv_cache_config, name) == index
+                for name in group.layer_names
+            ):
+                continue
+            spec = next(_iter_layer_specs(group.kv_cache_spec))
+            # Mirror MambaManager's conservative freeing boundary. Clear before
+            # building either Attention metadata or the state execution snapshot.
+            skipped = max(0, start - spec.num_speculative_blocks - 1) // spec.block_size
+            count = min(skipped, len(tables[index]))
+            tables[index][:count] = [0] * count
+        tracker.allocated_block_ids_by_group = tuple(tables)
+        tracker._sync_primary_allocated_block_ids()
+
+    def _attach_state_executions(
+        self, meta: AscendConnectorMetadata, output: SchedulerOutput
+    ) -> AscendConnectorMetadata:
+        if self._state_primary_kv_group_idx is None:
+            return meta
+        state_sizes = tuple(
+            (index, self._block_sizes_by_group[index])
+            for index, group in enumerate(self._kv_cache_config.kv_cache_groups)
+            if any(
+                state_group_index(self._kv_cache_config, name) == index
+                for name in group.layer_names
+            )
+        )
+        intervals = {
+            req.req_id: (req.num_computed_tokens, True)
+            for req in output.scheduled_new_reqs
+            if not req.req_id.startswith("mock_req")
+        }
+        cached = output.scheduled_cached_reqs
+        if isinstance(cached, list):
+            intervals.update(
+                (req.req_id, (req.num_computed_tokens, req.resumed_from_preemption))
+                for req in cached
+            )
+        else:
+            intervals.update(
+                (
+                    req_id,
+                    (cached.num_computed_tokens[i], req_id in cached.resumed_req_ids),
+                )
+                for i, req_id in enumerate(cached.req_ids)
+            )
+        for req_id, (start, can_load) in intervals.items():
+            tracker = self._request_trackers[req_id]
+            end = start + output.num_scheduled_tokens[req_id]
+            if tracker.mm_hashes or (
+                output.scheduled_spec_decode_tokens.get(req_id) and not self._state_mtp
+            ):
+                raise ValueError("State execution requires supported text requests")
+            meta.state_executions.append(
+                StateExecution(
+                    req_id=req_id,
+                    token_ids=tuple(tracker.token_ids[:end]),
+                    start=start,
+                    end=end,
+                    attention_end=(
+                        len(tracker.token_ids)
+                        // self._lmcache_chunk_size
+                        * self._lmcache_chunk_size
+                    ),
+                    block_ids_by_group=tuple(
+                        tuple(ids) for ids in tracker.allocated_block_ids_by_group
+                    ),
+                    state_block_sizes=state_sizes,
+                    request_configs=deepcopy(tracker.request_configs),
+                    can_load=can_load,
+                    can_save=(
+                        tracker.save_in_current_step
+                        and not tracker.skip_save
+                        and not (tracker.request_configs or {}).get(
+                            "lmcache.skip_save", False
+                        )
+                        and (
+                            not tracker.is_decode_phase or self.config.save_decode_cache
+                        )
+                    ),
+                )
+            )
+        return meta
 
     def record_failed_blocks(
         self,
@@ -626,9 +914,14 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
 
         force_skip_save = self.kv_role == "kv_consumer" or self.force_skip_save
 
-        meta = LMCacheConnectorMetadata()
+        meta = AscendConnectorMetadata(
+            preempted_req_ids=set(
+                getattr(scheduler_output, "preempted_req_ids", None) or ()
+            )
+        )
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            self._allocated_blocks.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
 
@@ -666,6 +959,10 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             )
             self._request_trackers[request.req_id] = request_tracker
 
+            self._apply_allocated_blocks(request_tracker)
+            self._prepare_state_request(
+                request_tracker, request.num_computed_tokens, scheduler_output
+            )
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_sizes_by_group,
@@ -675,6 +972,7 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
                 sliding_window_size_by_group=self._sliding_window_size_by_group,
+                primary_kv_group_idx=self._state_primary_kv_group_idx,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
@@ -712,8 +1010,13 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     lmcache_cached_tokens=lmcache_cached_tokens,
                     vllm_cached_tokens=vllm_cached_tokens,
                     all_token_ids=all_token_ids,
+                    state_speculative_blocks=self._state_speculative_blocks_by_group,
                 )
 
+                self._apply_allocated_blocks(request_tracker)
+                self._prepare_state_request(
+                    request_tracker, req.num_computed_tokens, scheduler_output
+                )
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_sizes_by_group,
@@ -723,10 +1026,11 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                     save_decode_cache=self.config.save_decode_cache,
                     compress_ratios=self._compress_ratios_by_group,
                     sliding_window_size_by_group=self._sliding_window_size_by_group,
+                    primary_kv_group_idx=self._state_primary_kv_group_idx,
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
-            return meta
+            return self._attach_state_executions(meta, scheduler_output)
 
         for i, req_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._request_trackers[req_id]
@@ -824,8 +1128,13 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 lmcache_cached_tokens=lmcache_cached_tokens,
                 vllm_cached_tokens=vllm_cached_tokens,
                 all_token_ids=all_token_ids,
+                state_speculative_blocks=self._state_speculative_blocks_by_group,
             )
 
+            self._apply_allocated_blocks(request_tracker)
+            self._prepare_state_request(
+                request_tracker, cached_reqs.num_computed_tokens[i], scheduler_output
+            )
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_sizes_by_group,
@@ -835,8 +1144,9 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 save_decode_cache=self.config.save_decode_cache,
                 compress_ratios=self._compress_ratios_by_group,
                 sliding_window_size_by_group=self._sliding_window_size_by_group,
+                primary_kv_group_idx=self._state_primary_kv_group_idx,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
 
-        return meta
+        return self._attach_state_executions(meta, scheduler_output)

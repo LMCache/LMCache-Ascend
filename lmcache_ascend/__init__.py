@@ -457,6 +457,18 @@ def _patch_storage_manager():
     ascend_local_disk._orig_async_save_bytes_to_disk = (
         lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk
     )
+    ascend_local_disk._orig_submit_put_task = (
+        lm_local_disk_backend.LocalDiskBackend.submit_put_task
+    )
+    lm_local_disk_backend.LocalDiskBackend.submit_put_task = (
+        ascend_local_disk.local_disk_submit_put_task
+    )
+    ascend_local_disk._orig_get_blocking = (
+        lm_local_disk_backend.LocalDiskBackend.get_blocking
+    )
+    lm_local_disk_backend.LocalDiskBackend.get_blocking = (
+        ascend_local_disk.local_disk_get_blocking
+    )
     lm_local_disk_backend.LocalDiskBackend.async_save_bytes_to_disk = (
         ascend_local_disk.local_disk_async_save_bytes_to_disk
     )
@@ -627,7 +639,15 @@ def _patch_vllm_v1_adapter():
     lmc_vllm_v1_adapter.ReqMeta = mg.ReqMeta
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
 
-    def handle_preemptions(self, preempted_req_ids):
+    def handle_preemptions(self, kv_connector_metadata):
+        # vLLM 0.23 passes metadata; older callers pass the request-ID set.
+        preempted_req_ids = (
+            kv_connector_metadata.preempted_req_ids
+            if isinstance(kv_connector_metadata, mg.AscendConnectorMetadata)
+            else kv_connector_metadata
+        )
+        if not preempted_req_ids:
+            return
         method = getattr(self._lmcache_engine, "handle_preemptions", None)
         if callable(method):
             method(preempted_req_ids)
@@ -932,6 +952,10 @@ if not LMCACHE_ASCEND_PATCHED:
     if _build_info.__framework_name__ == "pytorch":
         _patch_memory_object_tensor()
         _patch_paged_allocator_sync_group_prefix()
+        # First Party
+        from lmcache_ascend.v1.memory_management import patch_mixed_allocator_binary
+
+        patch_mixed_allocator_binary()
         _patch_storage_backend_init()
         _patch_storage_manager()
         _patch_transfer_channel()

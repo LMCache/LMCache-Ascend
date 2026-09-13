@@ -65,6 +65,24 @@ def _make_tracker(
     )
 
 
+def test_req_meta_uses_explicit_primary_despite_longer_state_table() -> None:
+    tracker = _make_tracker(
+        token_ids=list(range(32)),
+        prompt_len=32,
+        allocated_block_ids_by_group=([1, 2, 3, 4], [9, 10]),
+    )
+    meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_sizes_by_group=(16, 16),
+        lmcache_chunk_size=16,
+        primary_kv_group_idx=1,
+    )
+    assert meta is not None
+    assert meta.primary_kv_group_idx == 1
+    assert torch.equal(meta.slot_mapping, meta.slot_mappings_by_group[1])
+    assert meta.slot_mapping.tolist() == list(range(144, 176))
+
+
 @pytest.mark.parametrize(
     ("block_ids", "expected_num_groups", "expected"),
     [
