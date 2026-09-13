@@ -303,9 +303,15 @@ def test_hybrid_rejects_speculative_and_pipeline_parallel(speculative):
         validate_state_config(LMCacheEngineConfig.from_defaults(), config)
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_5_text", "qwen3_5_moe_text"])
+@pytest.mark.parametrize(
+    "model_type,enforce_eager",
+    [
+        ("qwen3_5_text", True),
+        ("qwen3_5_moe_text", True),
+        ("qwen3_5_moe_text", False),
+    ],
+)
 @pytest.mark.parametrize("state_first", [True, False])
-@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_supported_mtp_registers_actual_attention_and_state(
     monkeypatch, model_type, state_first, enforce_eager
 ):
@@ -353,6 +359,16 @@ def test_mtp_accepts_target_and_draft_execution_options(target_eager, draft_over
     vllm.speculative_config.draft_model_config.enforce_eager = target_eager
     vllm.speculative_config.enforce_eager = draft_override
     validate_state_config(config, vllm)
+
+
+def test_mtp_rejects_dense_target_graph_execution():
+    config = LMCacheEngineConfig.from_defaults()
+    vllm = _vllm_config(mtp=True)
+    vllm.model_config.hf_text_config.model_type = "qwen3_5_text"
+    vllm.model_config.enforce_eager = False
+
+    with pytest.raises(ValueError, match="requires eager target execution"):
+        validate_state_config(config, vllm)
 
 
 @pytest.mark.parametrize(

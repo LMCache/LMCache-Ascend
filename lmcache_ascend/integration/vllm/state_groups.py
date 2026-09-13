@@ -155,12 +155,18 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
             or draft.hf_config.model_type != "qwen3_5_mtp"
         ):
             raise ValueError("GDN MTP requires Qwen3.5 target and draft models")
+        if (
+            target.hf_text_config.model_type == "qwen3_5_text"
+            and not target.enforce_eager
+        ):
+            raise ValueError("GDN MTP requires eager target execution for qwen3_5_text")
         if config.save_decode_cache:
             raise ValueError("GDN MTP prefill reuse requires save_decode_cache=false")
         if vllm_config.scheduler_config.async_scheduling:
             raise ValueError("GDN MTP requires synchronous scheduling")
         # The runner loads before model forward and finalizes stores after draft
-        # forward, outside model graph replay. Eager flags need not be restricted.
+        # forward, outside model graph replay. The validated MoE target may use
+        # graph execution; the dense target is restricted above.
     if vllm_config.parallel_config.pipeline_parallel_size != 1:
         raise ValueError("GDN checkpoints do not support pipeline parallelism")
     # Qwen3.5 may expose a multimodal model config; request payloads are checked
