@@ -297,6 +297,18 @@ def _patch_storage_backend_init():
     lm_storage_backend.CreateStorageBackends = ascend_create_storage_backends
 
 
+def _patch_eic_connector():
+    # Make the upstream EIC remote connector (eic://, LMCache core PR #1930)
+    # importable on CANN images without libcudart. No-op when the connector or
+    # its vendor `eic` package is absent.
+    # First Party
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        patch_eic_connector,
+    )
+
+    patch_eic_connector()
+
+
 def _patch_storage_manager():
     # Rebind StorageManager.get / batched_get so the delay-pull proxy
     # write-back guard lives in the Ascend overlay instead of upstream LMCache.
@@ -726,6 +738,7 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if _build_info.__framework_name__ == "pytorch":
         _patch_storage_backend_init()
+        _patch_eic_connector()
         _patch_storage_manager()
         _patch_transfer_channel()
         _patch_cacheblend()

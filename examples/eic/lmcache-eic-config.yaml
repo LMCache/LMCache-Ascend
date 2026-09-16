@@ -1,0 +1,27 @@
+# EIC remote KV backend on Ascend NPU (eic://)
+#
+# The EIC connector ships in LMCache core (LMCache/LMCache#1930). On Ascend,
+# lmcache_ascend patches its __init__ so it imports on CANN images that do not
+# ship libcudart.so; RDMA transport is used and CUDA GDR stays disabled.
+#
+# Point remote_url at the EIC master address list (eic:// scheme is required).
+
+remote_url: "eic://MASTER_IP_1:12500;MASTER_IP_2:12500"
+eic_instance_id: "YOUR_EIC_CLUSTER_UUID"
+eic_kv_ns: "default"
+eic_thread_num: 2
+eic_trans_type: 2          # 2 = RDMA (CUDA GDR is not supported on NPU)
+eic_kv_ttl: 86400         # seconds, -1 = no expiry
+eic_log_dir: "/tmp/eic_log"
+eic_log_level: 2
+eic_flag_file: "/opt/tiger/lmcache_eic/conf/eic_flag_file"
+
+# Local CPU tier in front of EIC
+local_cpu: true
+max_local_cpu_size: 512000000000   # bytes per engine process
+chunk_size: 2048
+enable_async_loading: true
+lookup_timeout_ms: 30000
+
+extra_config:
+  save_only_first_rank: true
