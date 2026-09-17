@@ -5,21 +5,25 @@ Bypasses the MP server. One engine builder; layouts/hosts/directions are
 parametrizations of a few contracts, not separate tests.
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from typing import Any
 
+# Third Party
+import lmcache.lmcache_native as native
 import pytest
 import torch
 
-import lmcache.lmcache_native as native
-import lmcache_ascend.c_ops as lmc_ops
+# First Party
 from lmcache_ascend.v1.shape_desc import (
     attach_tuple_block_strides,
     attach_tuple_planes,
 )
+import lmcache_ascend.c_ops as lmc_ops
 
 requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
@@ -109,6 +113,7 @@ def _run(fn: Callable[[], None], *, affinity: bool) -> None:
     if not affinity:
         fn()
         return
+    # Third Party
     from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 
     pool = AffinityThreadPool(max_workers=1, thread_name_prefix="lmcache")
@@ -208,7 +213,9 @@ def _packed_block(
     )
 
 
-def _expected_host_block(layers: Sequence[Any], bid: int, bs: int, kv_leading: bool) -> Any:
+def _expected_host_block(
+    layers: Sequence[Any], bid: int, bs: int, kv_leading: bool
+) -> Any:
     first = layers[0]
     if kv_leading:
         return [(key[bid], value[bid]) for key, value in layers]
@@ -240,7 +247,9 @@ def _assert_d2h_object(
             if kv_leading:
                 for layer, (key, value) in enumerate(expected):
                     torch.testing.assert_close(obj[0, layer, sl].reshape_as(key), key)
-                    torch.testing.assert_close(obj[1, layer, sl].reshape_as(value), value)
+                    torch.testing.assert_close(
+                        obj[1, layer, sl].reshape_as(value), value
+                    )
             else:
                 for layer, exp in enumerate(expected):
                     got = obj[layer, sl].cpu().reshape_as(exp.cpu())
@@ -263,8 +272,12 @@ def _assert_h2d_engine(
             _assert_block_zero(layers, bid)
 
 
-def _fill_arange(shape: tuple[int, ...], dtype: torch.dtype, device: torch.device, offset: float) -> torch.Tensor:
-    values = torch.arange(int(torch.tensor(shape).prod()), dtype=torch.float32, device=device)
+def _fill_arange(
+    shape: tuple[int, ...], dtype: torch.dtype, device: torch.device, offset: float
+) -> torch.Tensor:
+    values = torch.arange(
+        int(torch.tensor(shape).prod()), dtype=torch.float32, device=device
+    )
     return (values.reshape(shape) + offset).to(dtype)
 
 
@@ -287,13 +300,18 @@ def _kg0_planes(
             latent = k_pool[:, : bs * latent_w].view(nb, bs, latent_w)
             scale = v_pool[:, : bs * 2].view(torch.float16).view(nb, bs, 1)
             latent.copy_(
-                (torch.arange(nb * bs * latent_w, device=device, dtype=torch.int32) % 251)
+                (
+                    torch.arange(nb * bs * latent_w, device=device, dtype=torch.int32)
+                    % 251
+                )
                 .to(torch.uint8)
                 .view(nb, bs, latent_w)
                 + layer_i
             )
             scale.copy_(
-                torch.arange(nb * bs, device=device, dtype=torch.float16).view(nb, bs, 1)
+                torch.arange(nb * bs, device=device, dtype=torch.float16).view(
+                    nb, bs, 1
+                )
                 + layer_i
             )
             layers.append((latent, scale))
@@ -336,11 +354,14 @@ def _build(
         hidden = nh * hs
         layers = [
             (
-                _fill_arange((nb, bs + int(padded), nh, hs), torch.float16, device, 10_000 * i)[
-                    :, :bs
-                ],
                 _fill_arange(
-                    (nb, bs + int(padded), nh, hs), torch.float16, device, 10_000 * i + 5_000
+                    (nb, bs + int(padded), nh, hs), torch.float16, device, 10_000 * i
+                )[:, :bs],
+                _fill_arange(
+                    (nb, bs + int(padded), nh, hs),
+                    torch.float16,
+                    device,
+                    10_000 * i + 5_000,
                 )[:, :bs],
             )
             for i in range(nl)
@@ -383,7 +404,13 @@ def _build(
                 pools.append(pool)
                 layers.append(view)
             desc = _shape_desc(
-                kv_size=1, nl=nl, nb=nb, bs=bs, nh=1, hs=hs, dtype=dtype,
+                kv_size=1,
+                nl=nl,
+                nb=nb,
+                bs=bs,
+                nh=1,
+                hs=hs,
+                dtype=dtype,
                 block_stride_elems=stride,
             )
             return dict(
@@ -490,8 +517,19 @@ def _fill_src_object(spec: dict[str, Any], device: torch.device) -> torch.Tensor
     return _fill_arange((nl, chunk, width), spec["obj_dtype"], device, 0)
 
 
-def _launch(spec: dict[str, Any], paged: object, ptrs: list[int], ids: torch.Tensor, device: torch.device, direction: object, chunk: int, skip: int = 0) -> None:
-    _transfer(paged, ptrs, ids, device, direction, spec["desc"], chunk, spec["fmt"], skip)
+def _launch(
+    spec: dict[str, Any],
+    paged: object,
+    ptrs: list[int],
+    ids: torch.Tensor,
+    device: torch.device,
+    direction: object,
+    chunk: int,
+    skip: int = 0,
+) -> None:
+    _transfer(
+        paged, ptrs, ids, device, direction, spec["desc"], chunk, spec["fmt"], skip
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +558,9 @@ def _roundtrip_cases() -> list[Any]:
 
 
 @requires_npu
-@pytest.mark.parametrize("layout,host,padded,skip,nl,num_objects,block_ids", _roundtrip_cases())
+@pytest.mark.parametrize(
+    "layout,host,padded,skip,nl,num_objects,block_ids", _roundtrip_cases()
+)
 def test_roundtrip_restores_unskipped_selected_blocks(
     layout: str,
     host: str,
@@ -537,20 +577,35 @@ def test_roundtrip_restores_unskipped_selected_blocks(
     chunk = bpo * bs
     ids = torch.tensor(block_ids, dtype=torch.int64, device=device)
     golden = _clone_engine(spec["layers"])
-    with _host_objects(host, [_obj_shape(spec, chunk)] * num_objects, spec["obj_dtype"], device) as (
+    with _host_objects(
+        host, [_obj_shape(spec, chunk)] * num_objects, spec["obj_dtype"], device
+    ) as (
         ptrs,
         obj_tensors,
     ):
-        _run(lambda: _launch(spec, spec["table"], ptrs, ids, device, D2H, chunk, skip), affinity=host == "affinity")
+        _run(
+            lambda: _launch(spec, spec["table"], ptrs, ids, device, D2H, chunk, skip),
+            affinity=host == "affinity",
+        )
         visible = [t for t in obj_tensors if t is not None]
         if len(visible) == num_objects:
             _assert_d2h_object(
-                visible, spec["layers"], block_ids, skip=skip, bs=bs,
-                num_objects=num_objects, kv_leading=spec["kv_leading"],
+                visible,
+                spec["layers"],
+                block_ids,
+                skip=skip,
+                bs=bs,
+                num_objects=num_objects,
+                kv_leading=spec["kv_leading"],
             )
         _zero_engine(spec["layers"])
-        _run(lambda: _launch(spec, spec["table"], ptrs, ids, device, H2D, chunk, skip), affinity=host == "affinity")
-    _assert_h2d_engine(spec["layers"], golden, block_ids, skip=skip, num_objects=num_objects)
+        _run(
+            lambda: _launch(spec, spec["table"], ptrs, ids, device, H2D, chunk, skip),
+            affinity=host == "affinity",
+        )
+    _assert_h2d_engine(
+        spec["layers"], golden, block_ids, skip=skip, num_objects=num_objects
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -568,11 +623,16 @@ _SMALL = {
 @pytest.mark.parametrize("layout", ["kg0", "nh_cs", "nh_cs_padded"])
 @pytest.mark.parametrize("direction_d2h", [True, False], ids=["d2h", "h2d"])
 @pytest.mark.parametrize("nested", [False, True], ids=["ptrs", "nested"])
-def test_native_matches_reference(layout: str, direction_d2h: bool, nested: bool) -> None:
+def test_native_matches_reference(
+    layout: str, direction_d2h: bool, nested: bool
+) -> None:
     device = torch.device("npu:0")
     a = _build(layout, device, **_SMALL[layout])
     b = _build(layout, device, **_SMALL[layout])
-    chunk, ids = a["bs"], torch.tensor([0 if layout == "kg0" else 1], dtype=torch.int64, device=device)
+    chunk, ids = (
+        a["bs"],
+        torch.tensor([0 if layout == "kg0" else 1], dtype=torch.int64, device=device),
+    )
     direction = D2H if direction_d2h else H2D
     if direction_d2h:
         obj_a = torch.zeros(_obj_shape(a, chunk), dtype=a["obj_dtype"], device=device)
@@ -591,7 +651,15 @@ def test_native_matches_reference(layout: str, direction_d2h: bool, nested: bool
     else:
         torch_ops = pytest.importorskip("lmcache.v1.platform.torch_ops")
         torch_ops.multi_layer_block_kv_transfer(
-            b["layers"], [obj_b], ids, device, direction, b["desc"], chunk, b["fmt"], 0,
+            b["layers"],
+            [obj_b],
+            ids,
+            device,
+            direction,
+            b["desc"],
+            chunk,
+            b["fmt"],
+            0,
         )
         torch.npu.synchronize()
 
@@ -616,7 +684,12 @@ def test_torch_check_raises_python_exception() -> None:
             torch.tensor([obj.data_ptr()], dtype=torch.int64, device=device),
             [obj.data_ptr()],
             torch.tensor([0], dtype=torch.int64, device=device),
-            device, D2H, spec["desc"], 32, KG0_FMT, 0,
+            device,
+            D2H,
+            spec["desc"],
+            32,
+            KG0_FMT,
+            0,
         )
 
 
@@ -627,7 +700,10 @@ def test_object_group_plan_matches_direct_launches(direction_d2h: bool) -> None:
     kw = dict(nl=2, nb=4, bs=32)
     pairs = [
         (_build("kg0", device, **kw), _build("kg0", device, **kw)),
-        (_build("nh_cs", device, with_planes=False, **kw), _build("nh_cs", device, with_planes=False, **kw)),
+        (
+            _build("nh_cs", device, with_planes=False, **kw),
+            _build("nh_cs", device, with_planes=False, **kw),
+        ),
     ]
     direction = D2H if direction_d2h else H2D
     chunk = 32
@@ -635,7 +711,9 @@ def test_object_group_plan_matches_direct_launches(direction_d2h: bool) -> None:
     objs: list[tuple[torch.Tensor, torch.Tensor]] = []
     for direct, planned in pairs:
         if direction_d2h:
-            d = torch.zeros(_obj_shape(direct, chunk), dtype=direct["obj_dtype"], device=device)
+            d = torch.zeros(
+                _obj_shape(direct, chunk), dtype=direct["obj_dtype"], device=device
+            )
             p = d.clone()
         else:
             src = _fill_src_object(direct, device)
@@ -643,19 +721,30 @@ def test_object_group_plan_matches_direct_launches(direction_d2h: bool) -> None:
             _zero_engine(direct["layers"])
             _zero_engine(planned["layers"])
         objs.append((d, p))
-        _launch(direct, direct["table"], [int(d.data_ptr())], ids, device, direction, chunk)
+        _launch(
+            direct, direct["table"], [int(d.data_ptr())], ids, device, direction, chunk
+        )
 
     specs = [
         lmc_ops.KernelGroupSpec(
-            planned["table"].data_ptr(), [p.data_ptr()], planned["desc"], chunk,
-            int(planned["fmt"]), ids.data_ptr(), ids.numel(),
+            planned["table"].data_ptr(),
+            [p.data_ptr()],
+            planned["desc"],
+            chunk,
+            int(planned["fmt"]),
+            ids.data_ptr(),
+            ids.numel(),
         )
-        for (_, planned), (_, p) in zip(pairs, objs)
+        for (_, planned), (_, p) in zip(pairs, objs, strict=False)
     ]
-    step = lmc_ops.BatchStep([], [lmc_ops.LaunchVar(i, 0, 1, 1, 0) for i in range(len(pairs))])
-    lmc_ops.execute_object_group_transfer(int(direction), device, 1 << 26, specs, [step])
+    step = lmc_ops.BatchStep(
+        [], [lmc_ops.LaunchVar(i, 0, 1, 1, 0) for i in range(len(pairs))]
+    )
+    lmc_ops.execute_object_group_transfer(
+        int(direction), device, 1 << 26, specs, [step]
+    )
     torch.npu.synchronize()
-    for (direct, planned), (d, p) in zip(pairs, objs):
+    for (direct, planned), (d, p) in zip(pairs, objs, strict=False):
         if direction_d2h:
             assert torch.equal(d.cpu(), p.cpu())
         else:
@@ -675,15 +764,35 @@ def test_plan_staging_d2h_matches_direct(affinity: bool, num_objects: int) -> No
         for _ in range(num_objects)
     ]
     temp = goldens[0].clone()
-    hosts = [torch.zeros(_obj_shape(spec, chunk), dtype=torch.uint8) for _ in range(num_objects)]
-    _launch(spec, spec["table"], [int(g.data_ptr()) for g in goldens], ids, device, D2H, chunk)
+    hosts = [
+        torch.zeros(_obj_shape(spec, chunk), dtype=torch.uint8)
+        for _ in range(num_objects)
+    ]
+    _launch(
+        spec,
+        spec["table"],
+        [int(g.data_ptr()) for g in goldens],
+        ids,
+        device,
+        D2H,
+        chunk,
+    )
     kspec = lmc_ops.KernelGroupSpec(
-        spec["table"].data_ptr(), [int(temp.data_ptr())], spec["desc"], chunk,
-        int(KG0_FMT), ids.data_ptr(), ids.numel(),
+        spec["table"].data_ptr(),
+        [int(temp.data_ptr())],
+        spec["desc"],
+        chunk,
+        int(KG0_FMT),
+        ids.data_ptr(),
+        ids.numel(),
     )
     steps = [
         lmc_ops.BatchStep(
-            [lmc_ops.StagingCopy(int(host.data_ptr()), int(temp.data_ptr()), host.nbytes, 0)],
+            [
+                lmc_ops.StagingCopy(
+                    int(host.data_ptr()), int(temp.data_ptr()), host.nbytes, 0
+                )
+            ],
             [lmc_ops.LaunchVar(0, obj_i, 1, 1, 0)],
         )
         for obj_i, host in enumerate(hosts)
@@ -705,13 +814,23 @@ def test_lmcache_memcpy_async_host_roundtrip() -> None:
     host = torch.arange(nbytes, dtype=torch.uint8)
     dev = torch.zeros(nbytes, dtype=torch.uint8, device=device)
     lmc_ops.lmcache_memcpy_async(
-        int(dev.data_ptr()), int(host.data_ptr()), nbytes, lmc_ops.TransferDirection.H2D, 0, 4096,
+        int(dev.data_ptr()),
+        int(host.data_ptr()),
+        nbytes,
+        lmc_ops.TransferDirection.H2D,
+        0,
+        4096,
     )
     torch.npu.synchronize()
     assert torch.equal(dev.cpu(), host)
     host_back = torch.zeros(nbytes, dtype=torch.uint8)
     lmc_ops.lmcache_memcpy_async(
-        int(host_back.data_ptr()), int(dev.data_ptr()), nbytes, lmc_ops.TransferDirection.D2H, 0, 4096,
+        int(host_back.data_ptr()),
+        int(dev.data_ptr()),
+        nbytes,
+        lmc_ops.TransferDirection.D2H,
+        0,
+        4096,
     )
     torch.npu.synchronize()
     assert torch.equal(host_back, host)

@@ -13,8 +13,10 @@ physical. Do not ``getattr`` ``storage_block_size`` (GPU inherited property).
 dropped by some Ascend spec merges.
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Iterable
 from typing import Any
 import sys
@@ -51,6 +53,7 @@ def _block_size_is_physical(cls: Any | None) -> bool:
 def _ascend_block_size_is_physical() -> bool:
     """True on pre-#13242 vLLM-Ascend (physical ``block_size``)."""
     try:
+        # Third Party
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
     except ImportError:
         return True
@@ -112,6 +115,7 @@ def install_on(
 def install_logical_block_size() -> bool:
     """Wrap real vLLM-Ascend spec ``merge()`` if the classes are importable."""
     try:
+        # Third Party
         from vllm_ascend.core.kv_cache_interface import (
             AscendMLAAttentionSpec,
             AscendSlidingWindowMLASpec,
@@ -139,6 +143,7 @@ def _wrap_get_tokens_per_block() -> None:
     if _GET_TOKENS_WRAPPED:
         return
     try:
+        # Third Party
         import lmcache.integration.vllm.kv_cache_groups as kg
     except ImportError:
         return

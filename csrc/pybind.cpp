@@ -12,10 +12,10 @@
 #include "pos_kernels.h"
 #include <cstdint>
 #include <iostream>
-#include <string>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <stdexcept>
+#include <string>
 #include <torch/csrc/autograd/python_variable.h>
 #include <torch/torch.h>
 
@@ -35,7 +35,7 @@ std::vector<torch::Tensor> normalize_kv_caches(const py::object &input) {
 namespace {
 constexpr size_t kMaxPlanes = 4;
 
-py::tuple plane_array_get(const int64_t* arr, int32_t n) {
+py::tuple plane_array_get(const int64_t *arr, int32_t n) {
   if (n <= 0) {
     return py::tuple();
   }
@@ -48,8 +48,8 @@ py::tuple plane_array_get(const int64_t* arr, int32_t n) {
   return out;
 }
 
-void plane_array_set(int64_t* arr, const std::vector<int64_t>& v,
-                     const char* name) {
+void plane_array_set(int64_t *arr, const std::vector<int64_t> &v,
+                     const char *name) {
   if (v.size() > kMaxPlanes) {
     throw py::value_error(std::string(name) + " length exceeds max 4");
   }
@@ -57,7 +57,7 @@ void plane_array_set(int64_t* arr, const std::vector<int64_t>& v,
     arr[i] = i < v.size() ? v[i] : 0;
   }
 }
-}  // namespace
+} // namespace
 
 void single_layer_kv_transfer_wrapper(torch::Tensor &lmc_key_value_cache,
                                       const py::object &vllm_kv_caches_obj,
@@ -124,8 +124,7 @@ PYBIND11_MODULE(c_ops, m) {
 
   m.def("record_event_on_stream", &record_event_on_stream,
         py::arg("cuda_stream_ptr"), py::arg("event_type_name"),
-        py::arg("session_id"), py::arg("str_metadata"),
-        py::arg("int_metadata"),
+        py::arg("session_id"), py::arg("str_metadata"), py::arg("int_metadata"),
         py::call_guard<py::gil_scoped_release>());
   m.def("drain_recorded_events", &drain_recorded_events);
   m.def("record_completion_on_stream", &record_completion_on_stream,
@@ -136,7 +135,7 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("drain_recorded_completions", []() {
     auto items = drain_recorded_completions();
     py::list out;
-    for (auto& kv : items) {
+    for (auto &kv : items) {
       out.append(py::make_tuple(py::str(kv.first), py::bytes(kv.second)));
     }
     return out;
@@ -171,8 +170,8 @@ PYBIND11_MODULE(c_ops, m) {
   // after NpuDeviceOps.bind_native. Kernels take it by value (same as CUDA
   // + lmcache_native). dynamic_attr keeps torch dtype for the Python
   // torch_ops fallback.
-  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc",
-                                  py::module_local(), py::dynamic_attr())
+  py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc", py::module_local(),
+                                  py::dynamic_attr())
       .def(py::init<>())
       .def_readwrite("kv_size", &PageBufferShapeDesc::kv_size)
       .def_readwrite("nl", &PageBufferShapeDesc::nl)
@@ -186,33 +185,33 @@ PYBIND11_MODULE(c_ops, m) {
       .def_readwrite("num_planes", &PageBufferShapeDesc::num_planes)
       .def_property(
           "plane_slot_bytes",
-          [](const PageBufferShapeDesc& s) {
+          [](const PageBufferShapeDesc &s) {
             return plane_array_get(s.plane_slot_bytes, s.num_planes);
           },
-          [](PageBufferShapeDesc& s, const std::vector<int64_t>& v) {
+          [](PageBufferShapeDesc &s, const std::vector<int64_t> &v) {
             plane_array_set(s.plane_slot_bytes, v, "plane_slot_bytes");
           })
       .def_property(
           "plane_block_stride_bytes",
-          [](const PageBufferShapeDesc& s) {
+          [](const PageBufferShapeDesc &s) {
             return plane_array_get(s.plane_block_stride_bytes, s.num_planes);
           },
-          [](PageBufferShapeDesc& s, const std::vector<int64_t>& v) {
+          [](PageBufferShapeDesc &s, const std::vector<int64_t> &v) {
             plane_array_set(s.plane_block_stride_bytes, v,
                             "plane_block_stride_bytes");
           });
   m.def(
       "multi_layer_block_kv_transfer",
-      [](const torch::Tensor& paged_buffer_ptrs_tensor,
+      [](const torch::Tensor &paged_buffer_ptrs_tensor,
          std::vector<int64_t> lmcache_objects_ptrs,
-         const torch::Tensor& block_ids, const torch::Device& device,
-         const py::object& direction, PageBufferShapeDesc shape_desc,
-         int lmcache_chunk_size, const py::object& engine_kv_format,
+         const torch::Tensor &block_ids, const torch::Device &device,
+         const py::object &direction, PageBufferShapeDesc shape_desc,
+         int lmcache_chunk_size, const py::object &engine_kv_format,
          int skip_prefix_n_blocks) {
-        const auto dir = static_cast<TransferDirection>(
-            py::int_(direction).cast<int>());
-        const auto fmt = static_cast<EngineKVFormat>(
-            py::int_(engine_kv_format).cast<int>());
+        const auto dir =
+            static_cast<TransferDirection>(py::int_(direction).cast<int>());
+        const auto fmt =
+            static_cast<EngineKVFormat>(py::int_(engine_kv_format).cast<int>());
         // Keep the GIL through TORCH_CHECK so failures surface as Python
         // exceptions instead of aborting the lmcache server.
         multi_layer_block_kv_transfer(
@@ -232,15 +231,15 @@ PYBIND11_MODULE(c_ops, m) {
            py::arg("dest"), py::arg("src"), py::arg("nbytes"),
            py::arg("host_offset"));
   py::class_<LaunchVar>(m, "LaunchVar", py::module_local())
-      .def(py::init([](int group_idx, int64_t block_ids_offset,
-                       int total_blocks, int num_objects,
-                       int skip_prefix_n_blocks) {
-             return LaunchVar{group_idx, block_ids_offset, total_blocks,
-                              num_objects, skip_prefix_n_blocks};
-           }),
-           py::arg("group_idx"), py::arg("block_ids_offset"),
-           py::arg("total_blocks"), py::arg("num_objects"),
-           py::arg("skip_prefix_n_blocks"));
+      .def(
+          py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
+                      int num_objects, int skip_prefix_n_blocks) {
+            return LaunchVar{group_idx, block_ids_offset, total_blocks,
+                             num_objects, skip_prefix_n_blocks};
+          }),
+          py::arg("group_idx"), py::arg("block_ids_offset"),
+          py::arg("total_blocks"), py::arg("num_objects"),
+          py::arg("skip_prefix_n_blocks"));
   py::class_<BatchStep>(m, "BatchStep", py::module_local())
       .def(py::init([](std::vector<StagingCopy> staging,
                        std::vector<LaunchVar> launches) {
@@ -268,19 +267,19 @@ PYBIND11_MODULE(c_ops, m) {
            py::arg("block_ids_capacity"));
   m.def(
       "execute_object_group_transfer",
-      [](int direction, const torch::Device& device,
+      [](int direction, const torch::Device &device,
          size_t host_buffer_alignment,
-         const std::vector<KernelGroupSpec>& kernel_group_specs,
-         const std::vector<BatchStep>& batch_steps) {
+         const std::vector<KernelGroupSpec> &kernel_group_specs,
+         const std::vector<BatchStep> &batch_steps) {
         return execute_object_group_transfer(
             static_cast<TransferDirection>(direction), device,
             host_buffer_alignment, kernel_group_specs, batch_steps);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
       py::arg("kernel_group_specs"), py::arg("batch_steps"));
-      // No gil_scoped_release: NPU OpCommand.Run() posts to torch_npu's
-      // Python task queue. Releasing the GIL here deadlocks (CUDA launches
-      // without that queue). One Run() still implies one stream wait.
+  // No gil_scoped_release: NPU OpCommand.Run() posts to torch_npu's
+  // Python task queue. Releasing the GIL here deadlocks (CUDA launches
+  // without that queue). One Run() still implies one stream wait.
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
 }

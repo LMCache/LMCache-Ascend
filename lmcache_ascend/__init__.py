@@ -507,6 +507,7 @@ def _patch_ops():
 
     def _paged_arg_to_ptr_tensor(paged, device):
         """NPU cache context returns per-layer tensors; the C++ op wants int64 ptrs."""
+        # Third Party
         import torch
 
         if isinstance(paged, torch.Tensor):
@@ -531,6 +532,7 @@ def _patch_ops():
         skip_prefix_n_blocks,
     ):
         if int(engine_kv_format) in (_fmt_13, _fmt_16, _fmt_17):
+            # Third Party
             import torch
 
             paged = _paged_arg_to_ptr_tensor(paged_buffer_ptrs_tensor, device)
@@ -579,6 +581,7 @@ def _patch_ops():
     sys.modules["lmcache.c_ops"] = ascend_c_ops
 
     try:
+        # Third Party
         import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as _ldt
 
         _ldt._HAS_NATIVE_OBJECT_GROUP_TRANSFER = hasattr(
@@ -773,6 +776,7 @@ def _patch_logical_block_size():
     reports that span for Ascend leaves. Post-#13242 ``block_size`` is already
     logical, so LMCache core is left unpatched. Never mutate ``spec.block_size``.
     """
+    # First Party
     from lmcache_ascend.integration.vllm.logical_block_size import install_overrides
 
     install_overrides()

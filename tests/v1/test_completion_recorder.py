@@ -16,7 +16,6 @@ import msgspec
 import pytest
 import torch
 
-# First Party
 np_ops = pytest.importorskip(
     "lmcache_ascend.c_ops", reason="lmcache_ascend.c_ops not built"
 )
@@ -27,6 +26,7 @@ if not (hasattr(torch, "npu") and torch.npu.is_available()):
 if not hasattr(np_ops, "record_completion_on_stream"):
     pytest.skip("record_completion_on_stream not available", allow_module_level=True)
 
+# Third Party
 from lmcache.v1.multiprocess.native_completion import (  # noqa: E402
     DeviceHostFuncDispatcher,
     submit_callback_to_stream,

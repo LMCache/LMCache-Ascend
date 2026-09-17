@@ -40,11 +40,11 @@ struct PlaneLayout {
 };
 
 struct BlockTransferLayout {
-  int32_t num_planes;              // 1..kMaxPlanes (physical planes/layer)
-  int32_t reserved;                // keeps the trailing fields 8B-aligned
-  int64_t lmc_token_stride_bytes;  // LMC packed row width (all planes)
-  int64_t lmc_layer_stride_bytes;  // bytes per layer = slots_per_object * row
-  int64_t lmc_object_bytes;        // total object size
+  int32_t num_planes;             // 1..kMaxPlanes (physical planes/layer)
+  int32_t reserved;               // keeps the trailing fields 8B-aligned
+  int64_t lmc_token_stride_bytes; // LMC packed row width (all planes)
+  int64_t lmc_layer_stride_bytes; // bytes per layer = slots_per_object * row
+  int64_t lmc_object_bytes;       // total object size
   PlaneLayout planes[kMaxPlanes];
 };
 
@@ -57,4 +57,4 @@ static_assert(sizeof(BlockTransferLayout) == 128,
 static_assert(offsetof(BlockTransferLayout, planes) == 32,
               "BlockTransferLayout planes offset mismatch");
 
-}  // namespace kvcache_ops
+} // namespace kvcache_ops

@@ -31,10 +31,10 @@ namespace kvcache_ops {
 // through the layout POD.
 void multi_layer_block_transfer_kernel(
     uint32_t block_dim,            // min(AIV cores, total work items)
-    void* stream,                  // aclrtStream (current NPU stream)
-    uint8_t* paged_buffer_ptrs,    // interleaved pointer table (see above)
-    uint8_t* lmcache_obj,          // LMC object device VA (maybe staged)
-    uint8_t* engine_block_ids,     // int64 array: logical -> engine block
+    void *stream,                  // aclrtStream (current NPU stream)
+    uint8_t *paged_buffer_ptrs,    // interleaved pointer table (see above)
+    uint8_t *lmcache_obj,          // LMC object device VA (maybe staged)
+    uint8_t *engine_block_ids,     // int64 array: logical -> engine block
     int32_t num_blocks_per_object, // == lmcache_chunk_size / bs (host-checked)
     int32_t skip_prefix_n_blocks,  // leading blocks to skip (prefix dedup)
     int32_t nl,                    // layers in this group

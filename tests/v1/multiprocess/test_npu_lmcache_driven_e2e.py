@@ -9,10 +9,10 @@ events; the parent drives the real server-side LMCacheDrivenTransferModule
 
 # Standard
 from contextlib import closing
-import math
-import multiprocessing as mp
 from types import SimpleNamespace
 from typing import Any
+import math
+import multiprocessing as mp
 
 # Third Party
 import pytest
@@ -25,10 +25,6 @@ from tests.bootstrap import prepare_environment
 prepare_environment()
 
 # Third Party
-import lmcache_ascend  # noqa: F401, E402  (applies plugin patches)
-
-# First Party
-import lmcache.lmcache_native as lmcache_native  # noqa: E402
 from lmcache.utils import EngineType  # noqa: E402
 from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
 from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
@@ -39,10 +35,14 @@ from lmcache.v1.multiprocess.transfer_context.worker_transfer import (  # noqa: 
     create_transfer_context,
 )
 from lmcache.v1.platform.npu.ipc_wrapper import NpuIPCWrapper  # noqa: E402
+import lmcache.lmcache_native as lmcache_native  # noqa: E402
+
+# First Party
 from tests.v1.multiprocess.test_custom_types import (  # noqa: E402
     get_customized_decoder,
     get_customized_encoder,
 )
+import lmcache_ascend  # noqa: F401, E402  (applies plugin patches)
 
 NL = 4
 NB = 16
@@ -213,6 +213,7 @@ def test_lmcache_driven_store_and_retrieve_roundtrip(
         # the in-band structure alone -- no regroup hint involved.
         kv_caches: KVCache = list(decoder.decode(message["wrappers"]))
 
+        # Third Party
         from lmcache.v1.platform.npu import NpuDeviceSpec
         from lmcache.v1.platform.npu.event_ipc import NpuEventIPCBackend
 
@@ -308,9 +309,7 @@ def test_lmcache_driven_store_and_retrieve_roundtrip(
                             expected[layer, block * BS : (block + 1) * BS, W_LATENT:]
                             + 1.0
                         )
-                        assert torch.allclose(
-                            latent[block, :, 0, :].cpu(), exp_latent
-                        )
+                        assert torch.allclose(latent[block, :, 0, :].cpu(), exp_latent)
                         assert torch.allclose(rope[block, :, 0, :].cpu(), exp_rope)
     finally:
         parent_conn.send("done")

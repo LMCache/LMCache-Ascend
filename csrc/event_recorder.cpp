@@ -37,12 +37,12 @@ static double wall_clock_time() {
 // EventRecorder
 // ---------------------------------------------------------------------------
 
-EventRecorder& EventRecorder::instance() {
+EventRecorder &EventRecorder::instance() {
   static EventRecorder recorder;
   return recorder;
 }
 
-void EventRecorder::push(PendingEvent* event) {
+void EventRecorder::push(PendingEvent *event) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     buffer_.push_back(std::move(*event));
@@ -63,8 +63,8 @@ std::vector<PendingEvent> EventRecorder::drain() {
 // this callback; std::chrono / mutex / vector only.
 // ---------------------------------------------------------------------------
 
-static void event_host_callback(void* data) {
-  auto* event = static_cast<PendingEvent*>(data);
+static void event_host_callback(void *data) {
+  auto *event = static_cast<PendingEvent *>(data);
   event->timestamp = wall_clock_time();
   EventRecorder::instance().push(event);
 }
@@ -74,11 +74,11 @@ static void event_host_callback(void* data) {
 // ---------------------------------------------------------------------------
 
 void record_event_on_stream(
-    int64_t stream_ptr, const std::string& event_type_name,
-    const std::string& session_id,
-    const std::unordered_map<std::string, std::string>& str_metadata,
-    const std::unordered_map<std::string, int64_t>& int_metadata) {
-  auto* event = new PendingEvent{
+    int64_t stream_ptr, const std::string &event_type_name,
+    const std::string &session_id,
+    const std::unordered_map<std::string, std::string> &str_metadata,
+    const std::unordered_map<std::string, int64_t> &int_metadata) {
+  auto *event = new PendingEvent{
       event_type_name, session_id, 0.0, str_metadata, int_metadata,
   };
   if (stream_ptr == 0) {
@@ -88,8 +88,8 @@ void record_event_on_stream(
     return;
   }
 
-  auto stream = reinterpret_cast<lmcache_stream_t>(
-      static_cast<uintptr_t>(stream_ptr));
+  auto stream =
+      reinterpret_cast<lmcache_stream_t>(static_cast<uintptr_t>(stream_ptr));
   auto err = aclrtLaunchHostFunc(stream, event_host_callback, event);
   if (err != ACL_SUCCESS) {
     delete event;
@@ -100,7 +100,7 @@ DrainResult drain_recorded_events() {
   auto events = EventRecorder::instance().drain();
   DrainResult result;
   result.reserve(events.size());
-  for (auto& e : events) {
+  for (auto &e : events) {
     result.emplace_back(std::move(e.event_type_name), std::move(e.session_id),
                         e.timestamp, std::move(e.str_metadata),
                         std::move(e.int_metadata));

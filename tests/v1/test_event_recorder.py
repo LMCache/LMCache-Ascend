@@ -15,7 +15,6 @@ import time
 import pytest
 import torch
 
-# First Party
 np_ops = pytest.importorskip(
     "lmcache_ascend.c_ops", reason="lmcache_ascend.c_ops not built"
 )

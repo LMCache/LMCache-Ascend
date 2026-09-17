@@ -3,9 +3,9 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
 #include <torch/extension.h>
 #include <torch/torch.h>
+#include <vector>
 
 // Direction of an MP KV-cache transfer (mirrors upstream kv_transfer_types.h:
 // H2D=0 LMCache->engine, D2H=1 engine->LMCache).
@@ -62,18 +62,15 @@ struct PageBufferShapeDesc {
   // Per-plane per-block dim-0 step in bytes (stride(0) * itemsize).
   int64_t plane_block_stride_bytes[4] = {0, 0, 0, 0};
 
-  template <typename ScalarType>
-  inline size_t scalars_per_head() const {
+  template <typename ScalarType> inline size_t scalars_per_head() const {
     return hs * element_size / sizeof(ScalarType);
   }
 
-  template <typename ScalarType>
-  inline size_t scalars_per_token() const {
+  template <typename ScalarType> inline size_t scalars_per_token() const {
     return nh * hs * element_size / sizeof(ScalarType);
   }
 
-  template <typename ScalarType>
-  inline size_t scalars_per_block() const {
+  template <typename ScalarType> inline size_t scalars_per_block() const {
     const size_t elems = block_stride_elems > 0
                              ? static_cast<size_t>(block_stride_elems)
                              : static_cast<size_t>(bs) * nh * hs;
@@ -116,19 +113,19 @@ struct KernelGroupSpec {
 // batch_steps within a single GIL release (configured at the pybind layer).
 // Mirrors upstream execute_object_group_transfer (mp_mem_kernels.cuh:133).
 void execute_object_group_transfer(
-    TransferDirection direction, const torch::Device& device,
+    TransferDirection direction, const torch::Device &device,
     size_t host_buffer_alignment,
-    const std::vector<KernelGroupSpec>& kernel_group_specs,
-    const std::vector<BatchStep>& batch_steps);
+    const std::vector<KernelGroupSpec> &kernel_group_specs,
+    const std::vector<BatchStep> &batch_steps);
 
 // Block-level multi-layer KV transfer between vLLM paged buffers and LMCache
 // contiguous memory objects. Mirrors upstream multi_layer_block_kv_transfer
 // (mp_mem_kernels.cuh:155). Phase 1 loops over the object batch inside this
 // entry point (one kernel launch per object).
 void multi_layer_block_kv_transfer(
-    const torch::Tensor& paged_buffer_ptrs_tensor,
-    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
-    const torch::Device& device, TransferDirection direction,
+    const torch::Tensor &paged_buffer_ptrs_tensor,
+    std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor &block_ids,
+    const torch::Device &device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);
 

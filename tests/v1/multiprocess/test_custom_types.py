@@ -17,6 +17,10 @@ from tests.bootstrap import prepare_environment
 prepare_environment()
 
 # Third Party
+# LMC-A: upstream moved wrapper dispatch to DeviceSpec.ipc_wrapper_cls and
+# the plane-aggregating NPU wrapper itself upstream (npu/ipc_wrapper.py); the
+# plugin no longer ships its own wrapper class.
+from lmcache.v1.platform.npu.ipc_wrapper import NpuIPCWrapper  # noqa: E402
 from lmcache_tests.v1.multiprocess.test_custom_types import (  # noqa: F401, E402
     get_customized_decoder,
     get_customized_encoder,
@@ -24,11 +28,6 @@ from lmcache_tests.v1.multiprocess.test_custom_types import (  # noqa: F401, E40
     test_cudaipc_wrapper_serialization,
     test_ipc_cache_engine_key_serialization,
 )
-
-# LMC-A: upstream moved wrapper dispatch to DeviceSpec.ipc_wrapper_cls and
-# the plane-aggregating NPU wrapper itself upstream (npu/ipc_wrapper.py); the
-# plugin no longer ships its own wrapper class.
-from lmcache.v1.platform.npu.ipc_wrapper import NpuIPCWrapper  # noqa: E402
 
 
 def _worker_process_deserialize_and_reconstruct(

@@ -6,8 +6,10 @@ construct ``device_ops.PageBufferShapeDesc()`` (``c_ops``). NPU kernels
 take that class by value.
 """
 
+# Future
 from __future__ import annotations
 
+# Standard
 from collections.abc import Sequence
 
 _MAX_PLANES = 4

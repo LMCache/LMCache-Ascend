@@ -21,9 +21,9 @@ using lmcache_stream_t = aclrtStream;
 // ---------------------------------------------------------------------------
 
 struct PendingEvent {
-  std::string event_type_name;  // e.g. "mp.store.start"
+  std::string event_type_name; // e.g. "mp.store.start"
   std::string session_id;
-  double timestamp;  // wall-clock, set by host callback
+  double timestamp; // wall-clock, set by host callback
   std::unordered_map<std::string, std::string> str_metadata;
   std::unordered_map<std::string, int64_t> int_metadata;
 };
@@ -33,17 +33,17 @@ struct PendingEvent {
 // ---------------------------------------------------------------------------
 
 class EventRecorder {
- public:
-  static EventRecorder& instance();
+public:
+  static EventRecorder &instance();
 
   // Called from the ACL host callback (no GIL held).
   // Takes ownership of *event, moves it into the buffer, then deletes it.
-  void push(PendingEvent* event);
+  void push(PendingEvent *event);
 
   // Called from Python (GIL held) to drain all buffered events.
   std::vector<PendingEvent> drain();
 
- private:
+private:
   EventRecorder() = default;
   std::mutex mutex_;
   std::vector<PendingEvent> buffer_;
@@ -57,10 +57,10 @@ class EventRecorder {
 // the wall-clock time and pushes to the global EventRecorder.
 // Called WITHOUT the GIL (py::call_guard<py::gil_scoped_release>).
 void record_event_on_stream(
-    int64_t stream_ptr, const std::string& event_type_name,
-    const std::string& session_id,
-    const std::unordered_map<std::string, std::string>& str_metadata,
-    const std::unordered_map<std::string, int64_t>& int_metadata);
+    int64_t stream_ptr, const std::string &event_type_name,
+    const std::string &session_id,
+    const std::unordered_map<std::string, std::string> &str_metadata,
+    const std::unordered_map<std::string, int64_t> &int_metadata);
 
 // Drain all buffered events.  Returns a list of tuples:
 //   (event_type_name, session_id, timestamp, str_metadata, int_metadata)
