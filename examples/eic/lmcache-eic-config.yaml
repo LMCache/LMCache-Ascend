@@ -16,9 +16,11 @@ eic_log_dir: "/tmp/eic_log"
 eic_log_level: 2
 eic_flag_file: "/opt/tiger/lmcache_eic/conf/eic_flag_file"
 
-# Local CPU tier in front of EIC
+# Local CPU tier in front of EIC.
+# max_local_cpu_size is expressed in GIB (LMCache multiplies it by 1024**3);
+# 512 here means ~512 GiB per engine process, not bytes.
 local_cpu: true
-max_local_cpu_size: 512000000000   # bytes per engine process
+max_local_cpu_size: 512
 chunk_size: 2048
 enable_async_loading: true
 lookup_timeout_ms: 30000

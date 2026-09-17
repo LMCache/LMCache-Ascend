@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """
-Runtime patches that make the upstream EIC remote connector work on Ascend NPU.
+Runtime patch that makes the upstream EIC remote connector importable on Ascend.
 
 The EIC connector lives in LMCache core
 (``lmcache.v1.storage_backend.connector.eic_connector``, introduced in
@@ -48,44 +48,72 @@ class _CudaLibShim:
         return _CudaNoOp()
 
 
-def _make_cudart_optional(connector_module):
-    """Replace the eager libcudart load with a guarded one.
+class _GuardedCtypes:
+    """Module-level proxy for the connector's view of ``ctypes``.
 
-    ``cuda_lib`` is only needed by the CUDA GDR receive path. When libcudart is
-    absent (Ascend CANN images), bind a no-op shim instead of failing at import
-    time; the NPU RDMA path never calls it.
+    Delegates every attribute to the real ``ctypes`` module except ``CDLL``:
+    a libcudart lookup that fails returns a no-op shim. The proxy is installed
+    once as an attribute of the connector module, so concurrent EICConnector
+    constructions share it with no global mutation or restore window, and
+    unrelated ``ctypes`` callers in the process are untouched.
     """
-    if getattr(connector_module, "_lmcache_ascend_eic_patched", False):
-        return
 
-    original_init = connector_module.EICConnector.__init__
-    original_cdll = ctypes.CDLL
+    def __init__(self, real_ctypes):
+        self._real = real_ctypes
+        self._real_cdll = real_ctypes.CDLL
 
-    def guarded_cdll(name, *a, **kw):
+    def CDLL(self, name, *args, **kwargs):
         if name == "libcudart.so":
             try:
-                return original_cdll(name, *a, **kw)
+                return self._real_cdll(name, *args, **kwargs)
             except OSError:
                 logger.info(
                     "libcudart.so not found; EIC CUDA GDR is disabled "
                     "(expected on Ascend NPU, RDMA transport is unaffected)"
                 )
                 return _CudaLibShim()
-        return original_cdll(name, *a, **kw)
+        return self._real_cdll(name, *args, **kwargs)
 
-    def patched_init(self, *args, **kwargs):
-        ctypes.CDLL = guarded_cdll
-        try:
-            original_init(self, *args, **kwargs)
-        finally:
-            ctypes.CDLL = original_cdll
+    def __getattr__(self, name):
+        return getattr(self._real, name)
 
-    connector_module.EICConnector.__init__ = patched_init
+
+def _make_cudart_optional(connector_module):
+    """Make the connector's eager libcudart load tolerant of its absence.
+
+    ``cuda_lib`` backs only the CUDA GDR receive path. When libcudart is
+    absent (Ascend CANN images), the connector module's ``ctypes`` name is
+    rebound once to a proxy that yields a no-op shim for the cudart lookup;
+    the NPU RDMA path never calls it.
+    """
+    if getattr(connector_module, "_lmcache_ascend_eic_patched", False):
+        return
+
+    # Idempotent even if a proxy is already present.
+    current = getattr(connector_module, "ctypes", None)
+    if isinstance(current, _GuardedCtypes):
+        connector_module._lmcache_ascend_eic_patched = True
+        return
+
+    connector_module.ctypes = _GuardedCtypes(ctypes)
     connector_module._lmcache_ascend_eic_patched = True
 
 
+def _core_loads_cudart_optional(connector_module) -> bool:
+    """Whether core already tolerates a missing libcudart.
+
+    Core LMCache#5141 loads libcudart defensively: ``cuda_lib`` stays None
+    without the library, RDMA still constructs, and only an explicit
+    TRANSPORT_GDR is rejected. Against such core the ctypes shim is both
+    unnecessary and wrong: a truthy CDLL stand-in makes core take its
+    load-success branch, so ``cuda_lib`` is non-None and the ``cuda_lib is
+    None`` GDR guard no longer fires.
+    """
+    return getattr(connector_module, "_LMCACHE_EIC_CUDART_OPTIONAL", False)
+
+
 def patch_eic_connector():
-    """Apply Ascend compatibility patches to the upstream EIC connector."""
+    """Apply Ascend compatibility patch to the upstream EIC connector."""
     # The module imports the vendor-only `eic` package at module scope. It is
     # not available on public PyPI and is absent in CI, so import lazily and
     # skip silently, mirroring the optional-connector convention in core.
@@ -95,6 +123,13 @@ def patch_eic_connector():
         logger.debug(
             "upstream EIC connector or its `eic` dependency is not available; "
             "skipping EIC NPU compatibility patch"
+        )
+        return
+
+    if _core_loads_cudart_optional(eic_mod):
+        logger.info(
+            "core already loads libcudart defensively; leaving the EIC "
+            "connector unpatched so its GDR guard stays effective"
         )
         return
 

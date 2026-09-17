@@ -2,198 +2,140 @@
 """
 Tests for the Ascend compatibility patch of the upstream EIC connector.
 
-The vendor `eic` client is not on public PyPI and libcudart is absent on CANN
-images, so both are stubbed. These tests verify import/init compatibility only;
-a live EIC cluster is covered in internal deployment testing.
+These tests exercise only the package boundary and never reload the real
+connector module (which binds the vendor-only ``eic`` package at import and is
+expensive to reconstruct). A throwaway module stand-in plays the connector
+role, and every sys.modules / builtins override goes through ``monkeypatch``,
+so nothing leaks into the process-global state of later tests.
 """
 
 # Standard
+import ctypes
 import sys
 import types
 
 # Third Party
 import pytest
 
-
-class _FakeStatusCode:
-    SUCCESS = 0
-    KEY_NOT_EXIST = 1
+CONNECTOR_PATH = "lmcache.v1.storage_backend.connector.eic_connector"
 
 
-class _FakeEnumValue:
-    def __init__(self, value):
-        self.value = value
+def _legacy_connector_module():
+    """A connector module as it looks before core made libcudart optional."""
+    mod = types.ModuleType(CONNECTOR_PATH)
+    mod.ctypes = ctypes
+    return mod
 
 
-class _FakeTransportType:
-    TRANSPORT_RDMA = _FakeEnumValue(2)
-    TRANSPORT_GDR = _FakeEnumValue(3)
+def _install_dummy_connector(monkeypatch, mod):
+    # Replace both the sys.modules leaf and the parent-package attribute. The
+    # patch imports the module as ``import a.b.c as x``, which resolves to the
+    # parent's already-bound ``c`` attribute even when sys.modules[c] was
+    # swapped, so overriding only sys.modules silently targets a pre-imported
+    # real leaf. monkeypatch restores both after the test.
+    import lmcache.v1.storage_backend.connector as parent
 
-    def __call__(self, value):
-        return _FakeEnumValue(value)
-
-
-class _FakeLogLevel:
-    def __call__(self, value):
-        return value
-
-
-class _FakeClient:
-    def init(self, instance_id, endpoint, option):
-        self.instance_id = instance_id
-        self.endpoint = endpoint
-        return 0
+    monkeypatch.setattr(parent, "eic_connector", mod, raising=False)
+    monkeypatch.setitem(sys.modules, CONNECTOR_PATH, mod)
+    return mod
 
 
-def _install_fake_eic(monkeypatch):
-    # lmcache.v1.memory_management imports lmcache.c_ops at module scope. The
-    # compiled extension is absent without a built lmcache/lmcache-ascend
-    # install; only pin-allocation functions use it, and these tests never call
-    # them, so stub the module.
-    c_ops = types.ModuleType("lmcache.c_ops")
-    monkeypatch.setitem(sys.modules, "lmcache.c_ops", c_ops)
+def test_patch_is_noop_when_core_marks_cudart_optional(monkeypatch):
+    # Core LMCache#5141 loads libcudart defensively. The Ascend patch must not
+    # wrap ctypes in that case: a truthy CDLL stand-in would defeat core's
+    # ``cuda_lib is None`` GDR guard.
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import _GuardedCtypes
 
-    fake = types.ModuleType("eic")
-    fake.Client = _FakeClient
-    fake.InitOption = type("InitOption", (), {})
-    fake.SetOption = type("SetOption", (), {})
-    fake.GetOption = type("GetOption", (), {})
-    fake.ExistOption = type("ExistOption", (), {})
-    fake.StringVector = type("StringVector", (), {"append": lambda self, *a: None})
-    fake.IOBuffers = type("IOBuffers", (), {"append": lambda self, *a: None})
-    fake.MemoryInfo = type("MemoryInfo", (), {})
-    fake.StatusCode = _FakeStatusCode
-    fake.TransportType = _FakeTransportType()
-    fake.LogLevel = _FakeLogLevel()
-    monkeypatch.setitem(sys.modules, "eic", fake)
-    return fake
+    mod = _legacy_connector_module()
+    mod._LMCACHE_EIC_CUDART_OPTIONAL = True
+    _install_dummy_connector(monkeypatch, mod)
 
-
-def _reload_connector():
-    import importlib
-
-    import lmcache.v1.storage_backend.connector.eic_connector as mod
-
-    return importlib.reload(mod)
-
-
-def test_patch_makes_missing_libcudart_tolerated(monkeypatch, tmp_path):
-    _install_fake_eic(monkeypatch)
-
-    mod = _reload_connector()
-    # Neutralize the metadata-heavy base __init__ after reload so the class
-    # binds to the same module object.
-    monkeypatch.setattr(mod.RemoteConnector, "__init__", lambda self, c, m: None)
-
-    cfg = tmp_path / "lmcache_eic.yaml"
-    cfg.write_text(
-        "remote_url: 'eic://127.0.0.1:12500'\n"
-        "eic_instance_id: 'test-instance'\n"
-        "eic_trans_type: 2\n"
-        "eic_thread_num: 1\n"
-        "eic_log_dir: " + str(tmp_path) + "\n"
-        "eic_kv_ttl: -1\n"
-    )
-    monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(cfg))
-
-    # Prebuilt connection probes 2048 keys via mexist; respond miss.
-    _FakeClient.mexist = lambda self, keys, opt: (
-        0,
-        types.SimpleNamespace(status_codes=[_FakeStatusCode.KEY_NOT_EXIST]),
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        patch_eic_connector,
     )
 
-    import ctypes
+    patch_eic_connector()
+    assert mod.ctypes is ctypes
+    assert not isinstance(mod.ctypes, _GuardedCtypes)
+
+
+def test_patch_applies_proxy_on_legacy_core(monkeypatch):
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        _GuardedCtypes,
+        patch_eic_connector,
+    )
+
+    mod = _install_dummy_connector(monkeypatch, _legacy_connector_module())
+
+    patch_eic_connector()
+    assert isinstance(mod.ctypes, _GuardedCtypes)
+    # The process-global ctypes module is never replaced.
+    assert not isinstance(ctypes, _GuardedCtypes)
+    assert callable(ctypes.CDLL)
+
+
+def test_patch_is_idempotent_on_legacy_core(monkeypatch):
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        _GuardedCtypes,
+        patch_eic_connector,
+    )
+
+    mod = _install_dummy_connector(monkeypatch, _legacy_connector_module())
+
+    patch_eic_connector()
+    first = mod.ctypes
+    patch_eic_connector()
+    assert mod.ctypes is first
+    assert isinstance(mod.ctypes, _GuardedCtypes)
+
+
+def test_guarded_ctypes_only_shims_cudart_and_passes_other_attributes():
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        _CudaLibShim,
+        _GuardedCtypes,
+    )
 
     real_cdll = ctypes.CDLL
 
-    def raising_cdll(name, *args, **kwargs):
+    def fake_cdll(name, *args, **kwargs):
         if name == "libcudart.so":
-            raise OSError("libcudart.so: cannot open shared object file")
+            raise OSError("cannot open shared object file")
         return real_cdll(name, *args, **kwargs)
 
-    monkeypatch.setattr(ctypes, "CDLL", raising_cdll)
+    guarded = _GuardedCtypes(ctypes)
+    guarded._real_cdll = fake_cdll
+
+    # The one library CANN images lack becomes a persisted no-op shim.
+    shim = guarded.CDLL("libcudart.so")
+    assert isinstance(shim, _CudaLibShim)
+    shim.cudaMemcpy.argtypes = [ctypes.c_void_p]
+    shim.cudaMemcpy.restype = ctypes.c_int
+    with pytest.raises(RuntimeError):
+        shim.cudaMemcpy(0, 0, 0, 0)
+    # Unknown symbols on the shim are still callable no-ops that raise.
+    with pytest.raises(RuntimeError):
+        shim.cudaSomethingElse()
+
+    # Non-CDLL attributes delegate to the real ctypes module.
+    assert guarded.c_int is ctypes.c_int
+
+
+def test_patch_skips_without_connector_module(monkeypatch):
+    # An unimportable leaf makes the dotted import raise ImportError, exactly
+    # as when the optional connector / vendor `eic` package is absent. Block
+    # both the sys.modules entry and the parent attribute, since the import
+    # resolves to a bound parent attribute first. patch_eic_connector must
+    # swallow the ImportError, not raise.
+    import lmcache.v1.storage_backend.connector as parent
+
+    monkeypatch.setitem(sys.modules, CONNECTOR_PATH, None)
+    monkeypatch.delattr(parent, "eic_connector", raising=False)
 
     from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
         patch_eic_connector,
     )
 
-    patch_eic_connector()
-
-    class _FakeLoop:
-        def call_soon_threadsafe(self, *a, **kw):
-            pass
-
-    class _FakeAllocator:
-        config = object()
-        metadata = object()
-
-    connector = mod.EICConnector(
-        "eic://127.0.0.1:12500/", _FakeLoop(), _FakeAllocator()
-    )
-    assert connector.connection.instance_id == "test-instance"
-    assert connector.connection.endpoint == "127.0.0.1:12500"
-    # No real cuda library: the signature binding lands on the no-op shim.
-    from lmcache_ascend.v1.storage_backend.connector.eic_npu import _CudaLibShim
-
-    assert isinstance(connector.cuda_lib, _CudaLibShim)
-    # The connector assigns argtypes/restype to cudaMemcpy at init.
-    assert connector.cuda_lib.cudaMemcpy.argtypes is not None
-
-
-def test_patch_keeps_real_cudart_when_present(monkeypatch, tmp_path):
-    _install_fake_eic(monkeypatch)
-    mod = _reload_connector()
-    monkeypatch.setattr(mod.RemoteConnector, "__init__", lambda self, c, m: None)
-
-    cfg = tmp_path / "lmcache_eic.yaml"
-    cfg.write_text("remote_url: 'eic://127.0.0.1:12500'\neic_instance_id: 'i'\n")
-    monkeypatch.setenv("LMCACHE_CONFIG_FILE", str(cfg))
-    _FakeClient.mexist = lambda self, keys, opt: (
-        0,
-        types.SimpleNamespace(status_codes=[_FakeStatusCode.KEY_NOT_EXIST]),
-    )
-
-    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
-        patch_eic_connector,
-    )
-
-    patch_eic_connector()
-    # With libcudart present the real ctypes binding path runs. On hosts
-    # without it (macOS CI), the library lookup itself raises OSError, which is
-    # out of scope; only assert the patch is installed.
-    assert mod._lmcache_ascend_eic_patched is True
-
-
-def test_patch_is_idempotent(monkeypatch):
-    _install_fake_eic(monkeypatch)
-    mod = _reload_connector()
-    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
-        patch_eic_connector,
-    )
-
-    patch_eic_connector()
-    first_init = mod.EICConnector.__init__
-    patch_eic_connector()
-    assert mod.EICConnector.__init__ is first_init
-
-
-def test_patch_skips_without_eic_package(monkeypatch):
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name == "eic" or name.startswith("eic."):
-            raise ImportError("No module named 'eic'")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
-        patch_eic_connector,
-    )
-
-    # Must not raise even when the vendor client is unavailable.
-    patch_eic_connector()
+    patch_eic_connector()  # no exception == the asserted behavior
 
 
 if __name__ == "__main__":

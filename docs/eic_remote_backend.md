@@ -4,12 +4,12 @@ LMCache core ships an EIC remote KV connector since [LMCache#1930](https://githu
 
 ## What this package changes
 
-The upstream `EICConnector.__init__` eagerly calls `ctypes.CDLL("libcudart.so")` to support CUDA GDR. CANN images do not ship libcudart, so importing the connector fails before the adapter can be selected. `lmcache_ascend` patches the connector at import time:
+The upstream `EICConnector.__init__` loads `libcudart.so` to support CUDA GDR. Older core releases did this eagerly, so the connector could not be imported on CANN images that do not ship libcudart. Two layers handle it:
 
-- when libcudart is absent, the CUDA binding becomes a no-op shim and the connector initializes normally;
-- the NPU deployment uses RDMA transport (`eic_trans_type: 2`), where the CUDA GDR path is never entered.
+- **Core LMCache#5141** loads the library defensively: when libcudart is absent `cuda_lib` stays `None`, RDMA still constructs, and only an explicit `TRANSPORT_GDR` configuration is rejected. No platform patch is needed on such core.
+- **`lmcache_ascend`** keeps a ctypes shim for older core that still loads eagerly. It detects the core capability marker `_LMCACHE_EIC_CUDART_OPTIONAL` and is a no-op on new core, because a truthy CDLL stand-in would also defeat core's `cuda_lib is None` GDR guard. The NPU deployment uses RDMA transport (`eic_trans_type: 2`), where the CUDA GDR path is never entered.
 
-The patch is applied automatically when `lmcache_ascend` is imported, and is a no-op when the connector or its vendor `eic` client package is absent.
+The patch is applied automatically when `lmcache_ascend` is imported, and is a no-op when the connector, its vendor `eic` client package, or the need for it is absent.
 
 No new connector, configuration key, or fork of core code is introduced.
 
@@ -21,7 +21,7 @@ No new connector, configuration key, or fork of core code is introduced.
 
 ## Configuration
 
-Use the standard LMCache config file pointed to by `LMCACHE_CONFIG_FILE`; see [`examples/eic/lmcache-eic-config.yaml`](../../examples/eic/lmcache-eic-config.yaml). Essential keys:
+Use the standard LMCache config file pointed to by `LMCACHE_CONFIG_FILE`; see [`examples/eic/lmcache-eic-config.yaml`](../examples/eic/lmcache-eic-config.yaml). Essential keys:
 
 ```yaml
 remote_url: "eic://MASTER_IP_1:12500;MASTER_IP_2:12500"
@@ -35,5 +35,5 @@ Then start the engine the same way as any other LMCache-Ascend deployment; the `
 
 ## Validation
 
-- `tests/v1/storage_backend/test_eic_npu.py` covers import/init compatibility without libcudart, idempotent patching, and graceful skip when the `eic` package is unavailable. It stubs the vendor client and does not need a live cluster.
+- `tests/v1/storage_backend/test_eic_npu.py` covers the package boundary without a live cluster or libcudart: the patch is a no-op against core that marks `_LMCACHE_EIC_CUDART_OPTIONAL`, it applies an idempotent ctypes proxy on older core, the shim is confined to the cudart lookup and never mutates process-global `ctypes`, and a missing connector/vendor package is swallowed. All `sys.modules` overrides use function-scoped `monkeypatch` so they do not leak into other tests.
 - End-to-end correctness and performance must be validated on a real Atlas + EIC cluster.
