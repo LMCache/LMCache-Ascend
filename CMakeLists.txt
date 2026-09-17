@@ -33,6 +33,14 @@ else()
     message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
+# Device kernel lives in new_kernels/ (not the kvcache-ops gitlink). Copy into
+# the GLOB path kernels/multi_layer/*.cpp so ascendc_library still picks it up.
+file(COPY
+  ${CMAKE_CURRENT_SOURCE_DIR}/new_kernels/multi_layer_block_mem_kernels.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/new_kernels/multi_layer_block_mem_kernels.h
+  ${CMAKE_CURRENT_SOURCE_DIR}/new_kernels/block_transfer_layout.h
+  DESTINATION ${CMAKE_CURRENT_SOURCE_DIR}/third_party/kvcache-ops/kernels/multi_layer)
+
 add_subdirectory(third_party/kvcache-ops)
 
 if(DEFINED ENV{USE_MINDSPORE})
