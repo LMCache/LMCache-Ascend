@@ -12,6 +12,7 @@ so nothing leaks into the process-global state of later tests.
 # Standard
 import ctypes
 import sys
+import threading
 import types
 
 # Third Party
@@ -118,6 +119,52 @@ def test_guarded_ctypes_only_shims_cudart_and_passes_other_attributes():
 
     # Non-CDLL attributes delegate to the real ctypes module.
     assert guarded.c_int is ctypes.c_int
+
+
+def test_guarded_ctypes_concurrent_cudart_lookups_never_touch_global():
+    # Regression for the review's deterministic race: the old patch swapped the
+    # process-wide ctypes.CDLL and restored it in a finally, so a constructor
+    # interleaved in that window got OSError on libcudart, and unrelated CDLL
+    # callers saw the swap. The module-level proxy has no global mutation and no
+    # restore window, so N concurrent lookups must all get a shim while the
+    # real global CDLL stays intact and callable.
+    from lmcache_ascend.v1.storage_backend.connector.eic_npu import (
+        _CudaLibShim,
+        _GuardedCtypes,
+    )
+
+    real_cdll = ctypes.CDLL
+
+    def fake_cdll(name, *args, **kwargs):
+        if name == "libcudart.so":
+            raise OSError("cannot open shared object file")
+        return real_cdll(name, *args, **kwargs)
+
+    guarded = _GuardedCtypes(ctypes)
+    guarded._real_cdll = fake_cdll
+
+    results = []
+    errors = []
+    barrier = threading.Barrier(8)
+
+    def worker():
+        try:
+            barrier.wait()
+            results.append(guarded.CDLL("libcudart.so"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, [repr(e) for e in errors]
+    assert len(results) == 8
+    assert all(isinstance(r, _CudaLibShim) for r in results)
+    # The global CDLL is never replaced, even mid-call from other threads.
+    assert ctypes.CDLL is real_cdll
 
 
 def test_patch_skips_without_connector_module(monkeypatch):
