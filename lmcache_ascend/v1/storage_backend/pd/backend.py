@@ -16,11 +16,10 @@ from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.config import LMCacheEngineConfig
-from lmcache.v1.memory_management import (
-    MemoryFormat,
-    MemoryObj,
+from lmcache.v1.memory_allocators.paged_cpu_gpu_memory_allocator import (
     PagedCpuGpuMemoryAllocator,
 )
+from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.rpc_utils import get_zmq_context
 from lmcache.v1.storage_backend.pd_backend import PDBackend, PDConfig

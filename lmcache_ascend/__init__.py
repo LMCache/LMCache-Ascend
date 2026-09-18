@@ -6,6 +6,7 @@ from ._version import __version__ as __version__  # noqa: F401  # isort:skip
 from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # isort:skip
 
 # Standard
+from typing import Any
 import sys
 
 # First Party
@@ -15,6 +16,9 @@ from lmcache_ascend import _build_info
 # is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.4.4"
 LMCACHE_ASCEND_PATCHED = False
+# Set once _patch_lazy_memory_allocator successfully swaps the pool to
+# alloc_pinned_ptr; the patch is exception-safe and retried after _patch_ops.
+_lazy_alloc_patched = False
 
 
 def _is_sglang_runtime():
@@ -23,6 +27,198 @@ def _is_sglang_runtime():
 
 def _is_vllm_runtime():
     return "vllm" in sys.modules or any("vllm" in arg for arg in sys.argv)
+
+
+def _seed_partial_lmcache_device_ops() -> None:
+    """Bridge ``lmcache.device_ops`` while ``import lmcache`` is still running.
+
+    On the serving path the plugin is first pulled in by lmcache's own
+    platform init (``NpuDeviceOps.ensure_native`` -> ``import
+    lmcache_ascend.c_ops``), i.e. in the middle of ``import lmcache`` --
+    before ``lmcache/__init__.py`` binds its ``device_ops`` singleton (which
+    lives after the platform import that invoked us). Core modules imported
+    during the patch activation (``lmcache.v1.kv_layer_groups``,
+    ``lmcache.storage_backend.serde.cachegen_decoder``, ...) do
+    ``from lmcache import device_ops`` at module level and would raise
+    ``ImportError`` on the half-initialized package, aborting the whole
+    activation -- lmcache then soft-fails to "plugin not found" and every MP
+    transfer stays on the torch baseline (~8x slower).
+
+    Seed a lazy proxy for exactly that window: ``lmcache/__init__.py``
+    overwrites the attribute with the real singleton right after platform
+    init returns, and any proxy holder bound during the window transparently
+    delegates to it on every access. No-op whenever ``device_ops`` already
+    exists (plugin imported after lmcache finished, or plugin-first).
+    """
+    # Third Party
+    import lmcache
+
+    if hasattr(lmcache, "device_ops"):
+        return
+
+    class _LazyDeviceOpsProxy:
+        """Resolve the real ``lmcache.device_ops`` singleton per access.
+
+        Accesses before lmcache binds its singleton (module-level grabs such
+        as ``system_detection``'s ``get_gpu_pci_bus_id = device_ops.
+        get_gpu_pci_bus_id``) are served from the ascend extension directly
+        -- the same function objects ``bind_native`` later puts on the real
+        instance -- and anything the extension does not export falls back to
+        the torch-baseline method, so no caller degrades to a broken binding.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            # Standard
+            import sys
+
+            real = getattr(sys.modules.get("lmcache"), "device_ops", None)
+            if real is not None and not isinstance(real, _LazyDeviceOpsProxy):
+                return getattr(real, name)
+            # First Party
+            import lmcache_ascend.c_ops as ascend_c_ops
+
+            sym = getattr(ascend_c_ops, name, None)
+            if sym is not None:
+                return sym
+            # Third Party
+            from lmcache.v1.platform.base.device_ops import DeviceOps
+
+            return getattr(DeviceOps(), name)
+
+    # Overwritten with the real singleton by lmcache's own __init__ as soon
+    # as the platform import currently in progress returns.
+    lmcache.device_ops = _LazyDeviceOpsProxy()  # type: ignore[assignment]
+
+    # Third Party
+    from lmcache.logging import init_logger
+
+    init_logger(__name__).debug("Seeded lazy lmcache.device_ops proxy (partial import)")
+
+
+def _patch_lazy_memory_allocator():
+    """Back the LazyMemoryAllocator pool with aclrtMallocHost-pinned memory.
+
+    Upstream allocates the cache-server pool with ``torch.empty`` and pins each
+    chunk post-hoc via ``torch_dev.ext.pin_memory`` (``aclrtHostRegister``).
+    ``aclrtHostRegister`` is unreliable on ``torch.empty``/malloc memory at pool
+    scale (intermittent ``507899``), so the per-chunk pins fail noisily and the
+    pool stays unpinned. The compiled ascend helper ``alloc_pinned_ptr`` instead
+    does ``aclrtMallocHost`` + an internal ``register_ptr`` in C++, yielding
+    memory that is pinned and registered at allocation time (async D2H works with
+    no post-hoc register).
+
+    This replaces ``__init__`` to source the whole pool from ``alloc_pinned_ptr``
+    (NUMA binding is intentionally not applied -- the server runs without a NUMA
+    mapping), makes ``_pin_memory_chunk`` a no-op (the pool is already pinned), and
+    frees via ``free_pinned_ptr`` at close. No-op when ``alloc_pinned_ptr`` is
+    absent (non-ascend build).
+    """
+    # Applied once; idempotent and exception-safe so it can be retried after
+    # ``_patch_ops`` sets ``lmcache.c_ops`` (the early call during ``import
+    # lmcache`` hits a circular ``import lmcache.c_ops`` and is skipped).
+    global _lazy_alloc_patched
+    if _lazy_alloc_patched:
+        return
+
+    # Standard
+    import ctypes
+    import threading
+
+    # Third Party
+    from lmcache import torch_dev
+    from lmcache.logging import init_logger
+    import torch
+
+    _logger = init_logger(__name__)
+    try:
+        # Third Party
+        from lmcache.v1.memory_allocators.lazy_memory_allocator import (
+            AddressManager,
+            LazyMemoryAllocator,
+            TensorMemoryAllocator,
+            align_to,
+        )
+    except Exception as exc:  # circular during early activation; retry later
+        _logger.debug(
+            "LazyMemoryAllocator patch deferred (lmcache.v1 not ready yet): %r",
+            exc,
+        )
+        return
+
+    def _ascend_init(
+        self: LazyMemoryAllocator,
+        init_size: int,
+        final_size: int,
+        align_bytes: int = AddressManager.ALIGN_BYTES,
+        numa_mapping: Any = None,
+    ) -> None:
+        """Mirror upstream ``__init__`` but back the buffer with aclrtMallocHost."""
+        # Lazy import: at plugin-activation time ``lmcache.c_ops`` has not yet been
+        # swapped to the ascend backend (``_patch_ops`` runs later), so resolve the
+        # ascend extension directly here, at construction time.
+        # First Party
+        import lmcache_ascend.c_ops as ascend_c_ops
+
+        self._use_numa = False
+        self._curr_size = align_to(init_size, self.PIN_CHUNK_SIZE)
+        self._final_size = align_to(final_size, self.PIN_CHUNK_SIZE)
+        try:
+            # Third Party
+            from lmcache.v1.platform import current_device_spec
+
+            pin_supported = current_device_spec.is_pin_supported
+        except ImportError:  # upstream <= #4001 exposed torch_dev.ext
+            pin_supported = torch_dev.ext.is_pin_supported
+        if not pin_supported:
+            raise RuntimeError(
+                "Backend does not support memory pinning. "
+                "LazyMemoryAllocator requires pinned memory."
+            )
+        self._pin_record: list[tuple[int, int]] = []
+        # Ensure an ACL context on this thread: aclrtMallocHost (inside
+        # alloc_pinned_ptr) fails with 107002 if no device op has run yet, e.g.
+        # on the cache-server thread. Idempotent on workers that already have one.
+        if torch.npu.is_available():
+            torch.npu.set_device(torch.npu.current_device())
+        # Whole pool from aclrtMallocHost: pinned + registered at allocation time,
+        # so no per-chunk aclrtHostRegister is needed (or reliable).
+        ptr = ascend_c_ops.alloc_pinned_ptr(self._final_size, 0)
+        arr_type = ctypes.c_uint8 * self._final_size
+        self._buffer = torch.frombuffer(arr_type.from_address(ptr), dtype=torch.uint8)
+        self._ascend_pool_ptr: int = ptr
+        self._allocator = TensorMemoryAllocator(
+            tensor=self._buffer,
+            align_bytes=align_bytes,
+            init_address_space=self._curr_size,
+        )
+        self._address_manager = self._allocator.address_manager
+        self._stop_expand = threading.Event()
+        self._expand_thread = threading.Thread(
+            target=self._expand_worker, daemon=True, name="lazy-mem-expand-thread"
+        )
+        self._expand_thread.start()
+
+    def _ascend_pin_memory_chunk(self, offset: int, size: int) -> None:
+        """No-op: the pool is already pinned by ``alloc_pinned_ptr``."""
+        return
+
+    def _ascend_close(self: LazyMemoryAllocator) -> None:
+        """Stop the expand thread and release the aclrtMallocHost allocation."""
+        # First Party
+        import lmcache_ascend.c_ops as ascend_c_ops
+
+        self._stop_expand.set()
+        self._expand_thread.join()
+        # Releases the internal register_ptr + the aclrtMallocHost allocation.
+        ascend_c_ops.free_pinned_ptr(self._ascend_pool_ptr)
+
+    LazyMemoryAllocator.__init__ = _ascend_init  # type: ignore[assignment]
+    LazyMemoryAllocator._pin_memory_chunk = _ascend_pin_memory_chunk  # type: ignore[assignment]
+    LazyMemoryAllocator.close = _ascend_close  # type: ignore[assignment]
+    _lazy_alloc_patched = True
+    _logger.info(
+        "Routed LazyMemoryAllocator pool through alloc_pinned_ptr (aclrtMallocHost)"
+    )
 
 
 def _patch_config():
@@ -259,30 +455,118 @@ def _patch_config():
 
 
 def _patch_ops():
-    # Standard
-    from enum import IntEnum
+    # Third Party
+    # Merge fallback functions that ascend c_ops doesn't implement
+    # (e.g., alloc_shm_pinned_ptr, free_shm_pinned_ptr, hugepage
+    # functions).  This must happen BEFORE any downstream module
+    # imports lmcache.c_ops, otherwise the bound reference will miss
+    # these symbols.
+    import lmcache.v1.platform.torch_ops as python_ops_fallback
 
     # First Party
     import lmcache_ascend.c_ops as ascend_c_ops
 
-    # LMCache v0.4.2 introduces GPUKVFormat enum in c_ops (CUDA pybind).
-    # Ascend c_ops doesn't have it, so we provide a compatible mock
-    # to avoid AttributeError when upstream code references it.
+    for attr_name in dir(python_ops_fallback):
+        if not attr_name.startswith("__") and not hasattr(ascend_c_ops, attr_name):
+            setattr(ascend_c_ops, attr_name, getattr(python_ops_fallback, attr_name))
+
+    # Upstream CUDA pybind exports GPUKVFormat as an alias of EngineKVFormat
+    # (csrc/lmcache_native/pybind.cpp); mirror the alias so any downstream
+    # reference resolves identically.
     if not hasattr(ascend_c_ops, "GPUKVFormat"):
+        ascend_c_ops.GPUKVFormat = ascend_c_ops.EngineKVFormat
 
-        class GPUKVFormat(IntEnum):
-            NB_NL_TWO_BS_NH_HS = 0
-            NL_X_TWO_NB_BS_NH_HS = 1
-            NL_X_NB_TWO_BS_NH_HS = 2
-            NL_X_NB_BS_HS = 3
-            TWO_X_NL_X_NBBS_NH_HS = 4
-            NL_X_NBBS_ONE_HS = 5
-            NL_X_TWO_NB_NH_BS_HS = 6
-            NL_X_NB_TWO_NH_BS_HS = 7
+    # Block kernel: 16 separate K/V, 17 packed multi-plane (MLA/DSA/DSv4).
+    # Annotation has no Tensor so MP stays in ptr mode.
+    # The host prepare_group/validate_launch pair is the SINGLE authority on
+    # which geometries launch natively: this wrapper only does
+    # tensor/descriptor conversion and lifetime management — no narrow-tail
+    # admission checks here.
+    _native_block = ascend_c_ops.multi_layer_block_kv_transfer
+    _fmt_16 = int(ascend_c_ops.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS)
+    _fmt_17 = int(ascend_c_ops.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS)
 
-        ascend_c_ops.GPUKVFormat = GPUKVFormat
+    def _paged_arg_to_ptr_tensor(paged, device):
+        """NPU cache context returns per-layer tensors; the C++ op wants int64 ptrs."""
+        import torch
+
+        if isinstance(paged, torch.Tensor):
+            return paged
+        ptrs: list[int] = []
+        for layer in paged:
+            if isinstance(layer, (tuple, list)):
+                ptrs.extend(int(plane.data_ptr()) for plane in layer)
+            else:
+                ptrs.append(int(layer.data_ptr()))
+        return torch.tensor(ptrs, dtype=torch.int64, device=device)
+
+    def multi_layer_block_kv_transfer(
+        paged_buffer_ptrs_tensor,
+        lmcache_objects_ptrs: list[int],
+        block_ids,
+        device,
+        direction,
+        shape_desc,
+        lmcache_chunk_size,
+        engine_kv_format,
+        skip_prefix_n_blocks,
+    ):
+        if int(engine_kv_format) in (_fmt_16, _fmt_17):
+            import torch
+
+            paged = _paged_arg_to_ptr_tensor(paged_buffer_ptrs_tensor, device)
+            if isinstance(block_ids, torch.Tensor):
+                block_ids = block_ids.contiguous()
+            return _native_block(
+                paged,
+                lmcache_objects_ptrs,
+                block_ids,
+                device,
+                direction,
+                shape_desc,
+                lmcache_chunk_size,
+                engine_kv_format,
+                skip_prefix_n_blocks,
+            )
+        return python_ops_fallback.multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            direction,
+            shape_desc,
+            lmcache_chunk_size,
+            engine_kv_format,
+            skip_prefix_n_blocks,
+        )
+
+    ascend_c_ops.multi_layer_block_kv_transfer = multi_layer_block_kv_transfer
+    dop = getattr(sys.modules.get("lmcache"), "device_ops", None)
+    if dop is not None:
+        dop.multi_layer_block_kv_transfer = multi_layer_block_kv_transfer
+        # bind_native may have run before this wrap; re-bind the CUDA plan
+        # surface so hasattr(device_ops, "execute_object_group_transfer")
+        # matches a CUDA build.
+        for _plan_name in (
+            "execute_object_group_transfer",
+            "KernelGroupSpec",
+            "StagingCopy",
+            "LaunchVar",
+            "BatchStep",
+        ):
+            if hasattr(ascend_c_ops, _plan_name):
+                setattr(dop, _plan_name, getattr(ascend_c_ops, _plan_name))
 
     sys.modules["lmcache.c_ops"] = ascend_c_ops
+
+    try:
+        import lmcache.v1.multiprocess.modules.lmcache_driven_transfer as _ldt
+
+        _ldt._HAS_NATIVE_OBJECT_GROUP_TRANSFER = hasattr(
+            ascend_c_ops, "execute_object_group_transfer"
+        )
+    except ImportError:
+        pass
 
 
 def _patch_storage_backend_init():
@@ -417,31 +701,6 @@ def _patch_remote_backend():
     RemoteBackend.batched_get_blocking = new_batched_get_blocking
 
 
-def _patch_multi_process():
-    # Third Party
-    import lmcache.v1.multiprocess.custom_types as lm_mp_types
-
-    # First Party
-    from lmcache_ascend.v1.multiprocess.custom_types import AscendIPCWrapper
-
-    lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
-
-
-def _patch_kv_layer_group():
-    # Third Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
-
-    # First Party
-    import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-
-    KVLayerGroupsManager.build_kv_layer_groups = (
-        ascend_kv_layer_groups.build_kv_layer_groups
-    )
-    KVLayerGroupInfo.hidden_dim_size = property(
-        ascend_kv_layer_groups.patched_hidden_dim_size
-    )
-
-
 def _patch_gpu_connector():
     """Patch CreateGPUConnector to return NPU connectors on Ascend.
 
@@ -449,28 +708,29 @@ def _patch_gpu_connector():
     as a factory function. We patch it to return Ascend NPU connectors
     instead of the default CUDA ones.
 
-    ``permute_kv_caches_to_contiguous`` must be patched on
-    ``lmcache.v1.gpu_connector.utils`` *before* importing
-    ``lmcache.v1.gpu_connector``, so the import in ``gpu_connectors`` binds
-    the Ascend implementation. If ``gpu_connectors`` was already loaded,
-    also replace its cached reference (same pattern as ``CreateGPUConnector``
-    on ``lmcache.v1.manager``).
+    ``permute_kv_caches_to_contiguous`` was renamed upstream to
+    ``attempt_permute_to_contiguous_view`` (now defined in
+    ``lmcache.v1.gpu_connector.kv_format.contiguity``). Only the kvcaches-list
+    call site in ``gpu_connectors.initialize_kvcaches_ptr`` takes the Ascend
+    override (K/V-tuple and shared-pool-view handling), so the by-value import
+    inside ``gpu_connectors`` is rebound directly -- importing the module here
+    first keeps the rebind deterministic regardless of import order. The
+    single-tensor callers of the contiguity module (cuda/cpu IPC wrappers,
+    shm) must keep upstream semantics and are left untouched.
     """
     # Standard
 
     # Third Party
-    import lmcache.v1.gpu_connector.utils as gpu_utils
+    import lmcache.v1.gpu_connector.gpu_connectors as gpu_connectors_mod
 
     # First Party
     from lmcache_ascend.v1.npu_connector.utils import permute_kv_caches_to_contiguous
 
-    gpu_utils.permute_kv_caches_to_contiguous = permute_kv_caches_to_contiguous
-
-    _gpu_connectors_mod = sys.modules.get("lmcache.v1.gpu_connector.gpu_connectors")
-    if _gpu_connectors_mod is not None:
-        _gpu_connectors_mod.permute_kv_caches_to_contiguous = (
-            permute_kv_caches_to_contiguous
-        )
+    # LMC-A: rebind the renamed symbol at its (list) call site instead of the
+    # pre-import module patch the old upstream layout required.
+    gpu_connectors_mod.attempt_permute_to_contiguous_view = (
+        permute_kv_caches_to_contiguous
+    )
 
     # Third Party
     import lmcache.v1.gpu_connector as lm_gpu_connector
@@ -487,21 +747,16 @@ def _patch_gpu_connector():
         _manager_mod.CreateGPUConnector = CreateNPUConnector
 
 
-def _patch_get_vllm_torch_dev():
-    """Patch get_vllm_torch_dev to return NPU device on Ascend.
+def _patch_logical_block_size():
+    """Wrap LMCache ``get_tokens_per_block`` when Ascend ``block_size`` is physical.
 
-    The upstream function only supports CUDA and XPU. This patch adds
-    NPU support by replacing the function with our Ascend-specific version.
+    Pre-#13242 pool math still uses ``block_size * compress_ratio``; the wrap
+    reports that span for Ascend leaves. Post-#13242 ``block_size`` is already
+    logical, so LMCache core is left unpatched. Never mutate ``spec.block_size``.
     """
-    # Third Party
-    import lmcache.integration.vllm.utils as lm_utils
+    from lmcache_ascend.integration.vllm.logical_block_size import install_overrides
 
-    # First Party
-    from lmcache_ascend.integration.vllm.utils import (
-        get_vllm_torch_dev as ascend_get_vllm_torch_dev,
-    )
-
-    lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
+    install_overrides()
 
 
 def _patch_vllm_v1_adapter():
@@ -526,6 +781,14 @@ def _patch_vllm_v1_adapter():
     vllm_lmcache_connector.LMCacheConnectorV1.handle_preemptions = handle_preemptions
 
 
+def _patch_make_page_buffer_shape_desc():
+    """Attach per-plane byte geometry to upstream's desc factory (fmt 16/17)."""
+    # First Party
+    from lmcache_ascend.v1.shape_desc import install_plane_geometry_fill
+
+    install_plane_geometry_fill()
+
+
 def _patch_cache_engine():
     # Third Party
     import lmcache.v1.cache_engine as lmc_cache_engine
@@ -546,16 +809,8 @@ def _patch_cache_engine():
 
 
 def _patch_hash_token():
-    # On OpenEuler and python3.10,
-    # the _hash_tokens func hash(None) seems to run into
-    # ASLR lead to non-deterministic hashing for builtin hash
     # Third Party
     import lmcache.v1.token_database
-
-    # First Party
-    from lmcache_ascend.v1.tokens_hash import _hash_tokens
-
-    lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
 
     # First Party
     from lmcache_ascend.v1.token_database import TokenDatabase_process_tokens
@@ -626,12 +881,14 @@ def _patch_sgl():
     )
 
     # Third Party
-    import lmcache.v1.memory_management as lmc_memory_management
+    from lmcache.v1.memory_allocators import gpu_memory_allocator as lmc_gpu_allocator
 
     # First Party
     from lmcache_ascend.v1.memory_management import GPUMemoryAllocator__init__
 
-    lmc_memory_management.GPUMemoryAllocator.__init__ = GPUMemoryAllocator__init__
+    # LMC-A: GPUMemoryAllocator moved out of lmcache.v1.memory_management in
+    # the upstream #4077 refactor; patch the class where it now lives.
+    lmc_gpu_allocator.GPUMemoryAllocator.__init__ = GPUMemoryAllocator__init__
 
 
 def _patch_rpc_utils():
@@ -701,6 +958,15 @@ if not LMCACHE_ASCEND_PATCHED:
     from functools import partial
     import sys
 
+    # Must run before any patch: the activation imports core modules that
+    # bind ``lmcache.device_ops`` at module level, which only exists once
+    # ``import lmcache`` finished -- and we are typically invoked from inside
+    # it (see the docstring).
+    _seed_partial_lmcache_device_ops()
+
+    if _build_info.__framework_name__ == "pytorch":
+        _patch_lazy_memory_allocator()
+
     _patch_config()
 
     is_sgl = _is_sglang_runtime()
@@ -715,11 +981,14 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_torch_capability()
 
     _patch_ops()
+    # Retry now that _patch_ops has set lmcache.c_ops (the early call during
+    # import lmcache hits a circular import lmcache.c_ops and is skipped).
+    _patch_lazy_memory_allocator()
     if is_vllm:
-        _patch_get_vllm_torch_dev()
         _patch_gpu_connector()
 
     _patch_hash_token()
+    _patch_make_page_buffer_shape_desc()
 
     _patch_cachegen()
     _patch_remote_backend()
@@ -729,12 +998,9 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_storage_manager()
         _patch_transfer_channel()
         _patch_cacheblend()
-        _patch_multi_process()
         _patch_lookup_client()
         _patch_cache_controller_worker()
         _patch_rpc_utils()
-
-    _patch_kv_layer_group()
 
     if is_sgl:
         _patch_sgl()
@@ -744,6 +1010,7 @@ if not LMCACHE_ASCEND_PATCHED:
 
         _patch_lookup_client_factory()
         _patch_vllm_v1_adapter()
+        _patch_logical_block_size()
 
         _patch_cache_engine()
 
