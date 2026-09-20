@@ -283,6 +283,37 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+class InvalidRequestBody(ValueError):
+    """A request body that cannot be processed as a JSON object."""
+
+
+async def parse_request_body(request: Request) -> dict:
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidRequestBody("Request body must contain valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise InvalidRequestBody("Request body must be a JSON object")
+    return payload
+
+
+@app.exception_handler(InvalidRequestBody)
+async def handle_invalid_request_body(
+    _request: Request, exc: InvalidRequestBody
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": {
+                "message": str(exc),
+                "type": "invalid_request_error",
+                "param": "body",
+                "code": None,
+            }
+        },
+    )
+
+
 @app.exception_handler(UpstreamServiceError)
 async def handle_upstream_service_error(
     _request: Request, exc: UpstreamServiceError
@@ -1097,9 +1128,8 @@ async def handle_completions(request: Request):
     decoder_state = None
     decoder_released = False
     route_info = {}
+    req_data = await parse_request_body(request)
     try:
-        req_data = await request.json()
-
         try:
             prompt = validate_completion_prompt(req_data)
         except ValueError as exc:
@@ -1424,8 +1454,9 @@ async def handle_chat_completions(request: Request):
     decoder_state = None
     decoder_released = False
     route_info = {}
+    req_data = await parse_request_body(request)
     try:
-        req_data = normalize_chat_request(await request.json())
+        req_data = normalize_chat_request(req_data)
 
         render_client = round_robin_pick_client(
             app.state.prefill_clients, next(tokenization_round_robin_counter)

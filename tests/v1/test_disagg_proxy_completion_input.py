@@ -160,6 +160,53 @@ def test_invalid_prompt_returns_400_before_backend_or_admission(proxy, payload):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("endpoint", ["/v1/completions", "/v1/chat/completions"])
+@pytest.mark.parametrize(
+    "body", [b"", b"   ", b"{", b"\xff", b"null", b"[]", b'"hello"', b"123"]
+)
+def test_invalid_request_body_returns_400_before_backend(proxy, endpoint, body):
+    async def scenario():
+        proxy.pick_up_tokenization_client = Mock()
+        proxy.send_request_to_service = AsyncMock()
+        proxy.select_prefiller = AsyncMock()
+        proxy.select_decoder = AsyncMock()
+        proxy.acquire_pd_buffer_slots = AsyncMock()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy"
+        ) as client:
+            response = await client.post(endpoint, content=body)
+        assert response.status_code == 400
+        error = response.json()["error"]
+        assert error["type"] == "invalid_request_error"
+        assert error["param"] == "body"
+        assert error["code"] is None
+        assert "Request body must" in error["message"]
+        proxy.pick_up_tokenization_client.assert_not_called()
+        for mock in (
+            proxy.send_request_to_service,
+            proxy.select_prefiller,
+            proxy.select_decoder,
+            proxy.acquire_pd_buffer_slots,
+        ):
+            mock.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload", [{}, {"messages": [{"role": "user", "content": "hello"}]}]
+)
+def test_parse_request_body_preserves_json_objects(proxy, payload):
+    request = SimpleNamespace(json=AsyncMock(return_value=payload))
+    assert asyncio.run(proxy.parse_request_body(request)) is payload
+
+
+def test_parse_request_body_does_not_mask_unrelated_errors(proxy):
+    request = SimpleNamespace(json=AsyncMock(side_effect=RuntimeError("read failed")))
+    with pytest.raises(RuntimeError, match="read failed"):
+        asyncio.run(proxy.parse_request_body(request))
+
+
 def test_tokenize_error_preserves_upstream_response(proxy):
     async def scenario():
         body = b'{"error":{"message":"invalid model"}}'
