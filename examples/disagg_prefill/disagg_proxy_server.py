@@ -21,9 +21,10 @@ from disagg_proxy_request import (
     normalize_chat_request,
     parse_chat_render_output,
     upstream_service_error_from_response,
+    validate_completion_prompt,
 )
 from fastapi import FastAPI, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from lmcache.logging import init_logger
 from lmcache.v1.storage_backend.pd_backend import (
     PDMsg,
@@ -1099,16 +1100,35 @@ async def handle_completions(request: Request):
     try:
         req_data = await request.json()
 
-        tokenization_client = pick_up_tokenization_client(request)
+        try:
+            prompt = validate_completion_prompt(req_data)
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": {
+                        "message": str(exc),
+                        "type": "invalid_request_error",
+                        "param": "prompt",
+                        "code": None,
+                    }
+                },
+            )
 
-        tokenize_output = await send_request_to_service(
-            tokenization_client.client, "/tokenize", {"prompt": req_data["prompt"]}
-        )
-        tokenize_output = tokenize_output.json()
-        prompt_token_count = len(tokenize_output["tokens"])
+        tokenization_client_name = None
+        if isinstance(prompt, str):
+            tokenization_client = pick_up_tokenization_client(request)
+            tokenization_client_name = tokenization_client.name
+            tokenize_output = await send_request_to_service(
+                tokenization_client.client, "/tokenize", {"prompt": prompt}
+            )
+            prompt_token_ids = tokenize_output.json()["tokens"]
+        else:
+            prompt_token_ids = prompt
+        prompt_token_count = len(prompt_token_ids)
         prefill_req_data, decode_req_data = build_phase_requests(
             req_data,
-            tokenize_output["tokens"],
+            prompt_token_ids,
             is_chat=False,
         )
 
@@ -1123,7 +1143,7 @@ async def handle_completions(request: Request):
                     "prompt_token_count": prompt_token_count,
                     "chosen_prefiller": prefiller_state.name,
                     "chosen_decoder": "prefill-only",
-                    "tokenization_client": tokenization_client.name,
+                    "tokenization_client": tokenization_client_name,
                     "pd_transfer_mode": "prefill-only",
                     "pd_buffer_admission_enabled": False,
                 }
@@ -1177,7 +1197,7 @@ async def handle_completions(request: Request):
                 "endpoint": "/v1/completions",
                 "prompt_token_count": prompt_token_count,
                 "chosen_decoder": decoder_state.name,
-                "tokenization_client": tokenization_client.name,
+                "tokenization_client": tokenization_client_name,
             }
         )
         decode_client = decoder_state.client_info

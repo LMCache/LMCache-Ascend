@@ -6,6 +6,27 @@ from typing import Any
 DEFAULT_COMPLETION_MAX_TOKENS = 16
 
 
+def validate_completion_prompt(request_data: Any) -> str | list[int]:
+    """Accept one text prompt or an already-tokenized prompt without mutation."""
+    if not isinstance(request_data, dict) or "prompt" not in request_data:
+        raise ValueError("A JSON object with a prompt field is required")
+    prompt = request_data["prompt"]
+    if isinstance(prompt, str):
+        return prompt
+    if isinstance(prompt, list):
+        if not prompt:
+            raise ValueError("Token ID prompt must not be empty")
+        if all(type(token) is int and token >= 0 for token in prompt):
+            return list(prompt)
+        if all(isinstance(item, str) for item in prompt) or any(
+            isinstance(item, list) for item in prompt
+        ):
+            raise ValueError("Batch prompts are not supported by this PD proxy")
+    raise ValueError(
+        "prompt must be a string or a non-empty list of non-negative integer token IDs"
+    )
+
+
 class UpstreamServiceError(Exception):
     """An HTTP error response returned by a proxied vLLM service."""
 
