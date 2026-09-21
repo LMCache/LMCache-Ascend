@@ -1,0 +1,22 @@
+local_cpu: False # Enable local CPU RAM cache for fast access
+
+enable_pd: True
+transfer_channel: "hixl"
+pd_role: "sender"
+pd_pull_mode: False
+pd_delay_pull: False
+pd_pull_done_port: [7600] # per TP instance (TP=1 here; only used in pull mode)
+pd_use_cpu_offload: False
+pd_cpu_buffer_size: 21474836480 # 20GB — inert unless pd_use_cpu_offload=True
+pd_peer_host: "localhost" # replace with the host ip
+pd_proxy_host: "localhost" # replace with the proxy ip
+pd_proxy_port: 7500 # replace with the proxy port
+pd_buffer_size: 2415919104 # Transfer buffer size in bytes — must match decoder.
+                           # = 64 pages x 36 MB, aligned with the KV page
+                           # [2, 36, 256, 1024] fp16.
+pd_buffer_device: "npu" # Use NPU memory for buffer
+
+# For LMCache 0.3.12, we see that for small prompt
+# prefill would not send the unfull chunk to the decoder.
+# setting this to true will ensure the pd transfer occurs even for small prompts.
+save_unfull_chunk: True # Save unfull chunk to disk
