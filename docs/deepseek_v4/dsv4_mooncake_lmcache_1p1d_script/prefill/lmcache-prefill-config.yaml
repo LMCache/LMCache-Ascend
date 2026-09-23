@@ -1,0 +1,13 @@
+chunk_size: 512
+local_cpu: true
+max_local_cpu_size: 80
+enable_async_loading: false
+
+store_async: true
+
+internal_api_server_enabled: true
+internal_api_server_host: "0.0.0.0"
+internal_api_server_port_start: 3999
+
+extra_config:
+  save_only_first_rank: false
