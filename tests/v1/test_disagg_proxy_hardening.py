@@ -220,6 +220,171 @@ def test_completion_sse_does_not_hide_protocol_errors(backend, wire):
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("routed", [False, True])
+def test_route_error_logging_requires_selected_route(
+    backend, monkeypatch, chat, routed
+):
+    async def scenario():
+        async def send(client, endpoint, data):
+            if routed and endpoint.endswith("/render"):
+                return FakeResponse(
+                    {"token_ids": [10, 20], "sampling_params": {"max_tokens": 4}}
+                )
+            raise ValueError("service failed")
+
+        monkeypatch.setattr(proxy, "send_request_to_service", send)
+        preprocessing_client = SimpleNamespace(client="p", name="p")
+        monkeypatch.setattr(
+            proxy.app.state, "prefill_clients", [preprocessing_client], raising=False
+        )
+        monkeypatch.setattr(
+            proxy,
+            "pick_up_tokenization_client",
+            Mock(return_value=preprocessing_client),
+        )
+        handler = proxy.handle_chat_completions if chat else proxy.handle_completions
+        payload = (
+            {"messages": [{"role": "user", "content": "hi"}]}
+            if chat
+            else {"prompt": [10, 20] if routed else "hello"}
+        )
+        with pytest.raises(ValueError, match="service failed"):
+            await handler(FakeRequest(payload))
+        errors = [
+            call.args[1]
+            for call in proxy.log_route_event.call_args_list
+            if call.args[0] == "proxy_route_error"
+        ]
+        assert len(errors) == int(routed)
+        if routed:
+            assert errors[0]["chosen_decoder"] == "d"
+            assert errors[0]["prefiller_state_after_release"] == {}
+            assert errors[0]["decoder_state_after_release"] == {}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("disconnect", ["before_body", "during_body", "receive"])
+def test_stream_disconnect_releases_resources(backend, monkeypatch, disconnect):
+    async def scenario():
+        body_sent = asyncio.Event()
+
+        async def send(message):
+            if disconnect == "before_body":
+                raise OSError("connection closed before body")
+            if message["type"] == "http.response.body":
+                body_sent.set()
+                if disconnect == "during_body":
+                    raise OSError("connection closed during body")
+
+        async def receive():
+            await body_sent.wait()
+            return {"type": "http.disconnect"}
+
+        # Make the native ASGI receive-disconnect cancel an actual waiting stream.
+        if disconnect == "receive":
+
+            async def wait_ready(*args):
+                await asyncio.Event().wait()
+
+            monkeypatch.setattr(proxy, "wait_decode_kv_ready", wait_ready)
+        response = await proxy.handle_completions(
+            FakeRequest({"prompt": [10, 20], "stream": True})
+        )
+        scope = {
+            "type": "http",
+            "asgi": {"spec_version": "2.0" if disconnect == "receive" else "2.4"},
+        }
+        try:
+            await asyncio.wait_for(response(scope, receive, send), 1)
+        except OSError:
+            assert disconnect != "receive"
+        except Exception as exc:
+            assert disconnect != "receive"
+            assert type(exc).__name__ == "ClientDisconnect"
+        proxy.release_prefiller.assert_awaited_once()
+        proxy.release_decoder.assert_awaited_once()
+        proxy.release_pd_buffer_slots.assert_awaited_once()
+        assert proxy.release_decoder.await_args.kwargs["success"] is False
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("chat", [False, True])
+def test_decoder_stream_is_closed_before_disconnect_returns(backend, monkeypatch, chat):
+    # Third Party
+    from starlette.requests import ClientDisconnect
+
+    async def scenario():
+        closed = []
+        retained = []
+
+        async def upstream_chunks():
+            try:
+                yield proxy.encode_sse_data(backend.decoded)
+                await asyncio.Event().wait()
+            finally:
+                closed.append(True)
+
+        def stream(*args):
+            chunks = upstream_chunks()
+            retained.append(chunks)
+            return chunks
+
+        original_events = proxy.completion_decode_events
+
+        def events(*args):
+            iterator = original_events(*args)
+            retained.append(iterator)
+            return iterator
+
+        monkeypatch.setattr(proxy, "completion_decode_events", events)
+        monkeypatch.setattr(
+            proxy, "stream_service_response", mock_streaming_service(stream)
+        )
+        if chat:
+            original_send = proxy.send_request_to_service
+
+            async def send_request(client, endpoint, data):
+                if endpoint.endswith("/render"):
+                    return FakeResponse(
+                        {"token_ids": [10, 20], "sampling_params": {"max_tokens": 4}}
+                    )
+                return await original_send(client, endpoint, data)
+
+            monkeypatch.setattr(proxy, "send_request_to_service", send_request)
+            monkeypatch.setattr(
+                proxy.app.state,
+                "prefill_clients",
+                [SimpleNamespace(client="p", name="p")],
+            )
+        handler = proxy.handle_chat_completions if chat else proxy.handle_completions
+        request = (
+            {"messages": [{"role": "user", "content": "hi"}]}
+            if chat
+            else {"prompt": [10, 20]}
+        )
+        response = await handler(FakeRequest(dict(request, stream=True)))
+        bodies = 0
+
+        async def send(message):
+            nonlocal bodies
+            if message["type"] == "http.response.body":
+                bodies += 1
+                if bodies == (1 if chat else 2):
+                    raise OSError("disconnect during decoder output")
+
+        with pytest.raises(ClientDisconnect):
+            await response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}}, AsyncMock(), send
+            )
+        assert closed == [True]
+        proxy.release_decoder.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize(
     "exit_mode", ["normal", "cancel", "upstream_error", "close_timeout"]
 )
@@ -267,5 +432,110 @@ def test_service_stream_owns_http_response(monkeypatch, exit_mode):
             else:
                 await consume()
         assert closed == [True]
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_continues_after_one_release_fails(backend, monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(
+            proxy,
+            "send_request_to_service",
+            AsyncMock(side_effect=ValueError("prefill failed")),
+        )
+        monkeypatch.setattr(
+            proxy,
+            "release_prefiller",
+            AsyncMock(side_effect=RuntimeError("release failed")),
+        )
+        with pytest.raises(ValueError, match="prefill failed"):
+            await proxy.handle_completions(FakeRequest({"prompt": [10, 20]}))
+        proxy.release_decoder.assert_awaited_once()
+        proxy.release_pd_buffer_slots.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_retries_only_unreleased_resources(backend, monkeypatch):
+    async def scenario():
+        release_slots = AsyncMock(side_effect=[RuntimeError("release failed"), None])
+        monkeypatch.setattr(proxy, "release_pd_buffer_slots", release_slots)
+        resources = proxy.RequestResources(
+            prompt_token_count=2, decoder_state=backend.d, slots=2, acquired=True
+        )
+        assert await resources.cleanup(error="disconnect") is False
+        assert not resources.pd_slots_released
+        assert resources.decoder_released
+        assert await resources.cleanup(error="retry") is True
+        assert resources.pd_slots_released
+        assert release_slots.await_count == 2
+        proxy.release_decoder.assert_awaited_once()
+        assert await resources.cleanup(error="already released") is True
+        assert release_slots.await_count == 2
+
+    asyncio.run(scenario())
+
+
+def test_local_cleanup_waits_for_lock_instead_of_abandoning_permits(monkeypatch):
+    # First Party
+    from tests.v1.test_disagg_proxy_server import _decoder_state
+
+    async def scenario():
+        # Network close deadlines must not abort local accounting under contention.
+        monkeypatch.setattr(proxy, "STREAM_CLOSE_TIMEOUT", 0.01)
+        decoder = _decoder_state()
+        decoder.active_decode_requests = 1
+        decoder.active_decode_tokens = 2
+        decoder.pd_buffer_semaphore = proxy.WeightedSemaphore(2)
+        await decoder.pd_buffer_semaphore.acquire(2)
+        monkeypatch.setattr(
+            proxy.app.state, "decoder_lock", asyncio.Lock(), raising=False
+        )
+        resources = proxy.RequestResources(
+            prompt_token_count=2, decoder_state=decoder, slots=2, acquired=True
+        )
+        async with decoder.pd_buffer_semaphore._lock:
+            task = asyncio.create_task(resources.cleanup(error="disconnect"))
+            await asyncio.sleep(0.03)
+            pending = not task.done()
+        await asyncio.wait_for(task, 1)
+        assert pending
+        assert decoder.pd_buffer_semaphore.available == 2
+        assert decoder.active_decode_requests == decoder.active_decode_tokens == 0
+        assert resources.pd_slots_released
+
+    asyncio.run(scenario())
+
+
+def test_cleanup_survives_cancel_scope_and_repeated_task_cancel(backend, monkeypatch):
+    async def scenario():
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def release(*args, **kwargs):
+            started.set()
+            await finish.wait()
+            return {}
+
+        monkeypatch.setattr(proxy, "release_decoder", AsyncMock(side_effect=release))
+        resources = proxy.RequestResources(
+            prompt_token_count=2, decoder_state=backend.d, slots=2, acquired=True
+        )
+
+        async def run():
+            with anyio.CancelScope() as scope:
+                scope.cancel()
+                await resources.cleanup(error="cancelled")
+
+        task = asyncio.create_task(run())
+        await asyncio.wait_for(started.wait(), 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        finish.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await resources.cleanup(error="again")
+        proxy.release_decoder.assert_awaited_once()
+        proxy.release_pd_buffer_slots.assert_awaited_once()
 
     asyncio.run(scenario())

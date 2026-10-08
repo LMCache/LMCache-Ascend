@@ -1067,6 +1067,97 @@ async def release_pd_buffer_slots(
     await decoder_state.pd_buffer_semaphore.release(slots)
 
 
+@dataclass
+class RequestResources:
+    prompt_token_count: int = 0
+    prefiller_state: Optional[PrefillerState] = None
+    decoder_state: Optional[DecoderState] = None
+    slots: int = 0
+    acquired: bool = False
+    prefiller_released: bool = False
+    decoder_released: bool = False
+    pd_slots_released: bool = False
+    prefiller_snapshot: Optional[dict] = None
+    decoder_snapshot: Optional[dict] = None
+    cleanup_task: Optional[asyncio.Task] = None
+
+    async def release_prefiller(self, **kwargs):
+        if self.prefiller_state is None or self.prefiller_released:
+            return None
+        self.prefiller_snapshot = await release_prefiller(
+            self.prefiller_state, self.prompt_token_count, **kwargs
+        )
+        self.prefiller_released = True
+        return self.prefiller_snapshot
+
+    async def release_decoder(self, **kwargs):
+        if self.decoder_state is None or self.decoder_released:
+            return self.decoder_snapshot
+        self.decoder_snapshot = await release_decoder(
+            self.decoder_state, self.prompt_token_count, **kwargs
+        )
+        self.decoder_released = True
+        return self.decoder_snapshot
+
+    async def release_slots(self):
+        if self.acquired and not self.pd_slots_released:
+            await release_pd_buffer_slots(self.decoder_state, self.slots)
+            self.pd_slots_released = True
+
+    async def _cleanup(self, error, decode_ms):
+        complete = True
+        for release, kwargs in (
+            (self.release_slots, {}),
+            (self.release_prefiller, {"success": False, "error": error}),
+            (
+                self.release_decoder,
+                {"success": error is None, "error": error, "decode_ms": decode_ms},
+            ),
+        ):
+            try:
+                await release(**kwargs)
+            except Exception:
+                complete = False
+                logger.exception("Proxy request cleanup failed in %s", release.__name__)
+        return complete
+
+    async def cleanup(self, *, error=None, decode_ms=None) -> bool:
+        # Join one shielded task so cancellation cannot abandon local accounting.
+        # A later call may retry failed releases, but never successful ones.
+        if self.cleanup_task is None:
+            self.cleanup_task = asyncio.create_task(self._cleanup(error, decode_ms))
+        task = self.cleanup_task
+        cancelled = False
+        with anyio.CancelScope(shield=True):
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            complete = task.result()
+        if not complete and self.cleanup_task is task:
+            self.cleanup_task = None
+        if cancelled:
+            raise asyncio.CancelledError
+        return complete
+
+
+class ResourceStreamingResponse(StreamingResponse):
+    def __init__(self, content, resources: RequestResources):
+        super().__init__(content, media_type="text/event-stream")
+        self.resources = resources
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            try:
+                with anyio.CancelScope(shield=True):
+                    await self.body_iterator.aclose()
+            finally:
+                await self.resources.cleanup(error="stream response disconnected")
+
+
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
     global counter, stats_calculator
@@ -1074,14 +1165,7 @@ async def handle_completions(request: Request):
     req_id = uuid.uuid4().hex
 
     st = time.time()
-    slots = 0  # slots to release on error; set after successful acquire only
-    acquired = False
-    pd_slots_released = False
-    prompt_token_count = 0
-    prefiller_state = None
-    prefiller_released = False
-    decoder_state = None
-    decoder_released = False
+    resources = RequestResources()
     route_info = {}
     req_data = await parse_request_body(request)
     try:
@@ -1110,7 +1194,7 @@ async def handle_completions(request: Request):
             prompt_token_ids = tokenize_output.json()["tokens"]
         else:
             prompt_token_ids = prompt
-        prompt_token_count = len(prompt_token_ids)
+        resources.prompt_token_count = len(prompt_token_ids)
         prefill_req_data, decode_req_data = build_phase_requests(
             req_data,
             prompt_token_ids,
@@ -1118,15 +1202,17 @@ async def handle_completions(request: Request):
         )
 
         if decode_req_data["max_tokens"] == 0:
-            prefiller_state, prefiller_info = await select_prefiller(prompt_token_count)
-            prefill_client = prefiller_state.client_info
+            resources.prefiller_state, prefiller_info = await select_prefiller(
+                resources.prompt_token_count
+            )
+            prefill_client = resources.prefiller_state.client_info
             route_info = dict(prefiller_info)
             route_info.update(
                 {
                     "req_id": req_id,
                     "endpoint": "/v1/completions",
-                    "prompt_token_count": prompt_token_count,
-                    "chosen_prefiller": prefiller_state.name,
+                    "prompt_token_count": resources.prompt_token_count,
+                    "chosen_prefiller": resources.prefiller_state.name,
                     "chosen_decoder": "prefill-only",
                     "tokenization_client": tokenization_client_name,
                     "pd_transfer_mode": "prefill-only",
@@ -1140,13 +1226,10 @@ async def handle_completions(request: Request):
                 prefill_client.client, "/v1/completions", prefill_req_data
             )
             prefill_ms = (time.time() - prefill_start) * 1000
-            prefiller_release_state = await release_prefiller(
-                prefiller_state,
-                prompt_token_count,
+            prefiller_release_state = await resources.release_prefiller(
                 success=True,
                 prefill_ms=prefill_ms,
             )
-            prefiller_released = True
             route_info.update(
                 {
                     "pd_slot_count": 0,
@@ -1168,33 +1251,41 @@ async def handle_completions(request: Request):
             log_route_event("proxy_route_complete", complete_payload)
             return prefill_completion_response(prefill_output, req_data)
 
-        decoder_state, decoder_info = await select_decoder(prompt_token_count)
+        resources.decoder_state, decoder_info = await select_decoder(
+            resources.prompt_token_count
+        )
         route_info = dict(decoder_info)
         route_info.update(
             {
                 "req_id": req_id,
                 "endpoint": "/v1/completions",
-                "prompt_token_count": prompt_token_count,
-                "chosen_decoder": decoder_state.name,
+                "prompt_token_count": resources.prompt_token_count,
+                "chosen_decoder": resources.decoder_state.name,
                 "tokenization_client": tokenization_client_name,
             }
         )
-        decode_client = decoder_state.client_info
-        prefiller_state, prefiller_info = await select_prefiller(prompt_token_count)
+        decode_client = resources.decoder_state.client_info
+        resources.prefiller_state, prefiller_info = await select_prefiller(
+            resources.prompt_token_count
+        )
         route_info.update(prefiller_info)
-        prefill_client = prefiller_state.client_info
+        prefill_client = resources.prefiller_state.client_info
         route_info.update(
             {
-                "chosen_prefiller": prefiller_state.name,
+                "chosen_prefiller": resources.prefiller_state.name,
             }
         )
         log_route_event("proxy_route_selected", route_info)
 
         # Acquire decoder PD buffer slots before prefill when mode-aware
         # admission is enabled. Delay-pull mode skips buffer-size admission.
-        slots, pd_slot_wait_ms, acquired = await acquire_pd_buffer_slots(
-            decoder_state,
-            prompt_token_count,
+        (
+            resources.slots,
+            pd_slot_wait_ms,
+            resources.acquired,
+        ) = await acquire_pd_buffer_slots(
+            resources.decoder_state,
+            resources.prompt_token_count,
         )
 
         disagg_spec = {
@@ -1216,16 +1307,13 @@ async def handle_completions(request: Request):
             prefill_client.client, "/v1/completions", prefill_req_data
         )
         prefill_ms = (time.time() - prefill_start) * 1000
-        prefiller_release_state = await release_prefiller(
-            prefiller_state,
-            prompt_token_count,
+        prefiller_release_state = await resources.release_prefiller(
             success=True,
             prefill_ms=prefill_ms,
         )
-        prefiller_released = True
         route_info.update(
             {
-                "pd_slot_count": slots,
+                "pd_slot_count": resources.slots,
                 "pd_slot_wait_ms": pd_slot_wait_ms,
                 "prefill_ms": prefill_ms,
                 "prefiller_state_after_release": prefiller_release_state,
@@ -1240,11 +1328,8 @@ async def handle_completions(request: Request):
         if prefill_output["choices"][0].get("finish_reason") == "stop":
             # Transfer may already be in flight; retain the normal admission boundary.
             await wait_decode_kv_ready(req_id, num_tp_rank)
-            if acquired:
-                await release_pd_buffer_slots(decoder_state, slots)
-                pd_slots_released = True
-            await release_decoder(decoder_state, prompt_token_count, success=True)
-            decoder_released = True
+            await resources.release_slots()
+            await resources.release_decoder(success=True)
             log_route_event(
                 "proxy_route_complete",
                 dict(route_info, total_ms=(time.time() - st) * 1000),
@@ -1263,7 +1348,6 @@ async def handle_completions(request: Request):
 
         # Stream response from decode service
         async def generate_stream():
-            nonlocal decoder_released, pd_slots_released
             kv_ready_wait_ms = None
             decode_stream_ms = None
             stream_error = None
@@ -1273,9 +1357,7 @@ async def handle_completions(request: Request):
                 kv_ready_wait_start = time.time()
                 await wait_decode_kv_ready(req_id, num_tp_rank)
                 kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
-                if acquired:
-                    await release_pd_buffer_slots(decoder_state, slots)
-                    pd_slots_released = True
+                await resources.release_slots()
 
                 decode_stream_start = time.time()
                 async with stream_service_response(
@@ -1287,22 +1369,11 @@ async def handle_completions(request: Request):
                         yield chunk
                 decode_stream_ms = (time.time() - decode_stream_start) * 1000
             except BaseException as exc:
-                stream_error = str(exc)
+                stream_error = str(exc) or type(exc).__name__
                 raise
             finally:
-                if acquired and not pd_slots_released:
-                    await release_pd_buffer_slots(decoder_state, slots)
-                    pd_slots_released = True
-                decoder_release_state = None
-                if decoder_state is not None and not decoder_released:
-                    decoder_release_state = await release_decoder(
-                        decoder_state,
-                        prompt_token_count,
-                        success=stream_error is None,
-                        decode_ms=decode_stream_ms,
-                        error=stream_error,
-                    )
-                    decoder_released = True
+                await resources.cleanup(error=stream_error, decode_ms=decode_stream_ms)
+                decoder_release_state = resources.decoder_snapshot
                 complete_payload = dict(route_log_base)
                 complete_payload.update(
                     {
@@ -1316,55 +1387,35 @@ async def handle_completions(request: Request):
                 log_route_event("proxy_route_complete", complete_payload)
 
         if decode_req_data["stream"]:
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return ResourceStreamingResponse(generate_stream(), resources)
 
         await wait_decode_kv_ready(req_id, num_tp_rank)
-        if acquired:
-            await release_pd_buffer_slots(decoder_state, slots)
-            pd_slots_released = True
+        await resources.release_slots()
         decode_start = time.time()
         decoded = await send_request_to_service(
             decode_client.client, "/v1/completions", decode_req_data
         )
         output = merge_completion(prefill_output, decoded.json())
-        await release_decoder(
-            decoder_state,
-            prompt_token_count,
+        await resources.release_decoder(
             success=True,
             decode_ms=(time.time() - decode_start) * 1000,
         )
-        decoder_released = True
         log_route_event(
             "proxy_route_complete", dict(route_info, total_ms=(time.time() - st) * 1000)
         )
         return JSONResponse(output)
 
     except (Exception, asyncio.CancelledError) as e:
-        if prefiller_state is not None and not prefiller_released:
-            release_state = await release_prefiller(
-                prefiller_state,
-                prompt_token_count,
-                success=False,
-                error=str(e),
-            )
-            route_info["prefiller_state_after_release"] = release_state
-        if decoder_state is not None and not decoder_released:
-            release_state = await release_decoder(
-                decoder_state,
-                prompt_token_count,
-                success=False,
-                error=str(e),
-            )
-            route_info["decoder_state_after_release"] = release_state
-            decoder_released = True
-        if decoder_state is not None and acquired and not pd_slots_released:
-            await release_pd_buffer_slots(decoder_state, slots)
-            pd_slots_released = True
+        await resources.cleanup(error=str(e) or type(e).__name__)
         if route_info:
+            route_info.update(
+                prefiller_state_after_release=resources.prefiller_snapshot,
+                decoder_state_after_release=resources.decoder_snapshot,
+            )
             error_payload = dict(route_info)
             error_payload.update(
                 {
-                    "pd_slot_count": slots,
+                    "pd_slot_count": resources.slots,
                     "total_ms": (time.time() - st) * 1000,
                     "error": str(e),
                 }
@@ -1388,14 +1439,7 @@ async def handle_chat_completions(request: Request):
     req_id = uuid.uuid4().hex
 
     st = time.time()
-    slots = 0  # slots to release on error; set after successful acquire only
-    acquired = False
-    pd_slots_released = False
-    prompt_token_count = 0
-    prefiller_state = None
-    prefiller_released = False
-    decoder_state = None
-    decoder_released = False
+    resources = RequestResources()
     route_info = {}
     req_data = await parse_request_body(request)
     try:
@@ -1413,43 +1457,51 @@ async def handle_chat_completions(request: Request):
         prompt_token_ids, resolved_max_tokens = parse_chat_render_output(
             render_output.json()
         )
-        prompt_token_count = len(prompt_token_ids)
+        resources.prompt_token_count = len(prompt_token_ids)
         prefill_req_data, decode_req_data = build_chat_phase_requests(
             req_data,
             prompt_token_ids,
             handoff_id=req_id,
         )
 
-        decoder_state, decoder_info = await select_decoder(prompt_token_count)
+        resources.decoder_state, decoder_info = await select_decoder(
+            resources.prompt_token_count
+        )
         route_info = dict(decoder_info)
         route_info.update(
             {
                 "req_id": req_id,
                 "endpoint": "/v1/chat/completions",
-                "prompt_token_count": prompt_token_count,
-                "chosen_decoder": decoder_state.name,
+                "prompt_token_count": resources.prompt_token_count,
+                "chosen_decoder": resources.decoder_state.name,
                 "render_client": render_client.name,
                 "resolved_max_tokens": resolved_max_tokens,
                 "response_mode": "decoder-native-chat",
                 "prefill_first_token_exposed": False,
             }
         )
-        decode_client = decoder_state.client_info
-        prefiller_state, prefiller_info = await select_prefiller(prompt_token_count)
+        decode_client = resources.decoder_state.client_info
+        resources.prefiller_state, prefiller_info = await select_prefiller(
+            resources.prompt_token_count
+        )
         route_info.update(prefiller_info)
-        prefill_client = prefiller_state.client_info
+        prefill_client = resources.prefiller_state.client_info
         route_info.update(
             {
-                "chosen_prefiller": prefiller_state.name,
+                "chosen_prefiller": resources.prefiller_state.name,
             }
         )
         log_route_event("proxy_route_selected", route_info)
 
         # Acquire decoder PD buffer slots before prefill when mode-aware
         # admission is enabled. Delay-pull mode skips buffer-size admission.
-        slots, pd_slot_wait_ms, acquired = await acquire_pd_buffer_slots(
-            decoder_state,
-            prompt_token_count,
+        (
+            resources.slots,
+            pd_slot_wait_ms,
+            resources.acquired,
+        ) = await acquire_pd_buffer_slots(
+            resources.decoder_state,
+            resources.prompt_token_count,
         )
 
         disagg_spec = {
@@ -1470,16 +1522,13 @@ async def handle_chat_completions(request: Request):
             prefill_client.client, "/v1/completions", prefill_req_data
         )
         prefill_ms = (time.time() - prefill_start) * 1000
-        prefiller_release_state = await release_prefiller(
-            prefiller_state,
-            prompt_token_count,
+        prefiller_release_state = await resources.release_prefiller(
             success=True,
             prefill_ms=prefill_ms,
         )
-        prefiller_released = True
         route_info.update(
             {
-                "pd_slot_count": slots,
+                "pd_slot_count": resources.slots,
                 "pd_slot_wait_ms": pd_slot_wait_ms,
                 "prefill_ms": prefill_ms,
                 "prefiller_state_after_release": prefiller_release_state,
@@ -1495,7 +1544,6 @@ async def handle_chat_completions(request: Request):
         if decode_req_data.get("stream", False):
 
             async def generate_stream():
-                nonlocal decoder_released, pd_slots_released
                 kv_ready_wait_ms = None
                 decode_stream_ms = None
                 stream_error = None
@@ -1503,9 +1551,7 @@ async def handle_chat_completions(request: Request):
                     kv_ready_wait_start = time.time()
                     await wait_decode_kv_ready(req_id, num_tp_rank)
                     kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
-                    if acquired:
-                        await release_pd_buffer_slots(decoder_state, slots)
-                        pd_slots_released = True
+                    await resources.release_slots()
 
                     decode_stream_start = time.time()
                     async with stream_service_response(
@@ -1517,22 +1563,13 @@ async def handle_chat_completions(request: Request):
                             yield chunk
                     decode_stream_ms = (time.time() - decode_stream_start) * 1000
                 except BaseException as exc:
-                    stream_error = str(exc)
+                    stream_error = str(exc) or type(exc).__name__
                     raise
                 finally:
-                    if acquired and not pd_slots_released:
-                        await release_pd_buffer_slots(decoder_state, slots)
-                        pd_slots_released = True
-                    decoder_release_state = None
-                    if decoder_state is not None and not decoder_released:
-                        decoder_release_state = await release_decoder(
-                            decoder_state,
-                            prompt_token_count,
-                            success=stream_error is None,
-                            decode_ms=decode_stream_ms,
-                            error=stream_error,
-                        )
-                        decoder_released = True
+                    await resources.cleanup(
+                        error=stream_error, decode_ms=decode_stream_ms
+                    )
+                    decoder_release_state = resources.decoder_snapshot
                     complete_payload = dict(route_log_base)
                     complete_payload.update(
                         {
@@ -1545,14 +1582,12 @@ async def handle_chat_completions(request: Request):
                     )
                     log_route_event("proxy_route_complete", complete_payload)
 
-            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+            return ResourceStreamingResponse(generate_stream(), resources)
 
         kv_ready_wait_start = time.time()
         await wait_decode_kv_ready(req_id, num_tp_rank)
         kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
-        if acquired:
-            await release_pd_buffer_slots(decoder_state, slots)
-            pd_slots_released = True
+        await resources.release_slots()
 
         decode_response_start = time.time()
         decode_response = await send_request_to_service(
@@ -1561,13 +1596,10 @@ async def handle_chat_completions(request: Request):
             decode_req_data,
         )
         decode_response_ms = (time.time() - decode_response_start) * 1000
-        decoder_release_state = await release_decoder(
-            decoder_state,
-            prompt_token_count,
+        decoder_release_state = await resources.release_decoder(
             success=True,
             decode_ms=decode_response_ms,
         )
-        decoder_released = True
         complete_payload = dict(route_log_base)
         complete_payload.update(
             {
@@ -1588,31 +1620,16 @@ async def handle_chat_completions(request: Request):
         )
 
     except (Exception, asyncio.CancelledError) as e:
-        if prefiller_state is not None and not prefiller_released:
-            release_state = await release_prefiller(
-                prefiller_state,
-                prompt_token_count,
-                success=False,
-                error=str(e),
-            )
-            route_info["prefiller_state_after_release"] = release_state
-        if decoder_state is not None and not decoder_released:
-            release_state = await release_decoder(
-                decoder_state,
-                prompt_token_count,
-                success=False,
-                error=str(e),
-            )
-            route_info["decoder_state_after_release"] = release_state
-            decoder_released = True
-        if decoder_state is not None and acquired and not pd_slots_released:
-            await release_pd_buffer_slots(decoder_state, slots)
-            pd_slots_released = True
+        await resources.cleanup(error=str(e) or type(e).__name__)
         if route_info:
+            route_info.update(
+                prefiller_state_after_release=resources.prefiller_snapshot,
+                decoder_state_after_release=resources.decoder_snapshot,
+            )
             error_payload = dict(route_info)
             error_payload.update(
                 {
-                    "pd_slot_count": slots,
+                    "pd_slot_count": resources.slots,
                     "total_ms": (time.time() - st) * 1000,
                     "error": str(e),
                 }
