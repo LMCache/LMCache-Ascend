@@ -23,6 +23,13 @@ from disagg_proxy_request import (
     upstream_service_error_from_response,
     validate_completion_prompt,
 )
+from disagg_proxy_response import (
+    completion_decode_events,
+    completion_head,
+    encode_sse_data,
+    merge_completion,
+    prefill_completion_response,
+)
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from lmcache.logging import init_logger
@@ -30,6 +37,7 @@ from lmcache.v1.storage_backend.pd_backend import (
     PDMsg,
     ProxyNotif,
 )
+import anyio
 import httpx
 import msgspec
 import numpy as np
@@ -39,6 +47,7 @@ import zmq.asyncio
 logger = init_logger(__name__)
 
 PREFILL_REQUEST_ALPHA = 256
+STREAM_CLOSE_TIMEOUT = 5.0
 PD_TRANSFER_MODE_PUSH = "push"
 PD_TRANSFER_MODE_EAGER_PULL = "eager_pull"
 PD_TRANSFER_MODE_DELAY_PULL = "delay_pull"
@@ -662,76 +671,22 @@ async def send_request_to_service(
     return response
 
 
+@asynccontextmanager
 async def stream_service_response(
     client: httpx.AsyncClient, endpoint: str, req_data: dict
 ):
-    """
-    Asynchronously stream the response from a service using a persistent client.
-    """
+    """Own the upstream response; callers choose byte or line iteration."""
     headers = {"Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"}
-    async with client.stream(
-        "POST", endpoint, json=req_data, headers=headers
-    ) as response:
+    request = client.build_request("POST", endpoint, json=req_data, headers=headers)
+    response = await client.send(request, stream=True)
+    try:
         if not response.is_success:
             await response.aread()
             raise upstream_service_error_from_response(response)
-        async for chunk in response.aiter_bytes():
-            yield chunk
-
-
-def encode_sse_data(data: dict) -> bytes:
-    return ("data: " + json.dumps(data, separators=(",", ":")) + "\n\n").encode()
-
-
-async def stream_prefill_only_completion_response(
-    prefill_output: dict, include_usage: bool
-):
-    choice = prefill_output["choices"][0]
-    base_chunk = {
-        "id": prefill_output["id"],
-        "object": "text_completion",
-        "created": prefill_output["created"],
-        "model": prefill_output["model"],
-    }
-    yield encode_sse_data(
-        {
-            **base_chunk,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": choice["text"],
-                    "logprobs": choice.get("logprobs"),
-                    "finish_reason": None,
-                    "stop_reason": None,
-                }
-            ],
-            "usage": None,
-        }
-    )
-    yield encode_sse_data(
-        {
-            **base_chunk,
-            "choices": [
-                {
-                    "index": 0,
-                    "text": "",
-                    "logprobs": None,
-                    "finish_reason": choice.get("finish_reason"),
-                    "stop_reason": choice.get("stop_reason"),
-                }
-            ],
-            "usage": None,
-        }
-    )
-    if include_usage and prefill_output.get("usage") is not None:
-        yield encode_sse_data(
-            {
-                **base_chunk,
-                "choices": [],
-                "usage": prefill_output["usage"],
-            }
-        )
-    yield b"data: [DONE]\n\n"
+        yield response
+    finally:
+        with anyio.fail_after(STREAM_CLOSE_TIMEOUT, shield=True):
+            await response.aclose()
 
 
 def round_robin_pick_client(clients, idx):
@@ -1211,13 +1166,7 @@ async def handle_completions(request: Request):
                 }
             )
             log_route_event("proxy_route_complete", complete_payload)
-            include_usage = bool(
-                (req_data.get("stream_options") or {}).get("include_usage")
-            )
-            return StreamingResponse(
-                stream_prefill_only_completion_response(prefill_output, include_usage),
-                media_type="application/json",
-            )
+            return prefill_completion_response(prefill_output, req_data)
 
         decoder_state, decoder_info = await select_decoder(prompt_token_count)
         route_info = dict(decoder_info)
@@ -1288,6 +1237,20 @@ async def handle_completions(request: Request):
         et = time.time()
         stats_calculator.add(et - st)
 
+        if prefill_output["choices"][0].get("finish_reason") == "stop":
+            # Transfer may already be in flight; retain the normal admission boundary.
+            await wait_decode_kv_ready(req_id, num_tp_rank)
+            if acquired:
+                await release_pd_buffer_slots(decoder_state, slots)
+                pd_slots_released = True
+            await release_decoder(decoder_state, prompt_token_count, success=True)
+            decoder_released = True
+            log_route_event(
+                "proxy_route_complete",
+                dict(route_info, total_ms=(time.time() - st) * 1000),
+            )
+            return prefill_completion_response(prefill_output, req_data)
+
         decode_req_data["prompt"].append(
             prefill_output["kv_transfer_params"]["first_tok"]
         )
@@ -1305,25 +1268,7 @@ async def handle_completions(request: Request):
             decode_stream_ms = None
             stream_error = None
             try:
-                head_chunk = {
-                    "id": prefill_output["id"],
-                    "object": "text_completion",
-                    "created": prefill_output["created"],
-                    "model": prefill_output["model"],
-                    "choices": [
-                        {
-                            "index": 0,
-                            "text": prefill_output["choices"][0]["text"],
-                            "logprobs": None,
-                            "finish_reason": None,
-                            "stop_reason": None,
-                        }
-                    ],
-                    "usage": None,
-                }
-                yield (
-                    "data: " + json.dumps(head_chunk, separators=(",", ":")) + "\n\n"
-                ).encode()
+                yield encode_sse_data(completion_head(prefill_output))
 
                 kv_ready_wait_start = time.time()
                 await wait_decode_kv_ready(req_id, num_tp_rank)
@@ -1333,37 +1278,13 @@ async def handle_completions(request: Request):
                     pd_slots_released = True
 
                 decode_stream_start = time.time()
-                async for chunk in stream_service_response(
+                async with stream_service_response(
                     decode_client.client, "/v1/completions", decode_req_data
-                ):
-                    chunk_str = chunk.decode("utf-8")
-                    if chunk_str.startswith("data: ") and not chunk_str.startswith(
-                        "data: [DONE]"
+                ) as response:
+                    async for chunk in completion_decode_events(
+                        response.aiter_lines(), prefill_output
                     ):
-                        try:
-                            json_str = chunk_str[6:].strip()
-                            if json_str:
-                                completion_data = json.loads(json_str)
-                                usage = completion_data.get("usage")
-                                if usage is not None:
-                                    completion_tokens = usage.get("completion_tokens")
-                                    total_tokens = usage.get("total_tokens")
-                                    if completion_tokens is not None:
-                                        usage["completion_tokens"] = (
-                                            completion_tokens + 1
-                                        )
-                                    if total_tokens is not None:
-                                        usage["total_tokens"] = total_tokens + 1
-                                    chunk = (
-                                        "data: "
-                                        + json.dumps(
-                                            completion_data, separators=(",", ":")
-                                        )
-                                        + "\n\n"
-                                    ).encode()
-                        except (json.JSONDecodeError, KeyError, TypeError):
-                            pass
-                    yield chunk
+                        yield chunk
                 decode_stream_ms = (time.time() - decode_stream_start) * 1000
             except BaseException as exc:
                 stream_error = str(exc)
@@ -1394,7 +1315,29 @@ async def handle_completions(request: Request):
                 )
                 log_route_event("proxy_route_complete", complete_payload)
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        if decode_req_data["stream"]:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+
+        await wait_decode_kv_ready(req_id, num_tp_rank)
+        if acquired:
+            await release_pd_buffer_slots(decoder_state, slots)
+            pd_slots_released = True
+        decode_start = time.time()
+        decoded = await send_request_to_service(
+            decode_client.client, "/v1/completions", decode_req_data
+        )
+        output = merge_completion(prefill_output, decoded.json())
+        await release_decoder(
+            decoder_state,
+            prompt_token_count,
+            success=True,
+            decode_ms=(time.time() - decode_start) * 1000,
+        )
+        decoder_released = True
+        log_route_event(
+            "proxy_route_complete", dict(route_info, total_ms=(time.time() - st) * 1000)
+        )
+        return JSONResponse(output)
 
     except (Exception, asyncio.CancelledError) as e:
         if prefiller_state is not None and not prefiller_released:
@@ -1565,12 +1508,13 @@ async def handle_chat_completions(request: Request):
                         pd_slots_released = True
 
                     decode_stream_start = time.time()
-                    async for chunk in stream_service_response(
+                    async with stream_service_response(
                         decode_client.client,
                         "/v1/chat/completions",
                         decode_req_data,
-                    ):
-                        yield chunk
+                    ) as response:
+                        async for chunk in response.aiter_bytes():
+                            yield chunk
                     decode_stream_ms = (time.time() - decode_stream_start) * 1000
                 except BaseException as exc:
                     stream_error = str(exc)

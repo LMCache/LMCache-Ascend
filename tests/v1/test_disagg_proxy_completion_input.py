@@ -13,6 +13,9 @@ import sys
 import httpx
 import pytest
 
+# First Party
+from tests.v1.disagg_proxy_test_utils import mock_streaming_service
+
 
 @pytest.fixture
 def proxy(monkeypatch):
@@ -92,8 +95,13 @@ def test_completion_prompt_paths(proxy, prompt, max_tokens):
             yield b"data: [DONE]\n\n"
 
         proxy.send_request_to_service = send
-        proxy.stream_service_response = stream
-        payload = {"model": "model", "prompt": prompt, "max_tokens": max_tokens}
+        proxy.stream_service_response = mock_streaming_service(stream)
+        payload = {
+            "model": "model",
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
         original = deepcopy(payload)
         request = SimpleNamespace(json=AsyncMock(return_value=payload))
         response = await proxy.handle_completions(request)

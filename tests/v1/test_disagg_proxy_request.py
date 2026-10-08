@@ -180,6 +180,7 @@ def test_completion_without_max_tokens_uses_vllm_default():
     request_data = {
         "model": "MiniMax-M2.7",
         "prompt": "hello",
+        "stream": True,
         "stream_options": {"include_usage": True},
         "ignore_eos": True,
     }
@@ -214,6 +215,7 @@ def test_completion_single_token_builds_zero_token_decode_budget():
         "model": "MiniMax-M2.7",
         "prompt": "hello",
         "max_tokens": 1,
+        "stream": True,
         "stream_options": {"include_usage": True},
     }
 

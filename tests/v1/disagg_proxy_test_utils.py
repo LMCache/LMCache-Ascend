@@ -1,10 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import ModuleType
 import importlib
 import logging
 import sys
+
+# Third Party
+import httpx
 
 
 def _install_lmcache_stubs() -> None:
@@ -77,6 +81,30 @@ class FakeResponse:
     def json(self) -> dict:
         assert self.payload is not None
         return self.payload
+
+
+class FakeByteStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def __aiter__(self):
+        async for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self):
+        await self.chunks.aclose()
+
+
+def mock_streaming_service(stream):
+    @asynccontextmanager
+    async def open_response(*args):
+        response = httpx.Response(200, stream=FakeByteStream(stream(*args)))
+        try:
+            yield response
+        finally:
+            await response.aclose()
+
+    return open_response
 
 
 async def collect_streaming_response(response) -> bytes:

@@ -16,6 +16,7 @@ from tests.v1.disagg_proxy_test_utils import (
     FakeResponse,
     collect_streaming_response,
     load_proxy_server,
+    mock_streaming_service,
 )
 
 proxy = load_proxy_server()
@@ -113,7 +114,9 @@ def test_completion_endpoint_handles_prefill_only_and_decode_paths(
             lambda _request: tokenization_client,
         )
         monkeypatch.setattr(proxy, "send_request_to_service", send_request)
-        monkeypatch.setattr(proxy, "stream_service_response", stream_response)
+        monkeypatch.setattr(
+            proxy, "stream_service_response", mock_streaming_service(stream_response)
+        )
         monkeypatch.setattr(
             proxy,
             "select_prefiller",
@@ -135,6 +138,7 @@ def test_completion_endpoint_handles_prefill_only_and_decode_paths(
                 "model": "MiniMax-M2.7",
                 "prompt": "hello",
                 "max_tokens": max_tokens,
+                "stream": True,
                 "stream_options": {"include_usage": True},
             }
         )
@@ -253,7 +257,9 @@ def test_chat_endpoint_preserves_native_stream_and_nonstream_responses(
         monkeypatch.setattr(proxy, "stats_calculator", SimpleNamespace(add=Mock()))
         monkeypatch.setattr(proxy.app.state, "prefill_clients", [render_client])
         monkeypatch.setattr(proxy, "send_request_to_service", send_request)
-        monkeypatch.setattr(proxy, "stream_service_response", stream_response)
+        monkeypatch.setattr(
+            proxy, "stream_service_response", mock_streaming_service(stream_response)
+        )
         monkeypatch.setattr(
             proxy,
             "select_prefiller",
@@ -357,7 +363,9 @@ def test_request_failure_and_cancellation_release_resources_once(
             lambda _request: tokenization_client,
         )
         monkeypatch.setattr(proxy, "send_request_to_service", send_request)
-        monkeypatch.setattr(proxy, "stream_service_response", cancelled_stream)
+        monkeypatch.setattr(
+            proxy, "stream_service_response", mock_streaming_service(cancelled_stream)
+        )
         monkeypatch.setattr(
             proxy,
             "select_prefiller",
@@ -384,6 +392,7 @@ def test_request_failure_and_cancellation_release_resources_once(
                 "model": "MiniMax-M2.7",
                 "prompt": "hello",
                 "max_tokens": 4,
+                "stream": True,
             }
         )
 

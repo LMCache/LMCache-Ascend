@@ -130,8 +130,8 @@ def build_phase_requests(
     decode_request = normalized.copy()
     decode_request["prompt"] = list(prompt_token_ids)
     decode_request["max_tokens"] = None if max_tokens is None else max_tokens - 1
-    decode_request["stream"] = True
-    if stream_options is not None:
+    decode_request["stream"] = request_data.get("stream", False)
+    if decode_request["stream"] and stream_options is not None:
         decode_request["stream_options"] = stream_options
 
     return prefill_request, decode_request
