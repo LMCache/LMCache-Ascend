@@ -22,6 +22,7 @@ from tests.v1.disagg_proxy_test_utils import (
 )
 
 proxy = load_proxy_server()
+real_wait_decode_kv_ready = proxy.wait_decode_kv_ready
 real_stream_service_response = proxy.stream_service_response
 
 
@@ -114,7 +115,11 @@ def backend(monkeypatch):
         proxy, "acquire_pd_buffer_slots", AsyncMock(return_value=(2, 0.0, True))
     )
     monkeypatch.setattr(proxy, "release_pd_buffer_slots", AsyncMock())
-    monkeypatch.setattr(proxy, "wait_decode_kv_ready", AsyncMock())
+    monkeypatch.setattr(
+        proxy,
+        "wait_decode_kv_ready",
+        AsyncMock(side_effect=proxy.app.state.kv_waiters.pop),
+    )
     monkeypatch.setattr(proxy, "send_request_to_service", send)
     monkeypatch.setattr(
         proxy, "stream_service_response", mock_streaming_service(stream)
@@ -381,6 +386,7 @@ def test_decoder_stream_is_closed_before_disconnect_returns(backend, monkeypatch
             )
         assert closed == [True]
         proxy.release_decoder.assert_awaited_once()
+        assert not proxy.app.state.kv_waiters
 
     asyncio.run(scenario())
 
@@ -537,5 +543,114 @@ def test_cleanup_survives_cancel_scope_and_repeated_task_cancel(backend, monkeyp
         await resources.cleanup(error="again")
         proxy.release_decoder.assert_awaited_once()
         proxy.release_pd_buffer_slots.assert_awaited_once()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("expected", [0, 2])
+def test_kv_ready_accepts_early_notifications_and_ignores_late(monkeypatch, expected):
+    async def scenario():
+        monkeypatch.setattr(proxy.app.state, "kv_waiters", {}, raising=False)
+        monkeypatch.setattr(
+            proxy, "global_args", SimpleNamespace(kv_ready_timeout=0.05), raising=False
+        )
+        waiter = proxy.register_kv_ready("request", expected)
+        proxy.notify_kv_ready("unknown")
+        for _ in range(expected):
+            proxy.notify_kv_ready("request")
+        await proxy.wait_decode_kv_ready("request")
+        assert waiter.event.is_set()
+        assert not proxy.app.state.kv_waiters
+        proxy.notify_kv_ready("request")
+        assert not proxy.app.state.kv_waiters
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("exit_mode", ["timeout", "cancel", "success"])
+def test_kv_ready_pending_wait_cleans_registration(monkeypatch, exit_mode):
+    async def scenario():
+        monkeypatch.setattr(proxy.app.state, "kv_waiters", {}, raising=False)
+        monkeypatch.setattr(
+            proxy, "global_args", SimpleNamespace(kv_ready_timeout=0.01), raising=False
+        )
+        proxy.register_kv_ready("request", 2)
+        task = asyncio.create_task(proxy.wait_decode_kv_ready("request"))
+        await asyncio.sleep(0)
+        proxy.notify_kv_ready("request")
+        assert not task.done()
+        if exit_mode == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif exit_mode == "timeout":
+            with pytest.raises(proxy.KVReadyTimeout):
+                await asyncio.wait_for(task, 1)
+        else:
+            proxy.notify_kv_ready("request")
+            await task
+        assert not proxy.app.state.kv_waiters
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "bad"])
+def test_kv_ready_timeout_rejects_invalid_values(value):
+    # Standard
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        proxy.positive_timeout(value)
+
+
+@pytest.mark.parametrize("chat", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_kv_ready_timeout_is_reported_and_releases_endpoint_resources(
+    backend, monkeypatch, chat, stream
+):
+    async def scenario():
+        monkeypatch.setattr(proxy.app.state, "kv_waiters", {}, raising=False)
+        monkeypatch.setattr(
+            proxy.app.state, "prefill_clients", [SimpleNamespace(client="p", name="p")]
+        )
+        monkeypatch.setattr(
+            proxy, "global_args", SimpleNamespace(kv_ready_timeout=0.01), raising=False
+        )
+        monkeypatch.setattr(proxy, "wait_decode_kv_ready", real_wait_decode_kv_ready)
+        original_send = proxy.send_request_to_service
+
+        async def send(client, endpoint, data):
+            if endpoint.endswith("/render"):
+                return FakeResponse(
+                    {"token_ids": [10, 20], "sampling_params": {"max_tokens": 4}}
+                )
+            if client == "p":
+                req_id = data["kv_transfer_params"]["disagg_spec"]["req_id"]
+                assert req_id in proxy.app.state.kv_waiters
+            return await original_send(client, endpoint, data)
+
+        monkeypatch.setattr(proxy, "send_request_to_service", send)
+        payload = (
+            {"messages": [{"role": "user", "content": "hi"}]}
+            if chat
+            else {"prompt": [10, 20]}
+        )
+        payload["stream"] = stream
+        endpoint = "/v1/chat/completions" if chat else "/v1/completions"
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=proxy.app), base_url="http://proxy"
+        ) as client:
+            response = await asyncio.wait_for(client.post(endpoint, json=payload), 1)
+        assert response.status_code == (200 if stream else 504)
+        if stream:
+            assert '"code":"kv_ready_timeout"' in response.text
+            assert "[DONE]" not in response.text
+        else:
+            assert response.json()["error"]["code"] == "kv_ready_timeout"
+        assert not [call for call in backend.calls if call[0] == "d"]
+        assert not proxy.app.state.kv_waiters
+        proxy.release_decoder.assert_awaited_once()
+        proxy.release_pd_buffer_slots.assert_awaited_once()
+        assert proxy.release_decoder.await_args.kwargs["success"] is False
 
     asyncio.run(scenario())

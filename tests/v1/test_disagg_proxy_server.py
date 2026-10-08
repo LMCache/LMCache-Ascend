@@ -130,7 +130,11 @@ def test_completion_endpoint_handles_prefill_only_and_decode_paths(
             "acquire_pd_buffer_slots",
             AsyncMock(return_value=(0, 0.0, False)),
         )
-        monkeypatch.setattr(proxy, "wait_decode_kv_ready", AsyncMock())
+        monkeypatch.setattr(
+            proxy,
+            "wait_decode_kv_ready",
+            AsyncMock(side_effect=proxy.app.state.kv_waiters.pop),
+        )
         monkeypatch.setattr(proxy, "log_route_event", Mock())
 
         request = FakeRequest(
@@ -277,7 +281,11 @@ def test_chat_endpoint_preserves_native_stream_and_nonstream_responses(
             "acquire_pd_buffer_slots",
             AsyncMock(return_value=(0, 0.0, False)),
         )
-        monkeypatch.setattr(proxy, "wait_decode_kv_ready", AsyncMock())
+        monkeypatch.setattr(
+            proxy,
+            "wait_decode_kv_ready",
+            AsyncMock(side_effect=proxy.app.state.kv_waiters.pop),
+        )
         monkeypatch.setattr(proxy, "log_route_event", Mock())
 
         request_data = {
@@ -384,7 +392,11 @@ def test_request_failure_and_cancellation_release_resources_once(
             AsyncMock(return_value=(2, 0.0, True)),
         )
         monkeypatch.setattr(proxy, "release_pd_buffer_slots", release_slots)
-        monkeypatch.setattr(proxy, "wait_decode_kv_ready", AsyncMock())
+        monkeypatch.setattr(
+            proxy,
+            "wait_decode_kv_ready",
+            AsyncMock(side_effect=proxy.app.state.kv_waiters.pop),
+        )
         monkeypatch.setattr(proxy, "log_route_event", Mock())
 
         request = FakeRequest(
@@ -542,6 +554,7 @@ def test_chat_cancellation_releases_accounting_and_permits(
                 decoder_lock=asyncio.Lock(),
                 prefiller_select_seq=0,
                 decoder_select_seq=0,
+                kv_waiters={},
             ),
         )
         monkeypatch.setattr(

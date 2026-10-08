@@ -68,7 +68,9 @@ def test_completion_prompt_paths(proxy, prompt, max_tokens):
         proxy.release_prefiller = AsyncMock(return_value={})
         proxy.release_decoder = AsyncMock(return_value={})
         proxy.acquire_pd_buffer_slots = AsyncMock(return_value=(0, 0.0, False))
-        proxy.wait_decode_kv_ready = AsyncMock()
+        proxy.wait_decode_kv_ready = AsyncMock(
+            side_effect=proxy.app.state.kv_waiters.pop
+        )
 
         async def send(client, endpoint, data):
             calls.append((client, endpoint, deepcopy(data)))

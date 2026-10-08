@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
-from collections import defaultdict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 import argparse
 import asyncio
@@ -117,6 +116,7 @@ async def lifespan(app: FastAPI):
     """
     global run_proxy
     run_proxy = True
+    app.state.kv_waiters = {}
 
     # Startup: Initialize clients
     app.state.prefill_clients = []
@@ -407,6 +407,18 @@ def compute_kv_bytes_per_token(model_name: str) -> int:
     return 2 * num_layers * num_kv_heads * head_dim * dtype_bytes
 
 
+def positive_timeout(value: str) -> float:
+    try:
+        timeout = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "timeout must be a positive finite number"
+        ) from exc
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise argparse.ArgumentTypeError("timeout must be a positive finite number")
+    return timeout
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
 
@@ -423,6 +435,12 @@ def parse_args():
     parser.add_argument("--num-decoders", type=int, default=1)
     parser.add_argument("--proxy-host", type=str, default="localhost")
     parser.add_argument("--proxy-port", type=int, default=8500)
+    parser.add_argument(
+        "--kv-ready-timeout",
+        type=positive_timeout,
+        default=60.0,
+        help="Seconds to wait for KV-ready after prefill returns (default: 60).",
+    )
 
     # PD buffer concurrency limiting. In push and eager-pull modes, a weighted
     # semaphore caps in-flight chunk slots to prevent decoder buffer exhaustion.
@@ -604,8 +622,8 @@ value: ClientInfo - tokenization client only
 """
 app.state.bound_clients = {}
 
-# Keep finished reqs
-app.state.finished_reqs = defaultdict(int)
+# Track notifications only while a request can consume them.
+app.state.kv_waiters = {}
 
 
 zmq_ctx = zmq.asyncio.Context()
@@ -650,7 +668,7 @@ async def zmq_pull_server():
                 continue
 
             req_id = msg.req_id
-            app.state.finished_reqs[req_id] += 1
+            notify_kv_ready(req_id)
             logger.debug("Prefill of req %s done.", req_id)
     finally:
         socket.close(linger=0)
@@ -1035,11 +1053,59 @@ def log_route_event(event: str, payload: dict):
         logger.info("%s %s", event, payload)
 
 
-async def wait_decode_kv_ready(req_id: str, num_tp_rank: int):
-    while app.state.finished_reqs[req_id] < num_tp_rank:
-        await asyncio.sleep(0.0001)  # sleep for 0.1 ms
-    logger.debug(f"Prefill node signaled kv ready for req {req_id}")
-    app.state.finished_reqs.pop(req_id)
+class KVReadyTimeout(TimeoutError):
+    def payload(self):
+        return {
+            "error": {
+                "message": str(self),
+                "type": "server_error",
+                "param": None,
+                "code": "kv_ready_timeout",
+            }
+        }
+
+
+@app.exception_handler(KVReadyTimeout)
+async def handle_kv_ready_timeout(request: Request, exc: KVReadyTimeout):
+    return JSONResponse(status_code=504, content=exc.payload())
+
+
+@dataclass
+class KVReadyWaiter:
+    expected: int
+    count: int = 0
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+def register_kv_ready(req_id: str, num_tp_rank: int) -> KVReadyWaiter:
+    waiter = KVReadyWaiter(num_tp_rank)
+    if num_tp_rank == 0:
+        waiter.event.set()
+    app.state.kv_waiters[req_id] = waiter
+    return waiter
+
+
+def notify_kv_ready(req_id: str) -> None:
+    waiter = app.state.kv_waiters.get(req_id)
+    if waiter is not None:
+        waiter.count += 1
+        if waiter.count >= waiter.expected:
+            waiter.event.set()
+
+
+async def wait_decode_kv_ready(req_id: str):
+    waiter = app.state.kv_waiters[req_id]
+    try:
+        await asyncio.wait_for(
+            waiter.event.wait(), timeout=global_args.kv_ready_timeout
+        )
+        logger.debug("Prefill node signaled kv ready for req %s", req_id)
+    except asyncio.TimeoutError as exc:
+        raise KVReadyTimeout(
+            f"Timed out waiting for KV-ready for request {req_id}"
+        ) from exc
+    finally:
+        app.state.kv_waiters.pop(req_id, None)
 
 
 async def acquire_pd_buffer_slots(
@@ -1069,6 +1135,7 @@ async def release_pd_buffer_slots(
 
 @dataclass
 class RequestResources:
+    req_id: Optional[str] = None
     prompt_token_count: int = 0
     prefiller_state: Optional[PrefillerState] = None
     decoder_state: Optional[DecoderState] = None
@@ -1124,6 +1191,7 @@ class RequestResources:
     async def cleanup(self, *, error=None, decode_ms=None) -> bool:
         # Join one shielded task so cancellation cannot abandon local accounting.
         # A later call may retry failed releases, but never successful ones.
+        app.state.kv_waiters.pop(self.req_id, None)
         if self.cleanup_task is None:
             self.cleanup_task = asyncio.create_task(self._cleanup(error, decode_ms))
         task = self.cleanup_task
@@ -1165,7 +1233,7 @@ async def handle_completions(request: Request):
     req_id = uuid.uuid4().hex
 
     st = time.time()
-    resources = RequestResources()
+    resources = RequestResources(req_id=req_id)
     route_info = {}
     req_data = await parse_request_body(request)
     try:
@@ -1295,6 +1363,7 @@ async def handle_completions(request: Request):
             "receiver_alloc_port": decode_client.alloc_port,
         }
         num_tp_rank = len(decode_client.init_port or [])
+        register_kv_ready(req_id, num_tp_rank)
 
         prefill_req_data["kv_transfer_params"] = {
             "ret_first_tok": True,
@@ -1327,7 +1396,7 @@ async def handle_completions(request: Request):
 
         if prefill_output["choices"][0].get("finish_reason") == "stop":
             # Transfer may already be in flight; retain the normal admission boundary.
-            await wait_decode_kv_ready(req_id, num_tp_rank)
+            await wait_decode_kv_ready(req_id)
             await resources.release_slots()
             await resources.release_decoder(success=True)
             log_route_event(
@@ -1355,7 +1424,7 @@ async def handle_completions(request: Request):
                 yield encode_sse_data(completion_head(prefill_output))
 
                 kv_ready_wait_start = time.time()
-                await wait_decode_kv_ready(req_id, num_tp_rank)
+                await wait_decode_kv_ready(req_id)
                 kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
                 await resources.release_slots()
 
@@ -1368,6 +1437,9 @@ async def handle_completions(request: Request):
                     ):
                         yield chunk
                 decode_stream_ms = (time.time() - decode_stream_start) * 1000
+            except KVReadyTimeout as exc:
+                stream_error = str(exc)
+                yield encode_sse_data(exc.payload())
             except BaseException as exc:
                 stream_error = str(exc) or type(exc).__name__
                 raise
@@ -1389,7 +1461,7 @@ async def handle_completions(request: Request):
         if decode_req_data["stream"]:
             return ResourceStreamingResponse(generate_stream(), resources)
 
-        await wait_decode_kv_ready(req_id, num_tp_rank)
+        await wait_decode_kv_ready(req_id)
         await resources.release_slots()
         decode_start = time.time()
         decoded = await send_request_to_service(
@@ -1439,7 +1511,7 @@ async def handle_chat_completions(request: Request):
     req_id = uuid.uuid4().hex
 
     st = time.time()
-    resources = RequestResources()
+    resources = RequestResources(req_id=req_id)
     route_info = {}
     req_data = await parse_request_body(request)
     try:
@@ -1512,6 +1584,7 @@ async def handle_chat_completions(request: Request):
         }
 
         num_tp_rank = len(decode_client.init_port or [])
+        register_kv_ready(req_id, num_tp_rank)
 
         prefill_req_data["kv_transfer_params"] = {"disagg_spec": disagg_spec}
 
@@ -1549,7 +1622,7 @@ async def handle_chat_completions(request: Request):
                 stream_error = None
                 try:
                     kv_ready_wait_start = time.time()
-                    await wait_decode_kv_ready(req_id, num_tp_rank)
+                    await wait_decode_kv_ready(req_id)
                     kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
                     await resources.release_slots()
 
@@ -1562,6 +1635,9 @@ async def handle_chat_completions(request: Request):
                         async for chunk in response.aiter_bytes():
                             yield chunk
                     decode_stream_ms = (time.time() - decode_stream_start) * 1000
+                except KVReadyTimeout as exc:
+                    stream_error = str(exc)
+                    yield encode_sse_data(exc.payload())
                 except BaseException as exc:
                     stream_error = str(exc) or type(exc).__name__
                     raise
@@ -1585,7 +1661,7 @@ async def handle_chat_completions(request: Request):
             return ResourceStreamingResponse(generate_stream(), resources)
 
         kv_ready_wait_start = time.time()
-        await wait_decode_kv_ready(req_id, num_tp_rank)
+        await wait_decode_kv_ready(req_id)
         kv_ready_wait_ms = (time.time() - kv_ready_wait_start) * 1000
         await resources.release_slots()
 
