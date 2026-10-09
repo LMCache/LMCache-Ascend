@@ -182,6 +182,7 @@ def patched_prefetch_all_done_callback(
     lookup_id,
     cum_chunk_lengths_total,
     tier_expected_chunks,
+    keys_per_chunk: int = 1,
 ):
     assert self.async_lookup_server is not None
     self.event_manager.update_event_status(
@@ -192,11 +193,24 @@ def patched_prefetch_all_done_callback(
 
     total_retrieved_chunks = 0
     for tier_idx, tier_result in enumerate(res):
-        actual_chunks = len(tier_result)
+        # `tier_result` is a list of (key, mem_obj) pairs, one per storage
+        # key. With layerwise on, each logical chunk maps to keys_per_chunk
+        # per-layer keys, so divide to get chunk count (round down so a
+        # partially-retrieved chunk counts as a miss).
+        actual_chunks = len(tier_result) // keys_per_chunk
         total_retrieved_chunks += actual_chunks
+
+        # Release the tail rounded off by actual_chunks; else staging buffer
+        # leaks.
+        tail_start = actual_chunks * keys_per_chunk
+        for _, mem_obj in tier_result[tail_start:]:
+            mem_obj.ref_count_down()
+
         if actual_chunks < tier_expected_chunks[tier_idx]:
+            # Release all chunks in subsequent tiers since a gap breaks
+            # prefix continuity and they won't be used.
             for subsequent_tier in res[tier_idx + 1 :]:
-                for mem_obj in subsequent_tier:
+                for _, mem_obj in subsequent_tier:
                     mem_obj.ref_count_down()
             break
 

@@ -417,31 +417,6 @@ def _patch_remote_backend():
     RemoteBackend.batched_get_blocking = new_batched_get_blocking
 
 
-def _patch_multi_process():
-    # Third Party
-    import lmcache.v1.multiprocess.custom_types as lm_mp_types
-
-    # First Party
-    from lmcache_ascend.v1.multiprocess.custom_types import AscendIPCWrapper
-
-    lm_mp_types.CudaIPCWrapper = AscendIPCWrapper
-
-
-def _patch_kv_layer_group():
-    # Third Party
-    from lmcache.v1.kv_layer_groups import KVLayerGroupInfo, KVLayerGroupsManager
-
-    # First Party
-    import lmcache_ascend.v1.kv_layer_groups as ascend_kv_layer_groups
-
-    KVLayerGroupsManager.build_kv_layer_groups = (
-        ascend_kv_layer_groups.build_kv_layer_groups
-    )
-    KVLayerGroupInfo.hidden_dim_size = property(
-        ascend_kv_layer_groups.patched_hidden_dim_size
-    )
-
-
 def _patch_gpu_connector():
     """Patch CreateGPUConnector to return NPU connectors on Ascend.
 
@@ -487,23 +462,6 @@ def _patch_gpu_connector():
         _manager_mod.CreateGPUConnector = CreateNPUConnector
 
 
-def _patch_get_vllm_torch_dev():
-    """Patch get_vllm_torch_dev to return NPU device on Ascend.
-
-    The upstream function only supports CUDA and XPU. This patch adds
-    NPU support by replacing the function with our Ascend-specific version.
-    """
-    # Third Party
-    import lmcache.integration.vllm.utils as lm_utils
-
-    # First Party
-    from lmcache_ascend.integration.vllm.utils import (
-        get_vllm_torch_dev as ascend_get_vllm_torch_dev,
-    )
-
-    lm_utils.get_vllm_torch_dev = ascend_get_vllm_torch_dev
-
-
 def _patch_vllm_v1_adapter():
     # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -546,16 +504,8 @@ def _patch_cache_engine():
 
 
 def _patch_hash_token():
-    # On OpenEuler and python3.10,
-    # the _hash_tokens func hash(None) seems to run into
-    # ASLR lead to non-deterministic hashing for builtin hash
     # Third Party
     import lmcache.v1.token_database
-
-    # First Party
-    from lmcache_ascend.v1.tokens_hash import _hash_tokens
-
-    lmcache.v1.token_database.TokenDatabase._hash_tokens = _hash_tokens
 
     # First Party
     from lmcache_ascend.v1.token_database import TokenDatabase_process_tokens
@@ -861,7 +811,6 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_ops()
     if is_vllm:
-        _patch_get_vllm_torch_dev()
         _patch_gpu_connector()
 
     _patch_hash_token()
@@ -874,12 +823,10 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_storage_manager()
         _patch_transfer_channel()
         _patch_cacheblend()
-        _patch_multi_process()
         _patch_lookup_client()
         _patch_cache_controller_worker()
         _patch_rpc_utils()
 
-    _patch_kv_layer_group()
 
     if is_sgl:
         _patch_sgl()

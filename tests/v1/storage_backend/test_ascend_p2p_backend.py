@@ -1659,14 +1659,13 @@ class TestAscendP2PBackendUnit:
         from lmcache_ascend.v1.storage_backend.p2p_backend import AscendP2PBackend
 
         backend._cleanup_late_sync_get_result = (
-            lambda done, lookup_id, operation, unpin, timeout_at=None: (
+            lambda done, lookup_id, operation, unpin: (
                 AscendP2PBackend._cleanup_late_sync_get_result(
                     backend,
                     done,
                     lookup_id,
                     operation,
                     unpin,
-                    timeout_at=timeout_at,
                 )
             )
         )
@@ -1745,6 +1744,7 @@ class TestDealerRouterConcurrency:
             reader = asyncio.create_task(
                 AscendP2PBackend._peer_reply_reader(backend, peer)
             )
+            peer.reader_task = reader
 
             async def fake_producer():
                 seen = [await router.recv_multipart() for _ in range(2)]
@@ -1795,6 +1795,7 @@ class TestDealerRouterConcurrency:
             reader = asyncio.create_task(
                 AscendP2PBackend._peer_reply_reader(backend, peer)
             )
+            peer.reader_task = reader
 
             with pytest.raises(asyncio.TimeoutError):
                 await AscendP2PBackend._peer_request_reply(backend, "peer", b"X", 0.2)

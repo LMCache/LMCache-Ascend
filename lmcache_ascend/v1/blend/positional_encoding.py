@@ -8,8 +8,10 @@ import inspect
 from lmcache.logging import init_logger
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.rotary_embedding import get_rope as vllm_get_rope
-import lmcache.c_ops as lmc_ops
 import torch
+
+# First Party
+import lmcache_ascend.c_ops as lmc_ops
 
 logger = init_logger(__name__)
 
