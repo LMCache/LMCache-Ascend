@@ -356,22 +356,24 @@ File: `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_ch
 
 ```python
 from ais_bench.benchmark.models import VLLMCustomAPIChat
-from ais_bench.benchmark.utils.postprocess.model_postprocessors import extract_non_reasoning_content
+from ais_bench.benchmark.utils.postprocess.model_postprocessors import (
+    extract_non_reasoning_content,
+)
 
 models = [
     dict(
-        attr="service",                       # evaluate a served model
-        type=VLLMCustomAPIChat,               # vLLM/OpenAI-compatible API client
-        abbr="vllm-api-glm52",                # result table column name
-        path="",                              # empty in service mode
-        model="glm-52",                       # must match served-model-name
-        stream=False,                         # evaluation needs full outputs
-        request_rate=0,                       # 0 = no throttling
+        attr="service",  # evaluate a served model
+        type=VLLMCustomAPIChat,  # vLLM/OpenAI-compatible API client
+        abbr="vllm-api-glm52",  # result table column name
+        path="",  # empty in service mode
+        model="glm-52",  # must match served-model-name
+        stream=False,  # evaluation needs full outputs
+        request_rate=0,  # 0 = no throttling
         use_timestamp=False,
         retry=2,
         api_key="",
-        host_ip="localhost",                  # change for remote hosts
-        host_port=8077,                       # must match the service port
+        host_ip="localhost",  # change for remote hosts
+        host_port=8077,  # must match the service port
         url="",
         max_out_len=512,
         batch_size=1,

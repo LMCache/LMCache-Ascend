@@ -26,7 +26,6 @@
 
 LMCache-Ascend is a community maintained plugin for running LMCache on the Ascend NPU.
 
-
 ## Prerequisites
 
 To use LMCache-Ascend on the NPU hardware, please make sure the following prerequisites are satisfied.
@@ -35,320 +34,87 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
 - **OS**: Linux-based.
 - **Software**:
   - **Python**: >= 3.10
-  - **CANN Toolkit**: >= 8.2.RC1
-  - **Ascend Driver**: >= 24.1.0
-  - **PyTorch**: >= 2.7.1
-  - **vLLM**: >=v0.11.0 & **vLLM-Ascend**: >=v0.11.0
+  - **CANN Toolkit**: >= 8.5.0
+  - **Ascend Driver**: >= 25.5
+  - **PyTorch**: >= 2.8.0
+  - **vLLM**: >=v0.18.0 & **vLLM-Ascend**: >=v0.18.0
+- **Container preparation**: see the official [vLLM-Ascend tutorials](https://docs.vllm.com.cn/projects/ascend/en/latest/tutorials/models/index.html) for preparing the base environment (NPU driver, CANN toolkit, and container images).
 
 ### Compatibility Matrix
 
 Please ensure your environment matches the versions below.
 
-#### For PyTorch / vLLM
 | LMCache-Ascend | LMCache | vLLM Version |
 | :--- | :--- | :--- |
-| **main** | **v0.4.4** | **>=v0.14.0** |
-| **v0.4.3** | **v0.4.3** | **>=v0.14.0** |
-
-#### For PyTorch / SGLang
-| LMCache-Ascend | LMCache | SGLang Version |
-| :--- | :--- | :--- |
-| **main** | **v0.4.4** | **0.5.8** |
-| **v0.4.3** | **v0.4.3** | **0.5.8** |
-
-#### For MindSpore
-| LMCache-Ascend | LMCache | vLLM Version |
-| :--- | :--- | :--- |
-| **main** | **v0.4.4** | **v0.11.0** |
-| **v0.4.3** | **v0.4.3** | **v0.11.0** |
-
-> **Note**: If you require legacy support for vLLM 0.9.2, you must use PyTorch 2.5.1. See the [Compatibility Matrix](#compatibility-matrix) above.
-
+| **main** | **dev** | **>=v0.18.0** |
 
 ## Getting Started
 
-### for vLLM-Ascend
+The minimal deployment is three steps: install the two packages, start the `lmcache server`, then start vLLM with the connector.
 
-You can choose `Manual Installation` or `Build Docker Image`.
-
-#### Manual Installation
-1. Prepare Base Environment
-
-It is recommended to use the official [vLLM-Ascend image](https://quay.io/repository/ascend/vllm-ascend?tab=tags) as a base:
+### 1. Install
 
 ```bash
-# Pull and run the official vLLM-Ascend image
-docker pull quay.io/ascend/vllm-ascend:v0.18.0
+git clone https://github.com/LMCache/LMCache.git
+cd LMCache
+python3 -m pip install -v --no-build-isolation -e .
+cd ..
 
-docker run -it \
---shm-size=200g --privileged --net=host \
---cap-add=SYS_RESOURCE \
---cap-add=IPC_LOCK \
---device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
---device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
---device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /etc/hccn.conf:/etc/hccn.conf \
--v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
--v /var/log/npu:/var/log/npu \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /etc/localtime:/etc/localtime \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /sys/fs/cgroup:/sys/fs/cgroup:ro \
--v /usr/src/kernels:/usr/src/kernels:ro \
--v /data:/data \
---name lmcache-ascend-test \
---entrypoint /bin/bash \
-quay.io/ascend/vllm-ascend:v0.18.0
-```
-
-2. Install LMCache Repo
-
-- from pip
-```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.3
-```
-
-3. Install LMCache-Ascend Repo
-
-```bash
-git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
+git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
 cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
 
-#### Build Docker Image
+> `third_party/hcomm` must match the container's CANN version — see [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) for the full installation guide (environment preparation, container startup, source installation).
 
-Build the image using the provided Dockerfile:
-```bash
-git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
-cd LMCache-Ascend
-docker build -f docker/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.3-vllm-ascend-v0.18.0-openeuler .
-```
-
-Once that is built, run it with the following cmd
-```bash
-docker run -it \
---shm-size=200g --privileged --net=host \
---cap-add=SYS_RESOURCE \
---cap-add=IPC_LOCK \
---device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
---device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
---device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /etc/hccn.conf:/etc/hccn.conf \
--v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
--v /var/log/npu:/var/log/npu \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /etc/localtime:/etc/localtime \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /sys/fs/cgroup:/sys/fs/cgroup:ro \
--v /usr/src/kernels:/usr/src/kernels:ro \
--v /data:/data \
---name lmcache-ascend-test \
---entrypoint /bin/bash \
-lmcache-ascend:v0.4.3-vllm-ascend-v0.18.0-openeuler
-
-```
-
-For further info about deployment notes, please refer to the [guide about deployment](docs/deployment.md)
-
-#### Usage
-
-##### Online serving
-```bash
-export PYTHONHASHSEED=0
-vllm serve /data/models/Qwen/Qwen3-32B \
---served-model-name Qwen3-32B \
---gpu-memory-utilization 0.92 \
---trust-remote-code \
---tensor-parallel-size 2 \
---max-num-seqs 32 \
---max-num-batched-tokens 32768 \
---host 0.0.0.0 \
---port 8100 \
---kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both","kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
-
-```
-
-##### Offline
-```python
-ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
-        kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
-    )
-```
-
-> **Note**: For vllm-ascend versions >=0.17.0rc1, you can specify `--kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}'`
-
-### for SGLang
-
-#### Manual Installation
-1. Prepare Base Environment
-
-It is recommended to use the official [Ascend SGLang image](https://quay.io/repository/ascend/sglang?tab=tags) as a base:
+### 2. Start the LMCache server
 
 ```bash
-# Pull and run the official SGLang image
-docker pull quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b
-docker run -it --privileged --net=host --name lmcache-sglang-dev quay.io/ascend/sglang:v0.5.8-cann8.3.rc2-910b /bin/bash
+lmcache server \
+    --host 127.0.0.1 \
+    --port 5555 \
+    --chunk-size 128 \
+    --supported-transfer-mode lmcache_driven \
+    --l1-size-gb 50 \
+    --eviction-policy LRU \
+    --disable-metrics
 ```
 
-2. Install LMCache Repo
+Wait for `LMCache INFO: LMCache zmq cache server is running on 127.0.0.1:5555`.
 
-- from pip
-```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.3
-```
+`--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) for the full deployment guide.
 
-3. Install LMCache-Ascend Repo
-
-```bash
-git clone --recurse-submodules -b v0.4.3 https://github.com/LMCache/LMCache-Ascend.git
-cd LMCache-Ascend
-pip install -v --no-build-isolation -e .
-```
-
-#### Usage
-For SGLang, integration is simplified. You do not need to specify a kv_connector; simply enable the LMCache flag(`--enable-lmcache`).
-```bash
-python \
-    -m sglang.launch_server \
-    --model-path /data/models/Qwen/Qwen3-32B \
-    --trust-remote-code \
-    --device npu \
-    --attention-backend ascend \
-    --mem-fraction-static 0.8 \
-    --cuda-graph-max-bs 16 \
-    --tp-size 4 \
-    --host 0.0.0.0 \
-    --enable-lmcache \
-    --port 8100
-```
-
-## Getting Started With MindSpore
-
-### Docker
-
-1. Clone LMCache-Ascend Repo
-Our repo contains a kvcache ops submodule for ease of maintenance, therefore we recommend cloning the repo with submodules.
+### 3. Start vLLM with the connector
 
 ```bash
-cd /workspace
-git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
+vllm serve /path/to/Qwen3-32B \
+    --served-model-name qwen3 \
+    --max-model-len 40960 \
+    --max-num-batched-tokens 8192 \
+    --gpu-memory-utilization 0.9 \
+    --max-num-seqs 32 \
+    --tensor-parallel-size 8 \
+    --no-enable-prefix-caching \
+    --port 8900 \
+    --kv-transfer-config '{
+      "kv_connector": "LMCacheMPConnector",
+      "kv_role": "kv_both",
+      "kv_connector_extra_config": {
+        "lmcache.mp.host": "127.0.0.1",
+        "lmcache.mp.port": 5555,
+        "lmcache.mp.mp_transfer_mode": "lmcache_driven"
+      }
+    }'
 ```
 
-2. Build Docker Image
-```bash
-cd /workspace/LMCache-Ascend
-docker build -f docker/mindspore/Dockerfile.a2.openEuler -t lmcache-ascend:v0.4.3-mindspore2.7.1.post1-openeuler .
-```
+A successful start shows `LMCache INFO: lmcache.mp.mp_transfer_mode = lmcache_driven (overridden, default: auto)` for every worker.
 
-3. Start Container
-Once that is built, run it with the following cmd
-```bash
-docker run -itd \
-    --shm-size 200g --privileged \
-    --net=host \
-    --device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
-    --device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
-    --device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /var/log/npu/:/var/log/npu \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /sys/fs/cgroup:/sys/fs/cgroup:ro \
-    -v /lib/modules:/lib/modules:ro \
-    -v /usr/src/kernels:/usr/src/kernels:ro \
-    -v /mnt/storage1/data:/data \
-    -v /home:/home \
-    --name lmcache-ascend-ms \
-    --entrypoint /bin/bash \
-    lmcache-ascend:v0.4.3-mindspore2.7.1.post1-openeuler
+For the `engine_driven` transfer mode (workers copy KV from a named SHM pool), see [docs/mp_mode/engine_driven.md](docs/mp_mode/engine_driven.md).
 
-docker exec -it -u root lmcache-ascend-ms bash
-```
+> **Mamba / GDN models (e.g. Qwen3.5-27B) are not supported with `LMCacheMPConnector`.** Use in-process `LMCacheAscendConnectorV1Dynamic` instead. Details: [docs/mp_mode/README.md#supported-models-and-limitations](docs/mp_mode/README.md#supported-models-and-limitations).
 
-For further info about deployment notes, please refer to the [guide about deployment](docs/deployment.md)
+## Documentation
 
-### Manual Installation
-
-1. Start the base container
-```bash
-docker run -itd \
---shm-size 200g --privileged \
---net=host \
---device=/dev/davinci0 --device=/dev/davinci1 --device=/dev/davinci2 --device=/dev/davinci3 \
---device=/dev/davinci4 --device=/dev/davinci5 --device=/dev/davinci6 --device=/dev/davinci7 \
---device=/dev/davinci_manager --device=/dev/devmm_svm --device=/dev/hisi_hdc \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /var/log/npu/:/var/log/npu \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
--v /sys/fs/cgroup:/sys/fs/cgroup:ro \
--v /lib/modules:/lib/modules:ro \
--v /usr/src/kernels:/usr/src/kernels:ro \
--v /mnt/storage1/data:/data \
--v /home/:/home \
---name lmcache-ascend-ms \
---entrypoint /bin/bash \
-hub.oepkgs.net/oedeploy/openeuler/aarch64/intelligence_boom:0.2.0-aarch64-800I-A2-mindspore2.7.1.post1-openeuler24.03-lts-sp2-20260116
-
-docker exec -it -u root lmcache-ascend-ms bash
-```
-
-2. Install LMCache
-
-```bash
-NO_CUDA_EXT=1 pip install lmcache==0.4.3 --no-deps
-```
-
-3. Install LMCache-Ascend
-
-```bash
-git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
-cd LMCache-Ascend
-USE_MINDSPORE=1 pip install -r requirement_ms.txt --no-build-isolation -v -e .
-```
-
-### Usage
-
-We introduce a dynamic KVConnector via LMCacheAscendConnectorV1Dynamic, therefore LMCache-Ascend Connector can be used via the kv transfer config in the two following setting.
-
-#### Online serving
-```bash
-python \
-    -m vllm_mindspore.entrypoints vllm.entrypoints.openai.api_server \
-    --port 8100 \
-    --model /data/models/Qwen/Qwen3-32B \
-    --trust-remote-code \
-    --disable-log-requests \
-    --block-size 128 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_both", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"}'
-```
-
-#### Offline
-```python
-ktc = KVTransferConfig(
-        kv_connector="LMCacheAscendConnectorV1Dynamic",
-        kv_role="kv_both",
-        kv_connector_module_path="lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1"
-    )
-```
-
-## FAQ
-
-1. Why do I have HostRegisterError ? 
-  - If you encounter the Host Register Error within a container environment, please make sure you add the IPC_LOCK capabilities.
-  - Otherwise, please check your driver version is >= 24.1.0
-2. Why do I have build error related to `cstdint` during manual installation using openEuler 24.03 ?
-  - The `CPLUS_INCLUDE_PATH` requires user manual setup, please see the [dockerfile](./docker/Dockerfile.a2.openEuler)
-3. Why do I have error for the `example/offload.py` in the main LMCache repo ?
-  - The import order can affect the LMCacheAscend connector, therefore please see our example [here](./examples/offload.py).
-4. Raise a missing header file error while `#include <numaif.h>`.
-  - Execute `yum install numactl-devel`.
+- [docs/mp_mode/README.md](docs/mp_mode/README.md) — MP mode overview.
+- [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) — `lmcache_driven` full deployment guide (environment preparation, container, installation, server, vLLM, verification).
+- [docs/mp_mode/engine_driven.md](docs/mp_mode/engine_driven.md) — `engine_driven` deployment guide (Qwen3 example).
