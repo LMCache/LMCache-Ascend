@@ -4,11 +4,6 @@
 #include <stdexcept>
 #include <string>
 
-#include <Python.h>
-#include <pybind11/pybind11.h>
-
-namespace py = pybind11;
-
 namespace vllm_ascend {
 kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType) {
   if (scalarType == at::ScalarType::Float) {
@@ -91,7 +86,7 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   // we require the kv ptr list to be on the device too
   const c10::OptionalDeviceGuard kv_device_guard(device_of(key_value_ptrs));
 
-  config.stream = c10_npu::getCurrentNPUStream().stream(false);
+  config.stream = c10_npu::getCurrentNPUStream().stream();
 
   auto ascendcPlatform =
       platform_ascendc::PlatformAscendCManager::GetInstance(config.socName);
@@ -115,12 +110,8 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
       numBuffsOnDev * max_hidden_dims * key_value.element_size();
 
   if (ubSize < static_cast<uint64_t>(baseBuffSize)) {
-    std::string errStr =
-        "Per TokenBuffer Size: " + std::to_string(baseBuffSize) +
-        " exceeds UB Size: " + std::to_string(ubSize);
-    PyErr_SetString(PyExc_RuntimeError,
-                    (errStr + " Please contact us.").c_str());
-    throw py::error_already_set();
+    TORCH_CHECK(false, "Per TokenBuffer Size: ", baseBuffSize,
+                " exceeds UB Size: ", ubSize, " Please contact us.");
   }
 
   // step 2. work out how many tokens per loop
@@ -136,12 +127,8 @@ void compute_multi_layer_ub_params(MultiLayerKVConfig &config,
   int64_t totalPerLoopBuffer =
       static_cast<int64_t>(config.maxTokensPerLoop) * baseBuffSize;
   if (ubSize < static_cast<uint64_t>(totalPerLoopBuffer)) {
-    std::string errStr =
-        "Per Loop Buffer Size: " + std::to_string(totalPerLoopBuffer) +
-        " exceeds UB Size: " + std::to_string(ubSize);
-    PyErr_SetString(PyExc_RuntimeError,
-                    (errStr + " Please contact us.").c_str());
-    throw py::error_already_set();
+    TORCH_CHECK(false, "Per Loop Buffer Size: ", totalPerLoopBuffer,
+                " exceeds UB Size: ", ubSize, " Please contact us.");
   }
 
   // using double buffs mean we actually want to allocate half of this per
@@ -155,7 +142,7 @@ void compute_single_layer_ub_params(const KVTransferDims &dims,
 
   const c10::OptionalDeviceGuard device_guard(device_of(vllm_cache));
 
-  ub_params.stream = c10_npu::getCurrentNPUStream().stream(false);
+  ub_params.stream = c10_npu::getCurrentNPUStream().stream();
   const char *socName = aclrtGetSocName();
 
   auto ascendcPlatform =
@@ -171,12 +158,9 @@ void compute_single_layer_ub_params(const KVTransferDims &dims,
                           dims.head_dims * vllm_cache.element_size();
 
   if (ubSize < baseBuffSize) {
-    std::string errStr =
-        "Per Token Cache Buffer Size: " + std::to_string(baseBuffSize) +
-        " exceeds UB Size: " + std::to_string(ubSize);
-    PyErr_SetString(PyExc_RuntimeError,
-                    (errStr + " Please contact LMCache Ascend.").c_str());
-    throw py::error_already_set();
+    TORCH_CHECK(false, "Per Token Cache Buffer Size: ", baseBuffSize,
+                " exceeds UB Size: ", ubSize,
+                " Please contact LMCache Ascend.");
   }
 
   // we are going to work out how many tokens to copy maximally per innerloop
@@ -286,8 +270,7 @@ SingleLayerKVConfig prepare_single_layer_kv_config(
     is_mla = lmc_dst_cache.size(0) == 1; // [1, tokens, hidden]
   }
   if (is_mla) {
-    PyErr_SetString(PyExc_RuntimeError, "MLA is not supported yet.");
-    throw py::error_already_set();
+    TORCH_CHECK(false, "MLA is not supported yet.");
   }
 
   // Compute UB Params
@@ -386,31 +369,24 @@ bool validate_vllm_caches(const std::vector<torch::Tensor> &vllm_kv_caches,
   bool is_separate = (format == kvcache_ops::KVCacheFormat::SEPARATE_KV);
 
   if (!is_separate && format != kvcache_ops::KVCacheFormat::MERGED_KV) {
-    std::string err =
-        "Invalid KV cache format: " + std::to_string(kvcache_format_raw) +
-        ". Expected 1 (MERGED_KV) or 2 (SEPARATE_KV)";
-    PyErr_SetString(PyExc_ValueError, err.c_str());
-    throw py::error_already_set();
+    TORCH_CHECK(false, "Invalid KV cache format: ", kvcache_format_raw,
+                ". Expected 1 (MERGED_KV) or 2 (SEPARATE_KV)");
   }
 
   if (vllm_kv_caches.empty()) {
-    PyErr_SetString(PyExc_ValueError, "vllm_kv_caches cannot be empty");
-    throw py::error_already_set();
+    TORCH_CHECK(false, "vllm_kv_caches cannot be empty");
   }
 
   if (is_separate) {
     if (vllm_kv_caches.size() != 2) {
-      PyErr_SetString(PyExc_ValueError,
-                      "SEPARATE_KV expects 2 tensors (K and V).");
-      throw py::error_already_set();
+      TORCH_CHECK(false, "SEPARATE_KV expects 2 tensors (K and V).");
     }
     if (vllm_kv_caches[0].sizes() != vllm_kv_caches[1].sizes()) {
-      throw py::value_error("K and V caches must have the same shape.");
+      TORCH_CHECK(false, "K and V caches must have the same shape.");
     }
   } else {
     if (vllm_kv_caches.size() != 1) {
-      PyErr_SetString(PyExc_ValueError, "MERGED_KV expects 1 tensor.");
-      throw py::error_already_set();
+      TORCH_CHECK(false, "MERGED_KV expects 1 tensor.");
     }
   }
 

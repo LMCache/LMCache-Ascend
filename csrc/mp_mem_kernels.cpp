@@ -323,11 +323,12 @@ struct HostStage {
   size_t nbytes = 0;
 };
 
-// Resolve LMCache object pointers to device virtual addresses. SHM/host
-// objects that are neither registered aclrtMallocHost nor NPU memory get an
-// on-device staging tensor (HostStage); the caller memcpy-asyncs around the
-// kernel. Allocations happen BEFORE the OpCommand so the tensors can be
-// captured by value.
+// Resolve LMCache object pointers to device to device virtual addresses.
+// SHM/host objects that are neither registered aclrtMallocHost nor NPU memory
+// get an on-device staging tensor (HostStage); the caller memcpy-asyncs around
+// the kernel. Allocations happen BEFORE any enqueue; the caller's cache context
+// synchronizes the stream before releasing them, so the staging tensors stay
+// valid for the async copies.
 struct PreparedLmcPtrs {
   std::vector<int64_t> kernel_obj_ptrs;
   std::vector<HostStage> host_stages;
@@ -458,18 +459,20 @@ void multi_layer_block_kv_transfer(
 
   aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  at_npu::native::OpCommand cmd;
-  cmd.Name("multi_layer_block_transfer_kernel");
-  cmd.SetCustomHandler([stream, paged_buffer_ptrs, group, prepared,
-                        block_ids_base, launch, to_engine]() -> int {
-    const char *socName = aclrtGetSocName();
-    auto ascendcPlatform =
-        platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    const uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
-    return enqueue_block_transfer(stream, aiv_num, paged_buffer_ptrs, group,
-                                  prepared, block_ids_base, launch, to_engine);
-  });
-  cmd.Run();
+  // Direct launch (CUDA cudaLaunchKernel style): .stream() above drains
+  // torch_npu's ACL task queue first, so the enqueues below keep Python-call
+  // order without posting to the queue thread.
+  const char *socName = aclrtGetSocName();
+  auto ascendcPlatform =
+      platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+  const uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
+  const int ret =
+      enqueue_block_transfer(stream, aiv_num, paged_buffer_ptrs, group,
+                             prepared, block_ids_base, launch, to_engine);
+  TORCH_CHECK(ret == ACL_ERROR_NONE,
+              "multi_layer_block_transfer staging failed, aclrtMemcpyAsync "
+              "ret=",
+              ret);
 }
 
 void lmcache_memcpy_async_on_stream(uintptr_t dest, uintptr_t src,
@@ -586,51 +589,44 @@ void execute_object_group_transfer(
   const uint32_t aiv_num = ascendcPlatform->GetCoreNumAiv();
   const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
-  at_npu::native::OpCommand cmd;
-  cmd.Name("multi_layer_block_transfer_kernel");
-  // Capture by value like multi_layer_block_kv_transfer: OpCommand may run
-  // the handler on a worker thread; [&] deadlocks torch_npu's task queue.
-  // The pointer table, block IDs, staging buffers and engine plane views are
+  // Direct launch (CUDA cudaLaunchKernel style): .stream() above drains
+  // torch_npu's ACL task queue first, so every staging copy and kernel launch
+  // below is enqueued in Python-call order without a queue-thread hop. The
+  // pointer table, block IDs, staging buffers and engine plane views are
   // owned by the caller's cache context, which synchronizes the stream before
-  // releasing them, so the captured raw pointers stay valid.
-  cmd.SetCustomHandler([direction, is_h2d, host_buffer_alignment, aiv_num,
-                        stream, kernel_group_specs, batch_steps, groups,
-                        prepared_steps]() -> int {
-    const auto do_staging = [&](const std::vector<StagingCopy> &staging) {
-      for (const auto &copy : staging) {
-        lmcache_memcpy_async_on_stream(copy.dest, copy.src, copy.nbytes,
-                                       direction, copy.host_offset,
-                                       host_buffer_alignment, stream);
-      }
-    };
-
-    for (size_t step_idx = 0; step_idx < batch_steps.size(); ++step_idx) {
-      // H2D stages CPU->NPU temp buffers before the kernel reads them; D2H
-      // stages NPU->CPU after the kernel writes them. The per-step ordering
-      // must be preserved because temp buffers are reused across steps.
-      if (is_h2d) {
-        do_staging(batch_steps[step_idx].staging);
-      }
-      for (const auto &launch : prepared_steps[step_idx]) {
-        const KernelGroupSpec &spec = kernel_group_specs[launch.group_idx];
-        const PreparedGroup &group = groups[launch.group_idx];
-        std::vector<int64_t> obj_device_ptrs = device_lmc_ptrs(
-            std::vector<int64_t>(spec.lmcache_objects_ptrs.begin(),
-                                 spec.lmcache_objects_ptrs.begin() +
-                                     launch.checked.num_objects));
-        int64_t *block_ids_base = reinterpret_cast<int64_t *>(
-            spec.block_ids_base +
-            static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t));
-        launch_prepared_objects(
-            aiv_num, stream, group,
-            reinterpret_cast<uint8_t *>(spec.paged_buffer_ptrs),
-            obj_device_ptrs, block_ids_base, launch.checked, is_h2d);
-      }
-      if (!is_h2d) {
-        do_staging(batch_steps[step_idx].staging);
-      }
+  // releasing them, so the raw pointers below stay valid.
+  const auto do_staging = [&](const std::vector<StagingCopy> &staging) {
+    for (const auto &copy : staging) {
+      lmcache_memcpy_async_on_stream(copy.dest, copy.src, copy.nbytes,
+                                     direction, copy.host_offset,
+                                     host_buffer_alignment, stream);
     }
-    return 0;
-  });
-  cmd.Run();
+  };
+
+  for (size_t step_idx = 0; step_idx < batch_steps.size(); ++step_idx) {
+    // H2D stages CPU->NPU temp buffers before the kernel reads them; D2H
+    // stages NPU->CPU after the kernel writes them. The per-step ordering
+    // must be preserved because temp buffers are reused across steps.
+    if (is_h2d) {
+      do_staging(batch_steps[step_idx].staging);
+    }
+    for (const auto &launch : prepared_steps[step_idx]) {
+      const KernelGroupSpec &spec = kernel_group_specs[launch.group_idx];
+      const PreparedGroup &group = groups[launch.group_idx];
+      std::vector<int64_t> obj_device_ptrs =
+          device_lmc_ptrs(std::vector<int64_t>(
+              spec.lmcache_objects_ptrs.begin(),
+              spec.lmcache_objects_ptrs.begin() + launch.checked.num_objects));
+      int64_t *block_ids_base = reinterpret_cast<int64_t *>(
+          spec.block_ids_base +
+          static_cast<uintptr_t>(launch.block_ids_offset) * sizeof(int64_t));
+      launch_prepared_objects(
+          aiv_num, stream, group,
+          reinterpret_cast<uint8_t *>(spec.paged_buffer_ptrs), obj_device_ptrs,
+          block_ids_base, launch.checked, is_h2d);
+    }
+    if (!is_h2d) {
+      do_staging(batch_steps[step_idx].staging);
+    }
+  }
 }

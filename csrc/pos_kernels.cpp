@@ -1,9 +1,7 @@
 #include "pos_kernels.h"
 #include "tiling/platform/platform_ascendc.h"
-#include <Python.h>
 #include <pybind11/pybind11.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 namespace py = pybind11;
 
@@ -175,22 +173,18 @@ void rotary_embedding_k_fused(torch::Tensor &oldPositions,
   uint8_t *cosSinCachePtr = get_kernel_ptr<uint8_t, torch::Tensor>(cosSinCache);
   uint8_t *keyOutPtr = keyPtr;
 
-  auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
+  // .stream() drains torch_npu's ACL task queue first so the direct launch
+  // below keeps Python-call order on the stream.
+  auto aclStream = c10_npu::getCurrentNPUStream().stream();
 
-  at_npu::native::OpCommand cmd;
-  cmd.Name("fused_rope");
-  cmd.SetCustomHandler([=]() -> int {
-    kvcache_ops::rotary_embedding_kernel_dispatch(
-        params.coreNumUse, aclStream, oldPositionsPtr, newPositionsPtr, keyPtr,
-        cosSinCachePtr, keyOutPtr, params.numTokens, params.numHeads,
-        params.headSize, params.rotaryDim, params.kLeadingDimension,
-        params.isNeoxStyle, params.frontCore, params.tailCore,
-        params.numTokensFrontCoreEachLoop, params.numTokensTailCoreEachLoop,
-        params.numTokensEachFrontCore, params.numTokensEachTailCore,
-        params.loopTimeEachFrontCore, params.loopTimeEachTailCore,
-        params.numTokensFrontCoreLastLoop, params.numTokensTailCoreLastLoop,
-        params.tilingKey);
-    return 0;
-  });
-  cmd.Run();
+  kvcache_ops::rotary_embedding_kernel_dispatch(
+      params.coreNumUse, aclStream, oldPositionsPtr, newPositionsPtr, keyPtr,
+      cosSinCachePtr, keyOutPtr, params.numTokens, params.numHeads,
+      params.headSize, params.rotaryDim, params.kLeadingDimension,
+      params.isNeoxStyle, params.frontCore, params.tailCore,
+      params.numTokensFrontCoreEachLoop, params.numTokensTailCoreEachLoop,
+      params.numTokensEachFrontCore, params.numTokensEachTailCore,
+      params.loopTimeEachFrontCore, params.loopTimeEachTailCore,
+      params.numTokensFrontCoreLastLoop, params.numTokensTailCoreLastLoop,
+      params.tilingKey);
 }

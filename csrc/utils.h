@@ -23,7 +23,6 @@
 
 #include "tiling/platform/platform_ascendc.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
 
 namespace vllm_ascend {
 kvcache_ops::AscendType get_dtype_from_torch(at::ScalarType scalarType);
@@ -197,22 +196,19 @@ void run_batched_fused_transfer(const SingleLayerKVConfig &config,
       prepare_host_chunk_metadata(lmc_tensors, chunk_sizes, config.strides,
                                   element_size, config.token_major);
 
-  at_npu::native::OpCommand cmd;
-  cmd.Name("batched_fused_single_layer_kv_transfer");
+  // Direct launch: config.ub_params.stream was obtained via
+  // getCurrentNPUStream().stream(), which drains torch_npu's task queue, so
+  // these enqueues keep Python-call order on the stream. No OpCommand / no
+  // ACL task-queue hop (CUDA-style cudaLaunchKernel path).
+  const bool is_swap_out = config.direction;
 
-  cmd.SetCustomHandler([config, meta, chunk_offsets, kernel_launcher]() -> int {
-    bool is_swap_out = config.direction;
-
-    if (!is_swap_out) {
-      // Swap In: CPU -> Staging -> Paged (Kernel)
-      execute_batched_memcpy(config, meta, chunk_offsets, false); // H2D
-      kernel_launcher(false); // Scatter Kernel
-    } else {
-      // Swap Out: Paged (Kernel) -> Staging -> CPU
-      kernel_launcher(true); // Gather Kernel
-      execute_batched_memcpy(config, meta, chunk_offsets, true); // D2H
-    }
-    return 0;
-  });
-  cmd.Run();
+  if (!is_swap_out) {
+    // Swap In: CPU -> Staging -> Paged (Kernel)
+    execute_batched_memcpy(config, meta, chunk_offsets, false); // H2D
+    kernel_launcher(false); // Scatter Kernel
+  } else {
+    // Swap Out: Paged (Kernel) -> Staging -> CPU
+    kernel_launcher(true);                                     // Gather Kernel
+    execute_batched_memcpy(config, meta, chunk_offsets, true); // D2H
+  }
 }
