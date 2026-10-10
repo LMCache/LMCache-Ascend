@@ -20,8 +20,14 @@ This example demonstrates how to run LMCache with disaggregated prefill on a sin
 - Ascend HDK 25.5.0+ drivers and firmware
 - At least 2 NPUs connected over HCCS
 - The following patches from `docker/` must be applied before use:
-  - `docker/vllm-utils.diff` to vLLM
-  - `docker/vllm-sched.diff` to vLLM-Ascend
+  - `docker/vllm-utils.diff` to vLLM (the ARM `sched_yield` GIL fix).
+    On vLLM 0.18.x the diff does not apply cleanly (older import layout);
+    apply the equivalent change manually in `vllm/distributed/utils.py`:
+    add `from vllm.platforms import CpuArchEnum, Platform` and make
+    `USE_SCHED_YIELD` also `and Platform.get_cpu_architecture() != CpuArchEnum.ARM`.
+  - `docker/vllm-sched.diff` to vLLM-Ascend (the `num_external_computed_tokens is None`
+    skip-request guard). vLLM-Ascend 0.18.x already contains this logic in both
+    `scheduler_dynamic_batch.py` and `recompute_scheduler.py`; no patch needed there.
 
 > After applying patches, reinstall the affected packages (vLLM, vLLM-Ascend, LMCache, LMCache-Ascend) for the changes to take effect.
 
@@ -81,7 +87,7 @@ python \
     --trust-remote-code \
     --block-size 128 \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_producer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}' > prefill.txt 2>&1
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_producer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}' > prefill.txt 2>&1
 ```
 
 Launch decode (receiver):
@@ -106,7 +112,7 @@ python \
     --trust-remote-code \
     --block-size 128 \
     --max-model-len 32768 \
-    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_consumer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}' > decode.txt 2>&1
+    --kv-transfer-config '{"kv_connector":"LMCacheAscendConnectorV1Dynamic","kv_role":"kv_consumer", "kv_connector_module_path":"lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}' > decode.txt 2>&1
 ```
 
 Launch the proxy server to coordinate prefill and decode:
@@ -143,5 +149,35 @@ curl -X POST http://localhost:9100/v1/completions \
 ### Notes
 
 1. **Single peer ports for TP=1.** The proxy derives the expected number of TP ranks from the port list length (`num_tp_rank = len(init_port)`). With TP=1 the ports must be single-element lists (`"7300"` / `"7400"`); using two ports makes the proxy wait for responses that never arrive.
-2. **Restart all three processes after changing any port.** The HIXL peer ids / handshake state are derived from the ports; a partial restart leaves stale peer registrations.
-3. Official prerequisites (CANN 8.5+, HDK 25.5.0+, docker patches) still apply.
+2. **Restart all three processes after changing any port.** The HIXL peer ids / handshake state are derived from the ports; a partial restart leaves stale peer registrations. The same applies after a crashed/restarted peer: the surviving side caches the old buffer UUIDs from the first handshake, and sends fail with `Buffer UUID ... not found in remote peer buffers` until all three are restarted.
+3. **Use `LMCacheAscendConnectorV1Dynamic`, not `LMCacheAscendConnector`.** vLLM resolves the connector class by exact `getattr()` on `kv_connector_module_path`; the module only defines the `V1Dynamic` class, so the bare name raises `AttributeError`.
+4. Official prerequisites (CANN 8.5+, HDK 25.5.0+, docker patches) still apply.
+
+### Validation (real NPU, 2026-10-10)
+
+Verified on a single 8x Ascend 910B3 node (no RoCE), with prefill on NPU 2 and
+decode on NPU 3 (TP=1 each), Qwen3-8B, vLLM 0.18.0 + vLLM-Ascend 0.18.0 +
+LMCache v0.4.4 (the CI-pinned upstream tag).
+
+- **2 MB aligned buffer**: both roles log
+  `Initialized NPU allocator: 2304.00 MB (aligned base: 0x12e0b1600000)` from
+  `backend.py`, confirming the aligned allocation path in this change set.
+- **End-to-end transfer**: prefill stores `2048 + 753` tokens
+  (`Stored 2048/2048`, `Stored 753/753`, ~0.27 GB); the decoder retrieves
+  `2560/2560 required tokens` (`Retrieved ... throughput: 119.5 GB/s` on the
+  second request).
+- **Prefix-cache hit**: two identical long prompts (~2800 tokens) through the
+  proxy; the second request reports `External prefix cache hit rate: 91.2%`
+  and lower prefill TTFT (1579 ms -> 893 ms). All requests returned HTTP 200
+  with streamed completions.
+- **Required env vars** confirmed: `HCCL_INTRA_ROCE_ENABLE=0` +
+  `HCCL_INTRA_PCIE_ENABLE=0` (missing PCIe var -> HCCL error 103900).
+
+> Environment note: with LMCache v0.4.4, upstream `cache_engine.py` calls
+> `self._is_sync_pd_backend()` (introduced in LMCache 0.5.5) in the
+> receiver's `retrieve()` cleanup path; v0.4.4 lacks the method and raises
+> `AttributeError` on the first request. This validation run therefore used
+> a temporary local compat shim (returning `False`, since v0.4.4 has no sync
+> PD mode); it is an upstream version-drift bug unrelated to this change set
+> and is tracked separately. See also the regression test in
+> `tests/v1/storage_backend/test_ascend_pd_backend.py`.
