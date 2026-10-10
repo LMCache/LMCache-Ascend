@@ -37,7 +37,7 @@ To use LMCache-Ascend on the NPU hardware, please make sure the following prereq
   - **CANN Toolkit**: >= 8.5.0
   - **Ascend Driver**: >= 25.5
   - **PyTorch**: >= 2.8.0
-  - **vLLM**: >=v0.18.0 & **vLLM-Ascend**: >=v0.18.0
+  - **vLLM**: >= v0.23.0 & **vLLM-Ascend**: >= v0.23.0
 - **Container preparation**: see the official [vLLM-Ascend tutorials](https://docs.vllm.com.cn/projects/ascend/en/latest/tutorials/models/index.html) for preparing the base environment (NPU driver, CANN toolkit, and container images).
 
 ### Compatibility Matrix
@@ -46,7 +46,7 @@ Please ensure your environment matches the versions below.
 
 | LMCache-Ascend | LMCache | vLLM Version |
 | :--- | :--- | :--- |
-| **main** | **dev** | **>=v0.18.0** |
+| **main** | **dev** | **>=v0.23.0** |
 
 ## Getting Started
 
@@ -57,7 +57,7 @@ The minimal deployment is three steps: install the two packages, start the `lmca
 ```bash
 git clone https://github.com/LMCache/LMCache.git
 cd LMCache
-python3 -m pip install -v --no-build-isolation -e .
+pip install -v --no-build-isolation -e .
 cd ..
 
 git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
