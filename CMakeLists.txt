@@ -33,7 +33,7 @@ else()
     message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
-add_subdirectory(third_party/kvcache-ops)
+add_subdirectory(csrc/kernels)
 
 if(DEFINED ENV{USE_MINDSPORE})
   find_package(Threads REQUIRED)

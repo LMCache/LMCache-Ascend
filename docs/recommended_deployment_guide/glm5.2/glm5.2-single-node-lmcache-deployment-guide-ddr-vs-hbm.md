@@ -82,7 +82,7 @@ pip install -v --no-build-isolation -e .
 ```
 
 > **Important — relax the CANN version checks** in
-> `third_party/kvcache-ops/ascendc_with_def.cmake` before building:
+> `csrc/kernels/ascendc_with_def.cmake` before building:
 > change `VERSION_EQUAL "8.3"` to `VERSION_GREATER_EQUAL "8.3"` and
 > `VERSION_EQUAL "8.5"` to `VERSION_GREATER_EQUAL "8.5"`, otherwise the
 > build fails against the current CANN version.

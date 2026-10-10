@@ -22,12 +22,16 @@ repos:
   - id: codespell
     additional_dependencies: ['tomli']
     args: ['--toml', 'pyproject.toml', '--ignore-words-list', 'cann']
+    # csrc/kernels is vendored verbatim (AscendC EnQue API trips codespell)
+    exclude: '^csrc/kernels/'
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:
   - id: clang-format
     types_or: [c++]
     args: [--style=file, --verbose]
+    # vendored kvcache-ops sources stay byte-identical to upstream
+    exclude: '^csrc/kernels/'
 - repo: https://github.com/pre-commit/mirrors-mypy
   rev: 'v1.17.1'
   hooks:
