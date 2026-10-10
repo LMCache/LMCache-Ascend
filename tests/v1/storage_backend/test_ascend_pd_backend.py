@@ -7,8 +7,10 @@ hardware and are gated behind ``@pytest.mark.skipif``.
 """
 
 # Standard
+from types import SimpleNamespace
 from typing import Tuple
 from unittest.mock import MagicMock, patch
+import ctypes
 import threading
 import time
 
@@ -18,11 +20,15 @@ from tests.bootstrap import prepare_environment
 prepare_environment()
 
 # Third Party
+from lmcache.integration.vllm.utils import get_size_bytes
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj, MemoryObjMetadata
+from lmcache.v1.metadata import LMCacheMetadata
 from lmcache.v1.storage_backend.pd_backend import AllocRequest
 import msgspec
+import numpy as np
+import pytest
 import torch
 
 # First Party
@@ -44,6 +50,33 @@ def _make_key(key_id: str = "test_key") -> CacheEngineKey:
 
 DEFAULT_SHAPE = torch.Size([2, 2, 256, 512])
 DEFAULT_DTYPE = torch.bfloat16
+
+# HCCL/HIXL require the KV transfer buffer VA to be 2MB aligned.
+ALIGN_2MB = 2 * 1024 * 1024
+
+
+def _make_controlled_raw_buf(size_bytes: int, aligned: bool) -> torch.Tensor:
+    """Create a CPU tensor of *size_bytes* with a controllable 2MB alignment.
+
+    The tensor shares memory with a ctypes buffer that it keeps alive, so
+    the caller does not need to hold a separate reference.
+
+    Args:
+        size_bytes: Size of the returned tensor in bytes.
+        aligned: If True, ``data_ptr`` lands exactly on a 2MB boundary; if
+            False, it lands 1 byte past one (initially misaligned).
+
+    Returns:
+        A uint8 CPU tensor of *size_bytes* bytes.
+    """
+    base = ctypes.create_string_buffer(size_bytes + ALIGN_2MB)
+    base_addr = ctypes.addressof(base)
+    aligned_offset = (ALIGN_2MB - (base_addr % ALIGN_2MB)) % ALIGN_2MB
+    offset = aligned_offset if aligned else aligned_offset + 1
+    arr = np.frombuffer(base, dtype=np.uint8, count=size_bytes, offset=offset)
+    tensor = torch.from_numpy(arr)
+    assert tensor.data_ptr() % ALIGN_2MB == (0 if aligned else 1)
+    return tensor
 
 
 def _make_mock_mem_obj(
@@ -229,6 +262,141 @@ class TestAscendPDBackend:
         call_kwargs = backend.memory_allocator.allocate.call_args
         assert call_kwargs.kwargs.get("allocator_type") == "cpu"
         assert result == "cpu_obj"
+
+    @pytest.mark.parametrize(
+        "aligned", [True, False], ids=["initially-aligned", "initially-unaligned"]
+    )
+    def test_initialize_allocator_npu_buffer_2mb_aligned(self, aligned):
+        """PD NPU buffer is 2MB aligned; size rounds up to whole KV pages.
+
+        Regression test for the 2MB-aligned PD NPU buffer allocation in
+        ``AscendPDBackend.initialize_allocator`` (HCCL/HIXL require a 2MB
+        aligned VA for buffer registration).  Uses CPU tensors for the
+        allocation logic, with NPU allocation and device operations mocked.
+        The repository test setup may still require an initialized Ascend
+        environment.
+        """
+        # First Party
+        from lmcache_ascend.v1.storage_backend.pd import backend as pd_backend_module
+        from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend
+
+        kv_shape = DEFAULT_SHAPE  # [2, 2, 256, 512]
+        kv_dtype = DEFAULT_DTYPE  # bfloat16
+        page_size = get_size_bytes([kv_shape], [kv_dtype])
+        assert page_size == ALIGN_2MB // 2  # 1 MiB per page
+
+        # 1.5 MiB request -> rounded up to 2 whole pages (2 MiB usable)
+        requested = 3 * page_size // 2
+        expected_size = 2 * page_size
+
+        metadata = LMCacheMetadata(
+            model_name="test_model",
+            world_size=1,
+            local_world_size=1,
+            worker_id=0,
+            local_worker_id=0,
+            kv_dtype=kv_dtype,
+            kv_shape=tuple(kv_shape),
+        )
+        config = SimpleNamespace(pd_buffer_size=requested, pd_cpu_buffer_size=0)
+
+        backend = AscendPDBackend.__new__(AscendPDBackend)
+        backend.pd_config = SimpleNamespace(buffer_device="npu:0")
+        backend.use_cpu_offload = False
+
+        total_alloc_size = expected_size + ALIGN_2MB
+        raw_tensor = _make_controlled_raw_buf(total_alloc_size, aligned=aligned)
+        raw_addr = raw_tensor.data_ptr()
+
+        requested_sizes = []
+
+        def fake_empty(size, **kwargs):
+            requested_sizes.append(size)
+            return raw_tensor
+
+        with (
+            patch.object(pd_backend_module.torch.npu, "set_device"),
+            patch.object(pd_backend_module.torch, "empty", side_effect=fake_empty),
+        ):
+            alloc = backend.initialize_allocator(config, metadata)
+
+        # 1. Base is 2MB aligned and usable size is rounded up to whole pages
+        gpu = alloc.gpu_allocator
+        aligned_addr = (raw_addr + ALIGN_2MB - 1) & ~(ALIGN_2MB - 1)
+        assert requested_sizes == [total_alloc_size]
+        assert gpu.buffer_ptr == aligned_addr
+        assert gpu.buffer_ptr % ALIGN_2MB == 0
+        assert gpu.buffer_size == expected_size
+        assert alloc._npu_raw_buf is raw_tensor  # raw storage kept alive
+
+        n_pages = gpu.buffer_size // page_size
+        assert n_pages == 2
+        assert len(gpu.free_blocks) == n_pages
+
+        # 2. All pages allocate; addresses stay in the registered range and
+        #    are unique (the transfer channel registers
+        #    [gpu_allocator.buffer_ptr, buffer_ptr + buffer_size)).
+        buffer_start = gpu.buffer_ptr
+        buffer_end = buffer_start + gpu.buffer_size
+        expected_addrs = [buffer_start + i * page_size for i in range(n_pages)]
+
+        objs = []
+        for _ in range(n_pages):
+            obj = gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD)
+            assert obj is not None
+            objs.append(obj)
+
+        addrs = [obj.raw_data.data_ptr() for obj in objs]
+        assert len(set(addrs)) == n_pages
+        assert sorted(addrs) == expected_addrs
+
+        for addr, obj in zip(addrs, objs, strict=True):
+            assert buffer_start <= addr < buffer_end
+            # Page end stays within the registered range, not just the start.
+            assert addr + page_size <= buffer_end
+            assert obj.raw_data.numel() * obj.raw_data.element_size() == page_size
+            assert addr == buffer_start + obj.meta.address * page_size
+
+        # Buffer is exhausted after all pages are allocated
+        assert gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD) is None
+        assert len(gpu.free_blocks) == 0
+        assert gpu.memcheck()
+
+        # 3. Freeing and re-allocating preserves the same properties
+        for obj in objs:
+            gpu.free(obj)
+
+        assert len(gpu.free_blocks) == n_pages
+        assert gpu.memcheck()
+
+        re_objs = []
+        for _ in range(n_pages):
+            obj = gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD)
+            assert obj is not None
+            re_objs.append(obj)
+
+        re_addrs = [obj.raw_data.data_ptr() for obj in re_objs]
+        assert len(set(re_addrs)) == n_pages
+        assert set(re_addrs) == set(addrs)
+        assert sorted(re_addrs) == expected_addrs
+
+        for addr, obj in zip(re_addrs, re_objs, strict=True):
+            assert buffer_start <= addr < buffer_end
+            assert addr + page_size <= buffer_end
+            assert obj.raw_data.numel() * obj.raw_data.element_size() == page_size
+            assert addr == buffer_start + obj.meta.address * page_size
+
+        assert gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD) is None
+        assert len(gpu.free_blocks) == 0
+        assert gpu.memcheck()
+
+        # Each re-allocated page is freed exactly once (the first-round objs
+        # may reference the same allocator objects as re_objs).
+        for obj in re_objs:
+            gpu.free(obj)
+
+        assert len(gpu.free_blocks) == n_pages
+        assert gpu.memcheck()
 
     def test_contains_evicts_consumed_proxy(self):
         """Consumed ProxyMemoryObj is evicted from data on contains()."""
