@@ -54,6 +54,7 @@ class PullReadyNotif(msgspec.Struct, tag=True):
     shape: list[int]
     dtype: str
     last_chunk_toks: int
+    handoff_id: str = ""
 
 
 class PullReadyDoneAck(msgspec.Struct, tag=True):

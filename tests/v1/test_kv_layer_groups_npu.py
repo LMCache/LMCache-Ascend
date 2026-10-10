@@ -12,6 +12,9 @@ device is only required by downstream transfer kernels, which these
 tests don't invoke.
 """
 
+# Standard
+from unittest.mock import patch
+
 # Third Party
 from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
 from lmcache.v1.metadata import LMCacheMetadata
@@ -29,7 +32,11 @@ from lmcache_ascend.v1.kv_layer_groups import (
     _lmc_chunk_hidden_bytes,
     build_kv_layer_groups,
 )
-from lmcache_ascend.v1.npu_connector.npu_connectors import _derive_group_params
+from lmcache_ascend.v1.npu_connector import npu_connectors
+from lmcache_ascend.v1.npu_connector.npu_connectors import (
+    VLLMPagedMemNPUConnectorV2,
+    _derive_group_params,
+)
 import lmcache_ascend  # noqa: F401  — applies get_shapes patch
 
 
@@ -80,6 +87,62 @@ def _make_metadata(
 # --------------------------------------------------------------------------- #
 # Single-format groupings                                                     #
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("container", [tuple, list])
+@pytest.mark.parametrize("multi_group", [False, True])
+def test_separate_kv_initializes_groups_through_connector(container, multi_group):
+    num_layers, num_blocks, block_size = 2, 4, 128
+    caches = [
+        container(
+            torch.empty(num_blocks, block_size, 2, 128, dtype=torch.float16)
+            for _ in range(2)
+        )
+        for _ in range(num_layers)
+    ]
+    connector = object.__new__(VLLMPagedMemNPUConnectorV2)
+    connector.metadata = _make_metadata(None)
+    connector.use_mla = False
+    connector.layout_hints = {"vllm_block_size": block_size}
+    if multi_group:
+        connector.layout_hints["scheduler_group_by_flat_layer"] = (0, 1)
+        connector.layout_hints["compress_ratios_by_group"] = (1, 1)
+
+    with (
+        patch.object(npu_connectors, "is_310p", return_value=False),
+        patch.object(
+            npu_connectors,
+            "normalize_kv_and_discover_format",
+            side_effect=AssertionError("Ascend tuples must not use CUDA discovery"),
+        ),
+    ):
+        connector.ensure_kv_layer_groups(caches)
+        manager = connector.metadata.kv_layer_groups_manager
+        connector.ensure_kv_layer_groups(caches)
+        assert connector.metadata.kv_layer_groups_manager is manager
+
+    groups = manager.kv_layer_groups
+    assert len(groups) == (2 if multi_group else 1)
+    assert [g.layer_indices for g in groups] == (
+        [[0], [1]] if multi_group else [[0, 1]]
+    )
+    for group in groups:
+        desc = group.shape_desc
+        assert desc.kv_size == 2
+        assert desc.nl == len(group.layer_indices)
+        assert desc.nb == num_blocks
+        assert desc.bs == block_size
+        assert desc.nh * desc.hs == 256
+        assert desc.element_size == 2
+        assert group.compress_ratio == 1
+        assert group.physical_chunk_size == 256
+    shapes = connector.metadata.get_shapes()
+    dtypes = connector.metadata.get_dtypes()
+    assert len(shapes) == len(dtypes) == len(groups)
+    assert all(dtype == torch.float16 for dtype in dtypes)
+    assert sum(shape.numel() * 2 for shape in shapes) == (
+        num_layers * 2 * 256 * 256 * 2
+    )
 
 
 def test_single_layer_separate_kv_groups_as_attention():

@@ -897,13 +897,14 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
         else:
             num_blocks = int(kv_caches[0].shape[1])
         hints = self.layout_hints or {}
-        # Bundled multi-spec layers keep 4-D sub-tensors that upstream
-        # normalize_kv_and_discover_format cannot detect (it only handles
-        # tensor_dim 3 or 5). Multi-group runs also use Ascend-local grouping
+        # Ascend tuple/list entries, including legacy separate K/V, keep
+        # sub-tensors that upstream CUDA format discovery cannot detect.
+        # Multi-group runs also use Ascend-local grouping
         # so scheduler slot group is part of the bucket key in one pass.
         if (
             hints.get("bundle_multi_spec")
             or hints.get("scheduler_group_by_flat_layer") is not None
+            or isinstance(first_entry, (tuple, list))
         ):
             mgr = KVLayerGroupsManager.__new__(KVLayerGroupsManager)
             build_kv_layer_groups(

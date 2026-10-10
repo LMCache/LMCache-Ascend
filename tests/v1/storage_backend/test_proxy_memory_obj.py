@@ -48,6 +48,17 @@ def test_proxy_ref_count_down_decrefs_context_once():
     context.decref.assert_called_once()
 
 
+def test_proxy_temporary_pin_release_does_not_decref_context():
+    """Lookup pin/unpin should not consume the proxy's base transfer owner."""
+    context = MagicMock()
+    proxy = _make_proxy(context)
+
+    proxy.ref_count_up()
+    proxy.ref_count_down()
+
+    context.decref.assert_not_called()
+
+
 def test_proxy_mark_consumed_suppresses_later_ref_count_down():
     """Connector-consumed proxies should not later decref during cleanup."""
     context = MagicMock()
@@ -82,3 +93,37 @@ def test_proxy_shared_context_sends_done_after_all_discards():
 
     proxy_1.ref_count_down()
     context.send_done.assert_called_once()
+
+
+def test_pd_transfer_context_sends_done_after_last_request_lease():
+    """PD delay-pull Done is gated by request leases, not proxy refcounts."""
+    # First Party
+    from lmcache_ascend.v1.transfer_context import PDTransferContext
+
+    done_callback = MagicMock()
+    context = PDTransferContext(
+        sender_id="sender-1",
+        done_callback=done_callback,
+        num_proxies=2,
+        memory_allocator=MagicMock(),
+        shapes=[DEFAULT_SHAPE],
+        dtypes=[DEFAULT_DTYPE],
+        fmt=MemoryFormat.KV_2LTD,
+    )
+
+    context.acquire_request("req-1")
+    context.acquire_request("req-2")
+
+    context.decref()
+    context.send_done_now()
+    done_callback.assert_not_called()
+
+    context.release_request("req-1")
+    done_callback.assert_not_called()
+
+    context.release_request("req-2")
+    done_callback.assert_called_once()
+
+    context.release_request("req-2")
+    context.send_done_now()
+    done_callback.assert_called_once()

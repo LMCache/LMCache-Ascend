@@ -29,6 +29,9 @@ import torch
 # First Party
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 from lmcache_ascend.v1.state_cache import StateCache
+from lmcache_ascend.v1.storage_backend.pd.handoff import (
+    split_pd_handoff_request_config,
+)
 
 logger = init_logger(__name__)
 
@@ -121,6 +124,53 @@ class AscendLMCacheEngine(LMCacheEngine):
 
         if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
+
+    def _is_pd_receiver(self) -> bool:
+        config = getattr(self, "config", None)
+        return bool(
+            getattr(config, "enable_pd", False)
+            and getattr(config, "pd_role", None) == "receiver"
+        )
+
+    def _release_pd_request_lease(self, request_id: Optional[str]) -> None:
+        if not request_id or request_id == "unspecified":
+            return
+
+        storage_manager = getattr(self, "storage_manager", None)
+        if not self._is_pd_receiver() or storage_manager is None:
+            return
+
+        pd_backend = storage_manager.storage_backends.get("PDBackend")
+        release_request_lease = getattr(pd_backend, "release_request_lease", None)
+        if callable(release_request_lease):
+            release_request_lease(request_id)
+
+    def _promote_pd_handoff_lease(
+        self,
+        handoff_id: Optional[str],
+        request_id: Optional[str],
+    ) -> None:
+        if not handoff_id or not request_id or request_id == "unspecified":
+            return
+        if not self.is_healthy():
+            return
+
+        storage_manager = getattr(self, "storage_manager", None)
+        if not self._is_pd_receiver() or storage_manager is None:
+            return
+
+        pd_backend = storage_manager.storage_backends.get("PDBackend")
+        promote_handoff_lease = getattr(pd_backend, "promote_handoff_lease", None)
+        if callable(promote_handoff_lease):
+            promote_handoff_lease(handoff_id, request_id)
+
+    @staticmethod
+    def _extract_pd_handoff_from_kwargs(kwargs: dict) -> Optional[str]:
+        request_configs = kwargs.get("request_configs")
+        handoff_id, sanitized = split_pd_handoff_request_config(request_configs)
+        if sanitized is not request_configs:
+            kwargs["request_configs"] = sanitized
+        return handoff_id
 
     def _ensure_store_worker(self) -> None:
         if self._store_queue is not None:
@@ -641,7 +691,7 @@ class AscendLMCacheEngine(LMCacheEngine):
             raise
 
     @torch.inference_mode()
-    def retrieve(
+    def _retrieve_impl(
         self,
         tokens: Union[torch.Tensor, list[int]],
         mask: Optional[torch.Tensor] = None,
@@ -1099,6 +1149,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         pin: bool = False,
         request_configs: Optional[dict] = None,
     ) -> int:
+        handoff_id, request_configs = split_pd_handoff_request_config(request_configs)
         # Serialize against the store-worker thread's
         with self._engine_state_lock:
             # First Party
@@ -1116,23 +1167,76 @@ class AscendLMCacheEngine(LMCacheEngine):
                     hashes=hashes,
                     offsets=offsets,
                 )
-            return super().lookup(
-                tokens=tokens,
-                hashes=hashes,
-                offsets=offsets,
-                search_range=search_range,
-                lookup_id=lookup_id,
-                pin=pin,
-                request_configs=request_configs,
-            )
+            if pin:
+                self._promote_pd_handoff_lease(handoff_id, lookup_id)
+            token = None
+            if self._is_pd_receiver() and pin and lookup_id is not None:
+                # First Party
+                from lmcache_ascend.v1.storage_backend.storage_manager import (
+                    set_current_pd_lookup_id,
+                )
+
+                token = set_current_pd_lookup_id(lookup_id)
+            try:
+                return super().lookup(
+                    tokens=tokens,
+                    hashes=hashes,
+                    offsets=offsets,
+                    search_range=search_range,
+                    lookup_id=lookup_id,
+                    pin=pin,
+                    request_configs=request_configs,
+                )
+            finally:
+                if token is not None:
+                    # First Party
+                    from lmcache_ascend.v1.storage_backend.storage_manager import (
+                        reset_current_pd_lookup_id,
+                    )
+
+                    reset_current_pd_lookup_id(token)
 
     def lookup_unpin(self, lookup_id: str) -> None:
         with self._engine_state_lock:
             # First Party
             from lmcache_ascend.v1.state_lookup import release_engine_selection
 
-            release_engine_selection(self, lookup_id)
-            super().lookup_unpin(lookup_id)
+            try:
+                release_engine_selection(self, lookup_id)
+                super().lookup_unpin(lookup_id)
+            finally:
+                self._release_pd_request_lease(lookup_id)
+
+    @torch.inference_mode()
+    def retrieve(
+        self,
+        tokens: Union[torch.Tensor, list[int]],
+        mask: Optional[torch.Tensor] = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        handoff_id = self._extract_pd_handoff_from_kwargs(kwargs)
+        req_id = self._get_req_id(kwargs)
+        self._promote_pd_handoff_lease(handoff_id, req_id)
+        token = None
+        if self._is_pd_receiver():
+            # First Party
+            from lmcache_ascend.v1.storage_backend.storage_manager import (
+                set_current_pd_retrieve_id,
+            )
+
+            token = set_current_pd_retrieve_id(req_id)
+
+        try:
+            return self._retrieve_impl(tokens, mask=mask, **kwargs)
+        finally:
+            if token is not None:
+                # First Party
+                from lmcache_ascend.v1.storage_backend.storage_manager import (
+                    reset_current_pd_retrieve_id,
+                )
+
+                reset_current_pd_retrieve_id(token)
+            self._release_pd_request_lease(req_id)
 
     def get_state_lookup(self, lookup_id: str, boundary: int):
         """Borrow selected state while holding _engine_state_lock through transfer.
@@ -1199,6 +1303,9 @@ class AscendLMCacheEngine(LMCacheEngine):
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        # Handoff metadata is control-plane state, not a cache namespace.
+        self._extract_pd_handoff_from_kwargs(kwargs)
+
         # Health check: block operation if LMCache is unhealthy
         if not self.is_healthy():
             logger.warning("LMCache is unhealthy, skipping store operation")
