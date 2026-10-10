@@ -6,11 +6,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 import threading
 
-# Third Party
-from lmcache.v1.cache_engine import LMCacheEngine
-
 # First Party
-from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
+# This module retains the original base before the upstream export is patched.
+from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine, LMCacheEngine
 
 HANDOFF_CONFIG = {
     "lmcache.pd_handoff_id": "handoff-cache-engine",

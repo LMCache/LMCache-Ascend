@@ -6,12 +6,13 @@ from threading import Lock
 from unittest.mock import MagicMock, patch
 
 # Third Party
-from lmcache.v1.cache_engine import LMCacheEngine
 import pytest
 
 # First Party
 from lmcache_ascend.v1 import state_lookup
-from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine
+
+# This module retains the original base before the upstream export is patched.
+from lmcache_ascend.v1.cache_engine import AscendLMCacheEngine, LMCacheEngine
 from lmcache_ascend.v1.storage_backend import storage_manager as sm
 
 

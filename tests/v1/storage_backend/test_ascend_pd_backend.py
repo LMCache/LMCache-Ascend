@@ -108,6 +108,7 @@ def _make_pd_backend_stub(
     """Create a mock object with the minimal attributes needed by PD backend methods."""
     # First Party
     from lmcache_ascend.v1.storage_backend.pd.backend import AscendPDBackend, PDEntry
+    from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
 
     backend = MagicMock()
     backend._pd_entries = {}
@@ -149,6 +150,9 @@ def _make_pd_backend_stub(
     # Wire internal delegation methods to their real implementations so tests
     # that call e.g. AscendPDBackend.contains(backend, ...) actually exercise
     # the eviction / partition logic instead of hitting auto-mocked no-ops.
+    backend._wire_shape_dtype_and_last_chunk_toks = lambda memory_objs: (
+        AscendPDSenderMixin._wire_shape_dtype_and_last_chunk_toks(backend, memory_objs)
+    )
     backend._lookup = lambda key, pin=False: AscendPDBackend._lookup(
         backend, key, pin=pin
     )
