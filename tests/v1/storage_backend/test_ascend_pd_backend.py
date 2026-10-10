@@ -271,9 +271,10 @@ class TestAscendPDBackend:
 
         Regression test for the 2MB-aligned PD NPU buffer allocation in
         ``AscendPDBackend.initialize_allocator`` (HCCL/HIXL require a 2MB
-        aligned VA for buffer registration).  Runs on CPU only: the NPU
-        allocation and device operations are mocked, while the real
-        ``PagedTensorMemoryAllocator`` is exercised.
+        aligned VA for buffer registration).  Uses CPU tensors for the
+        allocation logic, with NPU allocation and device operations mocked.
+        The repository test setup may still require an initialized Ascend
+        environment.
         """
         # First Party
         from lmcache_ascend.v1.storage_backend.pd import backend as pd_backend_module
@@ -335,31 +336,67 @@ class TestAscendPDBackend:
         # 2. All pages allocate; addresses stay in the registered range and
         #    are unique (the transfer channel registers
         #    [gpu_allocator.buffer_ptr, buffer_ptr + buffer_size)).
+        buffer_start = gpu.buffer_ptr
+        buffer_end = buffer_start + gpu.buffer_size
+        expected_addrs = [buffer_start + i * page_size for i in range(n_pages)]
+
         objs = []
         for _ in range(n_pages):
             obj = gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD)
             assert obj is not None
             objs.append(obj)
+
         addrs = [obj.raw_data.data_ptr() for obj in objs]
         assert len(set(addrs)) == n_pages
+        assert sorted(addrs) == expected_addrs
+
         for addr, obj in zip(addrs, objs, strict=True):
-            assert gpu.buffer_ptr <= addr < gpu.buffer_ptr + gpu.buffer_size
-            assert addr == gpu.buffer_ptr + obj.meta.address * page_size
+            assert buffer_start <= addr < buffer_end
+            # Page end stays within the registered range, not just the start.
+            assert addr + page_size <= buffer_end
+            assert obj.raw_data.numel() * obj.raw_data.element_size() == page_size
+            assert addr == buffer_start + obj.meta.address * page_size
+
         # Buffer is exhausted after all pages are allocated
         assert gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD) is None
+        assert len(gpu.free_blocks) == 0
+        assert gpu.memcheck()
 
         # 3. Freeing and re-allocating preserves the same properties
         for obj in objs:
             gpu.free(obj)
+
         assert len(gpu.free_blocks) == n_pages
-        re_addrs = []
+        assert gpu.memcheck()
+
+        re_objs = []
         for _ in range(n_pages):
             obj = gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD)
             assert obj is not None
-            re_addrs.append(obj.raw_data.data_ptr())
+            re_objs.append(obj)
+
+        re_addrs = [obj.raw_data.data_ptr() for obj in re_objs]
         assert len(set(re_addrs)) == n_pages
-        for addr in re_addrs:
-            assert gpu.buffer_ptr <= addr < gpu.buffer_ptr + gpu.buffer_size
+        assert set(re_addrs) == set(addrs)
+        assert sorted(re_addrs) == expected_addrs
+
+        for addr, obj in zip(re_addrs, re_objs, strict=True):
+            assert buffer_start <= addr < buffer_end
+            assert addr + page_size <= buffer_end
+            assert obj.raw_data.numel() * obj.raw_data.element_size() == page_size
+            assert addr == buffer_start + obj.meta.address * page_size
+
+        assert gpu.allocate([kv_shape], [kv_dtype], MemoryFormat.KV_2LTD) is None
+        assert len(gpu.free_blocks) == 0
+        assert gpu.memcheck()
+
+        # Each re-allocated page is freed exactly once (the first-round objs
+        # may reference the same allocator objects as re_objs).
+        for obj in re_objs:
+            gpu.free(obj)
+
+        assert len(gpu.free_blocks) == n_pages
+        assert gpu.memcheck()
 
     def test_contains_evicts_consumed_proxy(self):
         """Consumed ProxyMemoryObj is evicted from data on contains()."""

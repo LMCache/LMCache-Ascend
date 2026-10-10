@@ -2,7 +2,9 @@
 
 This example demonstrates how to run LMCache with disaggregated prefill on a single node **without RoCE**, using the on-chip **HCCS** interconnect instead. It is a TP=1 variant of the [`1p1d`](../1p1d) example.
 
-> Note: for multi-nodes setting, replace the localhost with ip addresses accordingly.
+> This example is validated on a single node with two NPUs connected over
+> HCCS. Cross-node deployment requires a supported interconnect topology and
+> transport configuration and is not covered by this example.
 
 ### Differences from the `1p1d` example
 
@@ -157,27 +159,57 @@ curl -X POST http://localhost:9100/v1/completions \
 
 Verified on a single 8x Ascend 910B3 node (no RoCE), with prefill on NPU 2 and
 decode on NPU 3 (TP=1 each), Qwen3-8B, vLLM 0.18.0 + vLLM-Ascend 0.18.0 +
-LMCache v0.4.4 (the CI-pinned upstream tag).
+LMCache v0.4.4 (the CI-pinned upstream tag). Software under test:
+LMCache-Ascend `feat/hccs-pd-example` commit `b952f54` (pre-rebase; the
+aligned-allocation logic in this change set is unchanged by the later
+rebase), with the temporary local shim documented below.
 
-- **2 MB aligned buffer**: both roles log
-  `Initialized NPU allocator: 2304.00 MB (aligned base: 0x12e0b1600000)` from
-  `backend.py`, confirming the aligned allocation path in this change set.
-- **End-to-end transfer**: prefill stores `2048 + 753` tokens
-  (`Stored 2048/2048`, `Stored 753/753`, ~0.27 GB); the decoder retrieves
-  `2560/2560 required tokens` (`Retrieved ... throughput: 119.5 GB/s` on the
-  second request).
+- **2 MB aligned buffer**: each process logs its own allocation from
+  `backend.py`:
+  - prefill (EngineCore pid 84432):
+    `Initialized NPU allocator: 2304.00 MB (aligned base: 0x12e0b1600000)`
+  - decode (EngineCore pid 85040):
+    `Initialized NPU allocator: 2304.00 MB (aligned base: 0x12e0b1600000)`
+  Both bases are 2 MB multiples; the two processes happen to report the same
+  VA (equal-size allocations in their address spaces).
+- **End-to-end transfer**: prefill logs `Stored 2048/2048` (0.2812 GB) and
+  `Stored 753/753` (0.1055 GB); the decoder logs
+  `Retrieved 2560 out of 2560 required tokens`, first-request throughput
+  55.5 GB/s, second-request 119.5 GB/s. The retrieve throughput is the
+  software-reported LMCache metric, not an independently measured HCCS
+  link-bandwidth benchmark.
 - **Prefix-cache hit**: two identical long prompts (~2800 tokens) through the
-  proxy; the second request reports `External prefix cache hit rate: 91.2%`
-  and lower prefill TTFT (1579 ms -> 893 ms). All requests returned HTTP 200
-  with streamed completions.
+  proxy; the vLLM engine log reports `External prefix cache hit rate: 91.4%`
+  after the first request and `91.0%` after the second, with prefill TTFT
+  dropping from 1579 ms to 893 ms (two-request observation, not a stable
+  statistic). All requests returned HTTP 200 with streamed completions via
+  the proxy `:9100`.
 - **Required env vars** confirmed: `HCCL_INTRA_ROCE_ENABLE=0` +
   `HCCL_INTRA_PCIE_ENABLE=0` (missing PCIe var -> HCCL error 103900).
 
-> Environment note: with LMCache v0.4.4, upstream `cache_engine.py` calls
-> `self._is_sync_pd_backend()` (introduced in LMCache 0.5.5) in the
-> receiver's `retrieve()` cleanup path; v0.4.4 lacks the method and raises
-> `AttributeError` on the first request. This validation run therefore used
-> a temporary local compat shim (returning `False`, since v0.4.4 has no sync
-> PD mode); it is an upstream version-drift bug unrelated to this change set
-> and is tracked separately. See also the regression test in
-> `tests/v1/storage_backend/test_ascend_pd_backend.py`.
+> Environment note: with LMCache v0.4.4, the Ascend cache-engine adapter
+> (`lmcache_ascend/v1/cache_engine.py`, receiver `retrieve()` cleanup path)
+> calls `self._is_sync_pd_backend()`, but the v0.4.4 base implementation
+> lacks this method and raises `AttributeError` on the first request. This
+> validation run therefore used a temporary local compatibility shim
+> (returning `False`, since v0.4.4 has no sync PD mode):
+>
+> ```python
+> @torch.inference_mode()
+> def _is_sync_pd_backend(self) -> bool:
+>     """Check if the PD backend is the sync variant.
+>
+>     Added for compatibility with LMCache >= 0.5.5, which calls this
+>     method from ``retrieve()`` cleanup logic.  LMCache 0.4.4 (the pinned
+>     upstream tag) has no ``pd_backend_mode`` config; treat it as async
+>     (returns ``False``), matching v0.4.4's own ``remove_after_retrieve``
+>     behavior which does not ref-count down in that path.
+>     """
+>     return getattr(self.config, "pd_backend_mode", "async") == "sync"
+> ```
+>
+> The shim is **not** included in this PR. These results therefore validate
+> the HCCS example and the aligned allocation path under the stated
+> compatibility modification; they do not demonstrate that the example runs
+> unchanged with the pinned dependency version. See also the regression test
+> in `tests/v1/storage_backend/test_ascend_pd_backend.py`.
