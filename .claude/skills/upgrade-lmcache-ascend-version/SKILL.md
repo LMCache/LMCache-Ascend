@@ -315,14 +315,14 @@ If a patch target no longer exists in the new lmcache (function deleted, class r
 
 Ensure the execution order in `__init__.py` is preserved. Required ordering:
 1. `_patch_config` (always first)
-2. `_patch_torch_capability` (pytorch framework only)
+2. `_patch_torch_capability` (always)
 3. `_patch_ops` (always)
 4. For vllm runtime: `_patch_get_vllm_torch_dev`, then `_patch_gpu_connector`
 5. `_patch_hash_token` (always)
-6. For pytorch framework: `_patch_storage_backend_init`, `_patch_transfer_channel`, `_patch_cacheblend`, `_patch_multi_process`, `_patch_lookup_client`, `_patch_rpc_utils`
+6. `_patch_storage_backend_init`, `_patch_transfer_channel`, `_patch_cacheblend`, `_patch_multi_process`, `_patch_lookup_client`, `_patch_rpc_utils`
 7. `_patch_kv_layer_group` (always)
 8. For sglang runtime: `_patch_sgl`
-9. For vllm runtime + pytorch: `_patch_sys_detection`
+9. For vllm runtime: `_patch_sys_detection`
 10. For vllm runtime: `_patch_vllm_v1_adapter`, then `_patch_cache_engine`
 
 Key dependency: For vllm, `gpu_connector` must be patched before `storage_backend_init`
@@ -356,8 +356,6 @@ Find and replace in ALL of these files:
 - `docker/Dockerfile.a3.openEuler` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
 - `docker/Dockerfile.a3` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
 - `docker/Dockerfile.310p.openEuler` - line 30: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
-- `docker/mindspore/Dockerfile.310p.openEuler` - line 29: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
-- `docker/mindspore/Dockerfile.a2.openEuler` - line 29: `pip install lmcache=={old}` -> `pip install lmcache=={new}`
 
 Use the `Edit` tool with `replace_all: true` on each file for the `pip install lmcache==` or `LMCACHE_TAG=` lines.
 
@@ -379,7 +377,7 @@ version also went from 0.4.2 to 0.4.3).
 
 #### Step 1 — Update README Compatibility Matrix
 
-For each row in the compatibility matrix (SGLang and MindSpore sections),
+For each row in the compatibility matrix,
 update only the **first two columns** (LMCache-Ascend version and Upstream
 LMCache) from the old version to the new version. Leave the vLLM/SGLang version
 column **unchanged**.
@@ -415,8 +413,6 @@ Files to update:
 - `docker/Dockerfile.a2.openEuler`
 - `docker/Dockerfile.a3`
 - `docker/Dockerfile.a3.openEuler`
-- `docker/mindspore/Dockerfile.310p.openEuler`
-- `docker/mindspore/Dockerfile.a2.openEuler`
 
 ---
 

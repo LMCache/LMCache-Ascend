@@ -73,22 +73,16 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import torch
 
 # First Party
-from lmcache_ascend import _build_info
 from lmcache_ascend.v1.blend.blender import LMCBlender
 from lmcache_ascend.v1.blend.hole_blender import LMCBlenderHole
 from lmcache_ascend.v1.hole_cache_engine import HoleLegacyCacheEngine
 from lmcache_ascend.v1.hole_segment_utils import HoleSegmentHelper
 from lmcache_ascend.v1.hole_types import HoleLoadSpec, HoleSaveSpec
+from lmcache_ascend.v1.npu_hole_connector import (
+    VLLMBufferLayerwiseNPUHoleConnector,
+    VLLMBufferLayerwiseNPULegacyHoleConnector,
+)
 from lmcache_ascend.v1.timer import emit_timer
-
-if _build_info.__framework_name__ == "pytorch":
-    # First Party
-    from lmcache_ascend.v1.npu_hole_connector import (
-        VLLMBufferLayerwiseNPUHoleConnector,
-        VLLMBufferLayerwiseNPULegacyHoleConnector,
-    )
-else:
-    raise ValueError("Hole connector is only supported in LMCache-Ascend pytorch.")
 
 if TYPE_CHECKING:
     # Third Party

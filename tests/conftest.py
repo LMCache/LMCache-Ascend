@@ -49,24 +49,18 @@ except Exception as e:
 # ==============================================================================
 def setup_npu_backend():
     try:
-        # First Party
-        from lmcache_ascend import _build_info
+        # Third Party
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+        import torch
 
-        print(f"\n⚡ [NPU Setup] Detected framework: {_build_info.__framework_name__}")
-
-        if _build_info.__framework_name__ == "pytorch":
-            # Third Party
-            from torch_npu.contrib import transfer_to_npu  # noqa: F401
-            import torch
-
-            if hasattr(torch, "npu") and torch.npu.is_available():
-                _ = torch.randn((10), device="npu")
-                print("   ✅ NPU Backend initialized successfully.")
-            else:
-                print("   ℹ️ CPU-only pytest: skipped NPU sanity check.")
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            _ = torch.randn((10), device="npu")
+            print("   ✅ NPU Backend initialized successfully.")
+        else:
+            print("   ℹ️ CPU-only pytest: skipped NPU sanity check.")
 
     except ImportError as e:
-        pytest.exit(f"❌ lmcache_ascend or torch_npu not found: {e}", returncode=1)
+        pytest.exit(f"❌ torch_npu not found: {e}", returncode=1)
 
 
 def patch_lmcache_test_utils():

@@ -9,9 +9,6 @@ from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # is
 from typing import Any
 import sys
 
-# First Party
-from lmcache_ascend import _build_info
-
 # NOTE: Must be manually edited per each version and
 # is also used by the test infrastructure.
 LMCACHE_UPSTREAM_TAG = "v0.4.4"
@@ -1057,21 +1054,18 @@ if not LMCACHE_ASCEND_PATCHED:
 
     _patch_trace_utils_compat()
 
-    if _build_info.__framework_name__ == "pytorch":
-        _patch_lazy_memory_allocator()
+    _patch_lazy_memory_allocator()
 
     _patch_config()
 
     is_sgl = _is_sglang_runtime()
     is_vllm = _is_vllm_runtime()
 
-    if _build_info.__framework_name__ == "pytorch":
-        # Third Party
-        # TODO (gingfung): Currently we patch all the cuda calls
-        # due to effort to port all torch.cuda will disabled torch.jit
-        # NOTE: this must be done early in the patch prior to the cache engine
-        # to avoid falling into non_cuda_equivalent
-        _patch_torch_capability()
+    # TODO (gingfung): Currently we patch all the cuda calls
+    # due to effort to port all torch.cuda will disabled torch.jit
+    # NOTE: this must be done early in the patch prior to the cache engine
+    # to avoid falling into non_cuda_equivalent
+    _patch_torch_capability()
 
     _patch_ops()
     # Retry now that _patch_ops has set lmcache.c_ops (the early call during
@@ -1086,20 +1080,18 @@ if not LMCACHE_ASCEND_PATCHED:
     _patch_cachegen()
     _patch_remote_backend()
 
-    if _build_info.__framework_name__ == "pytorch":
-        _patch_storage_backend_init()
-        _patch_storage_manager()
-        _patch_transfer_channel()
-        _patch_cacheblend()
-        _patch_lookup_client()
-        _patch_cache_controller_worker()
-        _patch_rpc_utils()
+    _patch_storage_backend_init()
+    _patch_storage_manager()
+    _patch_transfer_channel()
+    _patch_cacheblend()
+    _patch_lookup_client()
+    _patch_cache_controller_worker()
+    _patch_rpc_utils()
 
     if is_sgl:
         _patch_sgl()
     elif is_vllm:
-        if _build_info.__framework_name__ == "pytorch":
-            _patch_sys_detection()
+        _patch_sys_detection()
 
         _patch_lookup_client_factory()
         _patch_vllm_service_factory_hole()
@@ -1109,9 +1101,5 @@ if not LMCACHE_ASCEND_PATCHED:
         _patch_cache_engine()
 
         _patch_api_server()
-
-    if _build_info.__framework_name__ == "mindspore":
-        # First Party
-        import lmcache_ascend.mindspore  # noqa: F401
 
     LMCACHE_ASCEND_PATCHED = True

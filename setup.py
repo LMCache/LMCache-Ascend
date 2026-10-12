@@ -24,8 +24,6 @@ ROOT_DIR = Path(__file__).parent
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-USE_MINDSPORE = os.getenv("USE_MINDSPORE", "False").lower() in ("true", "1")
-
 
 # NOTE: Apply platform-specific patches during installation
 # to resolve environment issues
@@ -225,11 +223,6 @@ class custom_build_info(build_py):
         with open(package_dir, "w+") as f:
             f.write("# Auto-generated file\n")
             f.write(f"__soc_version__ = '{soc_version}'\n")
-            if USE_MINDSPORE:
-                framework_name = "mindspore"
-            else:
-                framework_name = "pytorch"
-            f.write(f"__framework_name__ = '{framework_name}'\n")
             f.write(f"__cann_version__ = '{cann_version}'\n")
             f.write("\n")
             f.write("def cann_version_tuple() -> tuple[int, ...]:\n")
@@ -327,26 +320,19 @@ class CustomAscendCmakeBuildExt(build_ext):
             "  -DCMAKE_VERBOSE_MAKEFILE=ON"
         ]
 
-        if USE_MINDSPORE:
-            # Third Party
-            import mindspore
+        # Third Party
+        import torch
+        import torch_npu
 
-            ms_path = os.path.dirname(os.path.abspath(mindspore.__file__))
-            cmake_cmd += [f"  -DMINDSPORE_PATH={ms_path}"]
-        else:
-            # Third Party
-            import torch
-            import torch_npu
-
-            torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
-            torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
-            torch_path = os.path.dirname(os.path.abspath(torch.__file__))
-            cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
-            cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
-            cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
-            torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
-            cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
-            cmake_cmd += [f"  -DHCOMM_SRC_PATH={hcomm_src_path}"]
+        torch_npu_path = os.path.dirname(os.path.abspath(torch_npu.__file__))
+        torch_cxx11_abi = int(torch.compiled_with_cxx11_abi())
+        torch_path = os.path.dirname(os.path.abspath(torch.__file__))
+        cmake_cmd += [f"  -DTORCH_NPU_PATH={torch_npu_path}"]
+        cmake_cmd += [f"  -DTORCH_PATH={torch_path}"]
+        cmake_cmd += [f"  -DGLIBCXX_USE_CXX11_ABI={torch_cxx11_abi}"]
+        torch_cmake_dir = os.path.join(torch.utils.cmake_prefix_path, "Torch")
+        cmake_cmd += [f"  -DTorch_DIR={torch_cmake_dir}"]
+        cmake_cmd += [f"  -DHCOMM_SRC_PATH={hcomm_src_path}"]
 
         if self._cann_version_8_5:
             cmake_cmd += ["  -DUSE_HIXL=ON"]

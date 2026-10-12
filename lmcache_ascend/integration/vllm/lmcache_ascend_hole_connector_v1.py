@@ -10,21 +10,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 
 # First Party
-from lmcache_ascend import _build_info
-
-if _build_info.__framework_name__ == "pytorch":
-    # First Party
-    import lmcache_ascend  # noqa: F401
-elif _build_info.__framework_name__ == "mindspore":
-    # First Party
-    import lmcache_ascend.mindspore  # noqa: F401
-else:
-    raise ValueError("Unsupported Framework")
-
-# First Party
 from lmcache_ascend.integration.vllm.vllm_v1_adapter_hole import (
     LMCacheConnectorV1ImplHole,
 )
+import lmcache_ascend  # noqa: F401
 
 logger = init_logger(__name__)
 

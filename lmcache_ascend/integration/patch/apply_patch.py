@@ -22,7 +22,6 @@ def run_integration_patches():
     patch_tasks = [
         ("sglang", f"{base_path}.sglang.sglang_patch", "SglangPatcher"),
         ("vllm_ascend", f"{base_path}.vllm.cacheblend_patch", "CacheBlendPatcher"),
-        # ("mindspore", "...", "MindSporePatcher"),
     ]
 
     if is_310p():
