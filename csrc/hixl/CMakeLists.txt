@@ -3,14 +3,14 @@ find_package(pybind11 REQUIRED)
 
 set(HIXL_SRC_FILES
     bindings.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/hcomm_devva.cc
+    ${CMAKE_CURRENT_SOURCE_DIR}/../hcomm_devva.cc
 )
 
 pybind11_add_module(hixl_npu_comms ${HIXL_SRC_FILES})
 
 target_include_directories(hixl_npu_comms PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
     ${ASCEND_CANN_PACKAGE_PATH}/include
     ${ASCEND_CANN_PACKAGE_PATH}/include/experiment
     ${ASCEND_CANN_PACKAGE_PATH}/include/experiment/runtime
