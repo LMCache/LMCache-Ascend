@@ -80,6 +80,9 @@ def CreateStorageBackends(
     # Reuse existing LocalCPUBackend when available so that
     # dependent backends (disk, remote, p2p, …) keep working.
     local_cpu_backend: Optional[LocalCPUBackend] = None
+    needs_local_cpu_backend = (
+        not config.enable_pd or config.local_cpu or config.enable_p2p
+    )
     if existing_backends and "LocalCPUBackend" in existing_backends:
         _existing_cpu = existing_backends["LocalCPUBackend"]
         if isinstance(_existing_cpu, LocalCPUBackend):
@@ -88,7 +91,7 @@ def CreateStorageBackends(
     if metadata.role == "scheduler":
         # For scheduler role, local_cpu_backend is None
         pass
-    elif not config.enable_pd or config.local_cpu:
+    elif needs_local_cpu_backend:
         if "LocalCPUBackend" in _skip:
             pass  # Skipped — already exists
         elif config.max_local_cpu_size > 0:
@@ -110,7 +113,11 @@ def CreateStorageBackends(
                 "with `use_layerwise=true`. The Ascend P2P backend does not support "
                 "layerwise mode in current implementation. Disable one of them."
             )
-        assert local_cpu_backend is not None
+        if local_cpu_backend is None:
+            raise ValueError(
+                "Invalid LMCache-Ascend config: `enable_p2p=true` requires "
+                "`max_local_cpu_size > 0` or an existing `LocalCPUBackend`."
+            )
         assert lmcache_worker is not None
         p2p_backend = AscendP2PBackend(
             config,

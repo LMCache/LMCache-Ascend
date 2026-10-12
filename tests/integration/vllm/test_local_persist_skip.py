@@ -103,6 +103,25 @@ def test_consumer_role_skips_without_lookup():
     engine.lookup.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("kv_role", "disagg_spec", "expected_skip"),
+    [
+        ("kv_producer", SimpleNamespace(num_transferred_tokens=2 * CHUNK), 2 * CHUNK),
+        ("kv_both", SimpleNamespace(num_transferred_tokens=2 * CHUNK), 4 * CHUNK),
+        ("kv_producer", None, 4 * CHUNK),
+    ],
+)
+def test_pd_producer_skip_is_clamped_to_transferred_tokens(
+    kv_role,
+    disagg_spec,
+    expected_skip,
+):
+    adapter, _ = _make_adapter(kv_role=kv_role)
+    request = SimpleNamespace(disagg_spec=disagg_spec)
+
+    assert adapter._pd_producer_skip_leading_tokens(4 * CHUNK, request) == expected_skip
+
+
 def test_local_cpu_disabled_skips_without_lookup():
     adapter, engine = _make_adapter(local_cpu=False, local_present=0)
     request = _make_request()
