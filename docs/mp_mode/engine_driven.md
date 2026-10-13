@@ -1,6 +1,6 @@
 # Engine-Driven Mode Deployment Guide
 
-In `engine_driven` mode the vLLM workers gather and scatter the KV copies themselves: the server hands over the requested chunks through a named shared-memory pool, and the workers copy them into the paged KV on the device. On NPU, `lmcache.mp.mp_transfer_mode: auto` resolves to this mode. It supports models with a single KV-cache format only (standard GQA/MHA layouts, e.g. Qwen3); multi-plane MLA/DSA models such as DeepSeek-V4 must use [lmcache_driven](lmcache_driven.md). **Mamba / GDN hybrids (e.g. Qwen3.5) are not supported in MP mode** — see [README.md](README.md#supported-models-and-limitations).
+In `engine_driven` mode the vLLM workers gather and scatter the KV copies themselves: the server hands over the requested chunks through a named shared-memory pool, and the workers copy them into the paged KV on the device. On NPU the default transfer mode (`auto`) resolves to `lmcache_driven`, so this mode must be selected explicitly via `lmcache.mp.mp_transfer_mode: engine_driven`. It supports models with a single KV-cache format only (standard GQA/MHA layouts, e.g. Qwen3); multi-plane MLA/DSA models such as DeepSeek-V4 must use [lmcache_driven](lmcache_driven.md). **Mamba / GDN hybrids (e.g. Qwen3.5) are not supported in MP mode** — see [README.md](README.md#supported-models-and-limitations).
 
 > **Important — `--shm-name` and `--no-l1-use-lazy` are mandatory for this mode.** Without a named shared-memory pool the server hands back ordinary (non-pinned) host memory, and every retrieve pays a dynamic pinning and extra copy on the worker, which degrades warm-hit performance severely. Always pair `--shm-name` with `--no-l1-use-lazy` so the pool is allocated eagerly at startup. Note that a shared-memory pool of `--l1-size-gb` size is created under `/dev/shm`, so the container must be started with a matching `--shm-size`.
 
@@ -70,7 +70,7 @@ The LMCache main branch (`dev`) provides the MP transfer architecture (the `lmca
 cd /workspace
 git clone https://github.com/LMCache/LMCache.git
 cd LMCache
-python3 -m pip install -v --no-build-isolation -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -v --no-build-isolation -e .
 cd ..
 ```
 
@@ -127,21 +127,18 @@ lmcache server --help | grep supported-transfer-mode  # shows lmcache_driven / e
 
 ```bash
 lmcache server \
-    --host 127.0.0.1 \
-    --port 5555 \
     --chunk-size 128 \
     --supported-transfer-mode engine_driven \
     --l1-size-gb 20 \
     --shm-name lmcache-mp-e2e --no-l1-use-lazy \
-    --eviction-policy LRU \
-    --disable-metrics &
+    --eviction-policy LRU &
 ```
 
 Wait for readiness before starting vLLM:
 
 ```
 LMCache INFO: Checking if shm capacity is larger than L1 request
-LMCache INFO: LMCache zmq cache server is running on 127.0.0.1:5555
+LMCache INFO: LMCache zmq cache server is running on localhost:5555
 INFO:     Uvicorn running on http://127.0.0.1:8080
 ```
 
@@ -178,17 +175,15 @@ vllm serve /workspace/models/Qwen3-32B \
       "kv_connector": "LMCacheMPConnector",
       "kv_role": "kv_both",
       "kv_connector_extra_config": {
-        "lmcache.mp.host": "127.0.0.1",
-        "lmcache.mp.port": 5555,
         "lmcache.mp.mp_transfer_mode": "engine_driven"
       }
     }'
 ```
 
-A successful start shows, for every worker:
+The connector reaches the server at `localhost:5555` by default; only the transfer mode needs to be set explicitly. A successful start shows, for every worker:
 
 ```
-LMCache INFO: lmcache.mp.mp_transfer_mode = engine_driven (overridden, default: auto)
+LMCache INFO: Creating transfer context (device_type=npu, mode=engine_driven)
 LMCache INFO: Engine KV Format: EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS
 LMCache INFO: Registered non-GPU context for instance ... (world_size=8)
 LMCache INFO: Using shm non-GPU transfer strategy

@@ -11,7 +11,7 @@ The data plane has two transfer modes, selected with the `lmcache.mp.mp_transfer
 | Server requirements | `--chunk-size 4096` for DeepSeek-V4 (see [lmcache_driven.md](lmcache_driven.md)) | `--shm-name <name> --no-l1-use-lazy` are mandatory (see [engine_driven.md](engine_driven.md)) |
 | Deployment guide | [lmcache_driven.md](lmcache_driven.md) | [engine_driven.md](engine_driven.md) |
 
-On NPU, leaving `lmcache.mp.mp_transfer_mode` unset (or `auto`) resolves to `engine_driven`; for DeepSeek-V4 you must set `lmcache_driven` explicitly.
+On NPU, leaving `lmcache.mp.mp_transfer_mode` unset (or `auto`) resolves to `lmcache_driven`, so DeepSeek-V4 needs no extra setting; to use `engine_driven` you must set it explicitly.
 
 ## Supported models and limitations
 

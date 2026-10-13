@@ -47,6 +47,7 @@ Please ensure your environment matches the versions below.
 | LMCache-Ascend | LMCache | vLLM Version |
 | :--- | :--- | :--- |
 | **main** | **dev** | **>=v0.23.0** |
+| **v0.5.6rc5** | **v0.5.6rc5** | **>=v0.23.0** |
 
 ## Getting Started
 
@@ -71,16 +72,12 @@ pip install -v --no-build-isolation -e .
 
 ```bash
 lmcache server \
-    --host 127.0.0.1 \
-    --port 5555 \
     --chunk-size 128 \
-    --supported-transfer-mode lmcache_driven \
     --l1-size-gb 50 \
-    --eviction-policy LRU \
-    --disable-metrics
+    --eviction-policy LRU
 ```
 
-Wait for `LMCache INFO: LMCache zmq cache server is running on 127.0.0.1:5555`.
+Wait for `LMCache INFO: LMCache zmq cache server is running on localhost:5555`.
 
 `--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) for the full deployment guide.
 
@@ -98,16 +95,11 @@ vllm serve /path/to/Qwen3-32B \
     --port 8900 \
     --kv-transfer-config '{
       "kv_connector": "LMCacheMPConnector",
-      "kv_role": "kv_both",
-      "kv_connector_extra_config": {
-        "lmcache.mp.host": "127.0.0.1",
-        "lmcache.mp.port": 5555,
-        "lmcache.mp.mp_transfer_mode": "lmcache_driven"
-      }
+      "kv_role": "kv_both"
     }'
 ```
 
-A successful start shows `LMCache INFO: lmcache.mp.mp_transfer_mode = lmcache_driven (overridden, default: auto)` for every worker.
+The server address defaults to `localhost:5555` on both sides; on NPU the transfer mode defaults to `lmcache_driven`, so no extra config is needed here. A successful start shows `LMCache INFO: Creating transfer context (device_type=npu, mode=lmcache_driven)` for every worker.
 
 For the `engine_driven` transfer mode (workers copy KV from a named SHM pool), see [docs/mp_mode/engine_driven.md](docs/mp_mode/engine_driven.md).
 

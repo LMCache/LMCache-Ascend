@@ -70,7 +70,7 @@ The LMCache main branch (`dev`) provides the MP transfer architecture (the `lmca
 cd /workspace
 git clone https://github.com/LMCache/LMCache.git
 cd LMCache
-python3 -m pip install -v --no-build-isolation -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+pip install -v --no-build-isolation -e .
 cd ..
 ```
 
@@ -127,25 +127,22 @@ lmcache server --help | grep supported-transfer-mode  # shows lmcache_driven / e
 
 ```bash
 lmcache server \
-    --host 127.0.0.1 \
-    --port 5555 \
     --chunk-size 4096 \
-    --supported-transfer-mode lmcache_driven \
     --l1-size-gb 50 \
-    --eviction-policy LRU \
-    --disable-metrics &
+    --eviction-policy LRU &
 ```
 
 Wait for readiness before starting vLLM:
 
 ```
-LMCache INFO: LMCache zmq cache server is running on 127.0.0.1:5555
+LMCache INFO: LMCache zmq cache server is running on localhost:5555
 INFO:     Uvicorn running on http://127.0.0.1:8080
 ```
 
 Notes:
 
-- The server binds the ZMQ endpoint on `--port` and an HTTP health/ops endpoint on port `8080` on the same host; make sure both are free.
+- The server's transfer mode defaults to `lmcache_driven`, so `--supported-transfer-mode` is not needed here (unlike [engine_driven.md](engine_driven.md), which must set it).
+- The server binds the ZMQ endpoint on `localhost:5555` by default (`--host` / `--port` to change) and an HTTP health/ops endpoint on port `8080` on the same host; make sure both are free.
 - Size `--l1-size-gb` so that the whole working set (number of distinct prefixes × prefix tokens × KV bytes per token) fits comfortably; if the working set exceeds L1, LRU eviction turns hits back into misses and requests fall back to full prefill.
 - The server and the engines share failure semantics: restart the server and the engines together, and never restart the server while requests are in flight.
 
@@ -192,22 +189,15 @@ vllm serve /workspace/models/DeepSeek-V4-Flash-0731-w8a8 \
     "multistream_overlap_shared_expert": true}' \
       --kv-transfer-config '{
       "kv_connector": "LMCacheMPConnector",
-      "kv_role": "kv_both",
-      "kv_connector_extra_config": {
-        "lmcache.mp.host": "127.0.0.1",
-        "lmcache.mp.port": 5555,
-        "lmcache.mp.mp_transfer_mode": "lmcache_driven"
-      }
+      "kv_role": "kv_both"
     }'
 ```
 
-A successful connector start shows this line for every worker:
+The connector reaches the server at `localhost:5555` by default, and on NPU the transfer mode (`auto`) resolves to `lmcache_driven`. A successful connector start shows this line for every worker:
 
 ```
-LMCache INFO: lmcache.mp.mp_transfer_mode = lmcache_driven (overridden, default: auto)
+LMCache INFO: Creating transfer context (device_type=npu, mode=lmcache_driven)
 ```
-
-On NPU the `auto` value resolves to `engine_driven`, so DeepSeek-V4 deployments must set `lmcache_driven` explicitly as above.
 
 ---
 
