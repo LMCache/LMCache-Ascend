@@ -19,32 +19,38 @@
 #include <string>
 
 // Device Kernel
-#define MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(TYPE, SLOTTYPE, FMT) \
-    multi_layer_paged_kv_copy_310p_##TYPE##_##SLOTTYPE##_##FMT
+#define MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(TYPE, SLOTTYPE, FMT)        \
+  multi_layer_paged_kv_copy_310p_##TYPE##_##SLOTTYPE##_##FMT
 
 // NOTE: there are potential micro optimizaiton here.
-#define MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, FMT)                                           \
-    extern "C" __global__ __aicore__ void MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(TYPE, SLOTTYPE, FMT)(    \
-        __gm__ uint8_t* pagedKVCaches, __gm__ uint8_t* dstCacheTensor, __gm__ uint8_t* slotmappings,          \
-        const int64_t hiddenDims, const int32_t kvs, const int32_t numKVHead, const int32_t headSize,         \
-        const int32_t numLayers, const int64_t pageBuffSize, const int32_t numTokensChunk,                    \
-        const int32_t blockSize, const int32_t chunkSize, const int coreNum, const bool page2L)               \
-    {                                                                                                         \
-        AscendC::TPipe pipe;                                                                                  \
-        kvcache_ops::MultiLayerPagedKVCopyProcessor<TYPE, SLOTTYPE,                                           \
-            kvcache_ops::Chunk310PPolicy<TYPE, SLOTTYPE, kvcache_ops::KVCacheFormat::FMT>> op;                \
-        op.InitCommon(pagedKVCaches, dstCacheTensor, slotmappings, &pipe, hiddenDims, numLayers,              \
-                      pageBuffSize, numTokensChunk, page2L, kvs, numKVHead, headSize, blockSize, chunkSize);  \
-        op.process(coreNum);                                                                                  \
-    }
+#define MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, FMT)            \
+  extern "C" __global__ __aicore__ void                                        \
+  MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(TYPE, SLOTTYPE, FMT)(             \
+      __gm__ uint8_t* pagedKVCaches, __gm__ uint8_t* dstCacheTensor,           \
+      __gm__ uint8_t* slotmappings, const int64_t hiddenDims,                  \
+      const int32_t kvs, const int32_t numKVHead, const int32_t headSize,      \
+      const int32_t numLayers, const int64_t pageBuffSize,                     \
+      const int32_t numTokensChunk, const int32_t blockSize,                   \
+      const int32_t chunkSize, const int coreNum, const bool page2L) {         \
+    AscendC::TPipe pipe;                                                       \
+    kvcache_ops::MultiLayerPagedKVCopyProcessor<                               \
+        TYPE, SLOTTYPE,                                                        \
+        kvcache_ops::Chunk310PPolicy<TYPE, SLOTTYPE,                           \
+                                     kvcache_ops::KVCacheFormat::FMT>>         \
+        op;                                                                    \
+    op.InitCommon(pagedKVCaches, dstCacheTensor, slotmappings, &pipe,          \
+                  hiddenDims, numLayers, pageBuffSize, numTokensChunk, page2L, \
+                  kvs, numKVHead, headSize, blockSize, chunkSize);             \
+    op.process(coreNum);                                                       \
+  }
 
-#define EXPAND_FMT_310P(TYPE, SLOTTYPE) \
-    MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, MERGED_KV) \
-    MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, SEPARATE_KV)
+#define EXPAND_FMT_310P(TYPE, SLOTTYPE)                                        \
+  MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, MERGED_KV)            \
+  MULTI_LAYER_PAGED_KV_COPY_310P_DECLARE(TYPE, SLOTTYPE, SEPARATE_KV)
 
-#define EXPAND_SLOT_310P(TYPE) \
-    EXPAND_FMT_310P(TYPE, int32_t) \
-    EXPAND_FMT_310P(TYPE, int64_t)
+#define EXPAND_SLOT_310P(TYPE)                                                 \
+  EXPAND_FMT_310P(TYPE, int32_t)                                               \
+  EXPAND_FMT_310P(TYPE, int64_t)
 
 // Declare support kernel entry
 EXPAND_SLOT_310P(half)
@@ -53,50 +59,59 @@ EXPAND_SLOT_310P(int8_t)
 EXPAND_SLOT_310P(bfloat16_t)
 #endif
 
-
-// Host Side 
+// Host Side
 namespace kvcache_ops {
 
-#define SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, FMT)                                                     \
-template<>                                                                                                       \
-struct Chunk310PLauncher<TYPE, SLOTTYPE, KVCacheFormat::FMT> {                                                   \
-    static void Launch(uint32_t blockDim, void *stream,                                                          \
-                      uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings,                    \
-                      const Chunk310PConfig& config,                                                             \
-                      int64_t kHiddenDims = 0, int64_t vHiddenDims = 0, int64_t dsaHiddenDims = 0)               \
-    {                                                                                                            \
-        (void)kHiddenDims; (void)vHiddenDims; (void)dsaHiddenDims;                                               \
-        MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(TYPE, SLOTTYPE, FMT)<<<blockDim, nullptr, stream>>>(          \
-            pagedKVCaches, dstCacheTensor, slotmappings, config.common.hiddenDims, config.common.kvs,            \
-            config.numKVHead, config.headSize, config.common.numLayers, config.common.pageBuffSize,              \
-            config.common.numTokensChunk, config.blockSize, config.chunkSize, blockDim, config.common.page2L);   \
-    }                                                                                                            \
-};
+#define SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, FMT)                   \
+  template <> struct Chunk310PLauncher<TYPE, SLOTTYPE, KVCacheFormat::FMT> {   \
+    static void Launch(uint32_t blockDim, void* stream,                        \
+                       uint8_t* pagedKVCaches, uint8_t* dstCacheTensor,        \
+                       uint8_t* slotmappings, const Chunk310PConfig& config,   \
+                       int64_t kHiddenDims = 0, int64_t vHiddenDims = 0,       \
+                       int64_t dsaHiddenDims = 0) {                            \
+      (void)kHiddenDims;                                                       \
+      (void)vHiddenDims;                                                       \
+      (void)dsaHiddenDims;                                                     \
+      MULTI_LAYER_PAGED_KV_COPY_310P_KERNEL_NAME(                              \
+          TYPE, SLOTTYPE, FMT)<<<blockDim, nullptr, stream>>>(                 \
+          pagedKVCaches, dstCacheTensor, slotmappings,                         \
+          config.common.hiddenDims, config.common.kvs, config.numKVHead,       \
+          config.headSize, config.common.numLayers,                            \
+          config.common.pageBuffSize, config.common.numTokensChunk,            \
+          config.blockSize, config.chunkSize, blockDim, config.common.page2L); \
+    }                                                                          \
+  };
 
-#define SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, FMT)                                        \
-template<>                                                                                                       \
-struct Chunk310PLauncher<TYPE, SLOTTYPE, KVCacheFormat::FMT> {                                                   \
-    static void Launch(uint32_t blockDim, void *stream,                                                          \
-                      uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings,                    \
-                      const Chunk310PConfig& config,                                                             \
-                      int64_t kHiddenDims = 0, int64_t vHiddenDims = 0, int64_t dsaHiddenDims = 0)               \
-    {                                                                                                            \
-        (void)blockDim; (void)stream; (void)pagedKVCaches; (void)dstCacheTensor; (void)slotmappings;             \
-        (void)config; (void)kHiddenDims; (void)vHiddenDims; (void)dsaHiddenDims;                                 \
-        ASCENDC_REPORT_NOT_SUPPORT(false, #FMT " is not supported on 310P.");                                    \
-        throw std::runtime_error(#FMT " format is not supported on 310P.");                                      \
-    }                                                                                                            \
-};
+#define SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, FMT)       \
+  template <> struct Chunk310PLauncher<TYPE, SLOTTYPE, KVCacheFormat::FMT> {   \
+    static void Launch(uint32_t blockDim, void* stream,                        \
+                       uint8_t* pagedKVCaches, uint8_t* dstCacheTensor,        \
+                       uint8_t* slotmappings, const Chunk310PConfig& config,   \
+                       int64_t kHiddenDims = 0, int64_t vHiddenDims = 0,       \
+                       int64_t dsaHiddenDims = 0) {                            \
+      (void)blockDim;                                                          \
+      (void)stream;                                                            \
+      (void)pagedKVCaches;                                                     \
+      (void)dstCacheTensor;                                                    \
+      (void)slotmappings;                                                      \
+      (void)config;                                                            \
+      (void)kHiddenDims;                                                       \
+      (void)vHiddenDims;                                                       \
+      (void)dsaHiddenDims;                                                     \
+      ASCENDC_REPORT_NOT_SUPPORT(false, #FMT " is not supported on 310P.");    \
+      throw std::runtime_error(#FMT " format is not supported on 310P.");      \
+    }                                                                          \
+  };
 
-#define EXPAND_LAUNCHER_310P_FMT(TYPE, SLOTTYPE) \
-    SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, MERGED_KV) \
-    SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, SEPARATE_KV) \
-    SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, MLA_KV) \
-    SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, DSA_KV)
+#define EXPAND_LAUNCHER_310P_FMT(TYPE, SLOTTYPE)                               \
+  SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, MERGED_KV)                   \
+  SPECIALIZE_KERNEL_LAUNCHER_310P(TYPE, SLOTTYPE, SEPARATE_KV)                 \
+  SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, MLA_KV)          \
+  SPECIALIZE_KERNEL_LAUNCHER_310P_UNSUPPORTED(TYPE, SLOTTYPE, DSA_KV)
 
-#define EXPAND_LAUNCHER_310P_SLOT(TYPE) \
-    EXPAND_LAUNCHER_310P_FMT(TYPE, int32_t) \
-    EXPAND_LAUNCHER_310P_FMT(TYPE, int64_t)
+#define EXPAND_LAUNCHER_310P_SLOT(TYPE)                                        \
+  EXPAND_LAUNCHER_310P_FMT(TYPE, int32_t)                                      \
+  EXPAND_LAUNCHER_310P_FMT(TYPE, int64_t)
 
 EXPAND_LAUNCHER_310P_SLOT(half)
 EXPAND_LAUNCHER_310P_SLOT(int8_t)
@@ -106,40 +121,45 @@ EXPAND_LAUNCHER_310P_SLOT(bfloat16_t)
 
 extern void multi_layer_kv_transfer_kernel_310p(
     kvcache_ops::AscendType type, kvcache_ops::AscendType slotType,
-    const kvcache_ops::KVCacheFormat kvcacheFormat, uint32_t blockDim, void *stream, 
-    uint8_t *pagedKVCaches, uint8_t *dstCacheTensor, uint8_t *slotmappings,
-    const int64_t hiddenDims, const int32_t kvs, const int32_t numLayers,
-    const int64_t pageBuffSize, const int32_t numTokensChunk, const bool page2L,
-    const int32_t numKVHead, const int32_t headSize, const int32_t blockSize)
-{
-    auto config = kvcache_ops::Make310PConfig(
-        hiddenDims, numLayers, pageBuffSize, numTokensChunk, page2L, kvs,
-        numKVHead, headSize, blockSize, 16 
-    );
+    const kvcache_ops::KVCacheFormat kvcacheFormat, uint32_t blockDim,
+    void* stream, uint8_t* pagedKVCaches, uint8_t* dstCacheTensor,
+    uint8_t* slotmappings, const int64_t hiddenDims, const int32_t kvs,
+    const int32_t numLayers, const int64_t pageBuffSize,
+    const int32_t numTokensChunk, const bool page2L, const int32_t numKVHead,
+    const int32_t headSize, const int32_t blockSize) {
+  auto config = kvcache_ops::Make310PConfig(hiddenDims, numLayers, pageBuffSize,
+                                            numTokensChunk, page2L, kvs,
+                                            numKVHead, headSize, blockSize, 16);
 
-    switch(type) {
-        case kvcache_ops::AscendType::FP16:
-            kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::Chunk310PLauncher, half>(
-                slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
-            break;
+  switch (type) {
+  case kvcache_ops::AscendType::FP16:
+    kvcache_ops::dispatch_paged_kernel_on_slot_type<
+        kvcache_ops::Chunk310PLauncher, half>(
+        slotType, kvcacheFormat, blockDim, stream, pagedKVCaches,
+        dstCacheTensor, slotmappings, config);
+    break;
 #if (ASCEND_AICORE_ARCH >= 220)
-        case kvcache_ops::AscendType::BF16:
-            kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::Chunk310PLauncher, bfloat16_t>(
-                slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
-            break;
+  case kvcache_ops::AscendType::BF16:
+    kvcache_ops::dispatch_paged_kernel_on_slot_type<
+        kvcache_ops::Chunk310PLauncher, bfloat16_t>(
+        slotType, kvcacheFormat, blockDim, stream, pagedKVCaches,
+        dstCacheTensor, slotmappings, config);
+    break;
 #endif
-        case kvcache_ops::AscendType::INT8:
-            kvcache_ops::dispatch_paged_kernel_on_slot_type<kvcache_ops::Chunk310PLauncher, int8_t>(
-                slotType, kvcacheFormat, blockDim, stream, 
-                pagedKVCaches, dstCacheTensor, slotmappings, config);
-            break;
+  case kvcache_ops::AscendType::INT8:
+    kvcache_ops::dispatch_paged_kernel_on_slot_type<
+        kvcache_ops::Chunk310PLauncher, int8_t>(
+        slotType, kvcacheFormat, blockDim, stream, pagedKVCaches,
+        dstCacheTensor, slotmappings, config);
+    break;
 
-        default:
-            ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) + " is not supported.")
-            throw std::runtime_error("Scalar type: " + std::to_string(static_cast<int>(type)) + " not supported. This should not have happened.");
-    }
+  default:
+    ASCENDC_REPORT_NOT_SUPPORT(false, std::to_string(static_cast<int>(type)) +
+                                          " is not supported.")
+    throw std::runtime_error(
+        "Scalar type: " + std::to_string(static_cast<int>(type)) +
+        " not supported. This should not have happened.");
+  }
 }
 
 } // namespace kvcache_ops

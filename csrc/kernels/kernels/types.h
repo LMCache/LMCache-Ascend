@@ -18,19 +18,23 @@
 
 namespace kvcache_ops {
 enum struct AscendType {
-    FP16 = 0,
-    BF16 = 1,
-    FP32 = 2,
-    INT8 = 3,
-    INT32 = 4,
-    INT64 = 5,
+  FP16 = 0,
+  BF16 = 1,
+  FP32 = 2,
+  INT8 = 3,
+  INT32 = 4,
+  INT64 = 5,
 };
 
 enum struct KVCacheFormat : int {
-    UNDEFINED = 0,
-    MERGED_KV = 1,    // [2, num_blocks, block_size, num_heads, head_dim] eg: vllm0.9.2 
-    SEPARATE_KV = 2,  // tuple(K, V), k/v: [num_blocks, block_size, num_heads, head_dim] eg: vllm0.11.0 
-    MLA_KV = 3,       // tuple(k_cache, v_cache) with different hidden_dims for DeepSeek V2/V3
-    DSA_KV = 4,       // tuple(k_cache, v_cache, dsa_k_cache) for DeepSeek V3.2 sparse attention
+  UNDEFINED = 0,
+  MERGED_KV =
+      1, // [2, num_blocks, block_size, num_heads, head_dim] eg: vllm0.9.2
+  SEPARATE_KV = 2, // tuple(K, V), k/v: [num_blocks, block_size, num_heads,
+                   // head_dim] eg: vllm0.11.0
+  MLA_KV = 3, // tuple(k_cache, v_cache) with different hidden_dims for DeepSeek
+              // V2/V3
+  DSA_KV = 4, // tuple(k_cache, v_cache, dsa_k_cache) for DeepSeek V3.2 sparse
+              // attention
 };
-}
+} // namespace kvcache_ops
