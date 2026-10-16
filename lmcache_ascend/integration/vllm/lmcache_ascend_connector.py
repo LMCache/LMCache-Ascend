@@ -75,7 +75,9 @@ class LMCacheAscendConnector(LMCacheConnectorV1, SupportsHMA):
 
     def update_connector_output(self, output):
         result = super().update_connector_output(output)
+        # First Party
         from lmcache_ascend.v1.gdn_async_lookup import AsyncStateClient
+
         client = self._lmcache_engine.lookup_client
         if isinstance(client, AsyncStateClient):
             client.received(output.finished_recving or ())

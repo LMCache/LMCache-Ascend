@@ -5,20 +5,31 @@ Snapshots own private NPU tensors. Producer/capture ordering is device-side;
 the existing store worker owns CPU persistence and request completion. Unknown
 device failures fail closed rather than recycling potentially live buffers.
 """
+
+# Standard
 from copy import deepcopy
 from dataclasses import dataclass
 import queue
 import threading
 import time
 
-import torch
+# Third Party
 from lmcache.logging import init_logger
+import torch
+
+# First Party
+from lmcache_ascend.v1.gdn_async_config import (
+    gdn_async_staging_mib,
+    gdn_async_store_enabled,
+)
 from lmcache_ascend.v1.state_checkpoint import StateBlockBinding
 
 logger = init_logger(__name__)
 
+
 class CheckedQueue(queue.Queue):
     """Bound producer waits; a dead/failed worker must not hang the forward."""
+
     def __init__(self, engine, maxsize):
         super().__init__(maxsize=maxsize)
         self.engine = engine
@@ -84,7 +95,9 @@ def latch_error(engine, error, req_id):
     # Keep a string, not a traceback retaining tensors/allocator references.
     with engine._gdn_error_lock:
         if not engine._gdn_async_error:
-            engine._gdn_async_error = f"request={req_id}: {type(error).__name__}: {error}"
+            engine._gdn_async_error = (
+                f"request={req_id}: {type(error).__name__}: {error}"
+            )
     logger.exception("GDN_ASYNC_BACKGROUND_ERROR req_id=%s; fail closed", req_id)
     with engine._store_cv:
         engine._store_cv.notify_all()
@@ -123,7 +136,9 @@ def capture(engine, execution, layouts, kv_caches, ordering_event):
     nbytes = 0
     for group, block in blocks:
         layout = by_group[group]
-        binding = StateBlockBinding(tuple(tuple(kv_caches[n]) for n in layout.layer_names), block)
+        binding = StateBlockBinding(
+            tuple(tuple(kv_caches[n]) for n in layout.layer_names), block
+        )
         binding.validate(layout)
         for entry in binding.tensors:
             devices.update(t.device for t in entry)
@@ -135,15 +150,26 @@ def capture(engine, execution, layouts, kv_caches, ordering_event):
         raise ValueError("GDN snapshot requires one NPU device")
     if nbytes <= 0:
         raise ValueError("Empty GDN snapshot")
-    frozen = FrozenExecution(execution.req_id, tuple(execution.token_ids), execution.end,
-                             deepcopy(execution.request_configs), tuple(g for g, _ in blocks))
+    frozen = FrozenExecution(
+        execution.req_id,
+        tuple(execution.token_ids),
+        execution.end,
+        deepcopy(execution.request_configs),
+        tuple(g for g, _ in blocks),
+    )
     frozen.save_blocks(engine.config.chunk_size)
     with engine._gdn_budget_lock:
         if engine._gdn_reserved + nbytes > engine._gdn_budget:
             engine._gdn_skipped += 1
-            logger.warning("GDN_ASYNC_SKIP req_id=%s boundary=%d reason=staging_budget "
-                           "bytes=%d reserved=%d limit=%d", execution.req_id, execution.end,
-                           nbytes, engine._gdn_reserved, engine._gdn_budget)
+            logger.warning(
+                "GDN_ASYNC_SKIP req_id=%s boundary=%d reason=staging_budget "
+                "bytes=%d reserved=%d limit=%d",
+                execution.req_id,
+                execution.end,
+                nbytes,
+                engine._gdn_reserved,
+                engine._gdn_budget,
+            )
             return None
         engine._gdn_reserved += nbytes
     device = next(iter(devices))
@@ -160,14 +186,19 @@ def capture(engine, execution, layouts, kv_caches, ordering_event):
                 for group, block in blocks:
                     for name in by_group[group].layer_names:
                         snapshots[name] = tuple(
-                            t[block:block + 1].clone(memory_format=torch.contiguous_format)
-                            for t in kv_caches[name])
+                            t[block : block + 1].clone(
+                                memory_format=torch.contiguous_format
+                            )
+                            for t in kv_caches[name]
+                        )
                 ready = torch.npu.Event()
                 ready.record(stream)
             # Device-side dependency, not a host wait. Next forward/movement
             # on this producer stream cannot overwrite source before freezing.
             producer.wait_event(ready)
-        return StateJob(frozen, tuple(layouts), snapshots, ready, nbytes, time.monotonic())
+        return StateJob(
+            frozen, tuple(layouts), snapshots, ready, nbytes, time.monotonic()
+        )
     except BaseException:
         # A partly submitted clone may still own source/snapshot memory.
         if stream is not None:
@@ -193,7 +224,9 @@ def wait_pending(engine, req_ids, timeout=120):
                 raise RuntimeError("Async store worker stopped with pending jobs")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("Async stores did not drain; blocks must not be reused")
+                raise TimeoutError(
+                    "Async stores did not drain; blocks must not be reused"
+                )
             engine._store_cv.wait(timeout=min(remaining, 0.1))
         check_failure(engine)
     return initially
@@ -201,10 +234,9 @@ def wait_pending(engine, req_ids, timeout=120):
 
 class GDNAsyncStoreMixin:
     """Private helpers used explicitly by AscendLMCacheEngine."""
+
     def _init_gdn_async_store(self):
-        self._gdn_async_enabled = bool(
-            self.config.get_extra_config_value("gdn_async_store", False)
-        )
+        self._gdn_async_enabled = gdn_async_store_enabled(self.config)
         if not self._gdn_async_enabled:
             return
         if not self.is_store_async:
@@ -214,28 +246,32 @@ class GDNAsyncStoreMixin:
         self._gdn_budget_lock = threading.Lock()
         self._gdn_error_lock = threading.Lock()
         self._gdn_reserved = 0
-        self._gdn_enqueued = self._gdn_processed = self._gdn_skipped = self._gdn_kv_processed = 0
+        self._gdn_enqueued = self._gdn_processed = self._gdn_skipped = (
+            self._gdn_kv_processed
+        ) = 0
         self._gdn_quarantine = []
         self._gdn_capture_stream = None
         self._gdn_async_error = None
         self._gdn_stopping = False
         self._gdn_stop_sent = False
-        mib = int(self.config.get_extra_config_value("gdn_async_staging_mib", 256))
-        if not 64 <= mib <= 1024:
-            raise ValueError("GDN staging budget must be 64..1024 MiB per rank")
+        mib = gdn_async_staging_mib(self.config)
         self._gdn_budget = mib * 1024**2
 
     def _gdn_ensure_store_worker(self):
         check_failure(self)
         if self._store_queue is not None:
-            if self._store_worker_thread is None or not self._store_worker_thread.is_alive():
+            if (
+                self._store_worker_thread is None
+                or not self._store_worker_thread.is_alive()
+            ):
                 raise RuntimeError("Async worker stopped unexpectedly")
             return
         if self._gdn_stopping:
             raise RuntimeError("Cannot start a store worker during shutdown")
         self._store_queue = CheckedQueue(self, self._store_queue_maxsize)
         self._store_worker_thread = threading.Thread(
-            target=self._store_worker_loop, daemon=True, name="lmcache-gdn-async-store")
+            target=self._store_worker_loop, daemon=True, name="lmcache-gdn-async-store"
+        )
         self._store_worker_thread.start()
 
     def _gdn_store_state(self, execution, layouts, kv_caches, ordering_event):
@@ -249,8 +285,11 @@ class GDNAsyncStoreMixin:
         self._ensure_store_worker()
         if self._store_queue.full():
             self._gdn_skipped += 1
-            logger.warning("GDN_ASYNC_SKIP req_id=%s boundary=%d reason=queue_full",
-                           execution.req_id, execution.end)
+            logger.warning(
+                "GDN_ASYNC_SKIP req_id=%s boundary=%d reason=queue_full",
+                execution.req_id,
+                execution.end,
+            )
             return
         started = time.monotonic()
         try:
@@ -261,7 +300,9 @@ class GDNAsyncStoreMixin:
         if work is None:
             return
         with self._store_cv:
-            self._pending_store_reqs[work.req_id] = self._pending_store_reqs.get(work.req_id, 0) + 1
+            self._pending_store_reqs[work.req_id] = (
+                self._pending_store_reqs.get(work.req_id, 0) + 1
+            )
         try:
             self._store_queue.put_nowait(work)
         except BaseException as enqueue_error:
@@ -277,19 +318,29 @@ class GDNAsyncStoreMixin:
             release_budget(self, work.nbytes)
             decrement_pending(self, work.req_id)
             self._gdn_skipped += 1
-            logger.warning("GDN_ASYNC_SKIP req_id=%s reason=queue_full_after_capture", work.req_id)
+            logger.warning(
+                "GDN_ASYNC_SKIP req_id=%s reason=queue_full_after_capture", work.req_id
+            )
             if not isinstance(enqueue_error, queue.Full):
                 raise
         else:
             self._gdn_enqueued += 1
-            logger.info("GDN_ASYNC_ENQUEUED req_id=%s boundary=%d bytes=%d capture_enqueue_ms=%.3f",
-                        work.req_id, work.execution.end, work.nbytes, (time.monotonic() - started) * 1000)
+            logger.info(
+                "GDN_ASYNC_ENQUEUED req_id=%s boundary=%d bytes=%d "
+                "capture_enqueue_ms=%.3f",
+                work.req_id,
+                work.execution.end,
+                work.nbytes,
+                (time.monotonic() - started) * 1000,
+            )
         check_failure(self)
 
     def _gdn_store_worker_loop(self):
         try:
             if self._device_id is None:
-                raise RuntimeError("NPU device was not bound before starting async worker")
+                raise RuntimeError(
+                    "NPU device was not bound before starting async worker"
+                )
             torch.npu.set_device(self._device_id)
         except BaseException as error:
             latch_error(self, error, "worker-init")
@@ -310,11 +361,18 @@ class GDNAsyncStoreMixin:
                 with torch.inference_mode():
                     if is_state:
                         delay = (time.monotonic() - work.enqueued_at) * 1000
-                        self._store_state_sync(work.execution, work.layouts, work.caches, work.ready)
+                        self._store_state_sync(
+                            work.execution, work.layouts, work.caches, work.ready
+                        )
                         self._gdn_processed += 1
-                        logger.info("GDN_ASYNC_PROCESSED req_id=%s boundary=%d queue_delay_ms=%.3f; "
-                                    "verify Stored state checkpoint for actual publication",
-                                    req_id, work.execution.end, delay)
+                        logger.info(
+                            "GDN_ASYNC_PROCESSED req_id=%s boundary=%d "
+                            "queue_delay_ms=%.3f; "
+                            "verify Stored state checkpoint for actual publication",
+                            req_id,
+                            work.execution.end,
+                            delay,
+                        )
                     else:
                         self._run_store_pipeline(*work)
                         self._gdn_kv_processed += 1
@@ -329,7 +387,10 @@ class GDNAsyncStoreMixin:
                 except BaseException:
                     safe_to_release = False
                     self._gdn_quarantine.append(work)
-                    logger.exception("GDN_ASYNC_QUARANTINED req_id=%s; storage must not close", req_id)
+                    logger.exception(
+                        "GDN_ASYNC_QUARANTINED req_id=%s; storage must not close",
+                        req_id,
+                    )
             finally:
                 if safe_to_release:
                     if is_state:
@@ -348,16 +409,25 @@ class GDNAsyncStoreMixin:
                 if not self._gdn_stop_sent:
                     while True:
                         if worker is None or not worker.is_alive():
-                            raise RuntimeError("Cannot close allocator: async worker is dead")
+                            raise RuntimeError(
+                                "Cannot close allocator: async worker is dead"
+                            )
                         try:
                             work_queue.put(None, timeout=0.1)
                             self._gdn_stop_sent = True
                             break
                         except queue.Full:
                             if time.monotonic() >= deadline:
-                                raise TimeoutError("Cannot close allocator: store queue did not drain")
+                                raise TimeoutError(
+                                    "Cannot close allocator: store queue did not drain"
+                                ) from None
                 worker.join(timeout=max(0, deadline - time.monotonic()))
-                if worker.is_alive() or self._gdn_quarantine or self._pending_store_reqs:
-                    raise RuntimeError("Cannot close allocator while asynchronous operations remain")
+                if (
+                    worker.is_alive()
+                    or self._gdn_quarantine
+                    or self._pending_store_reqs
+                ):
+                    raise RuntimeError(
+                        "Cannot close allocator while asynchronous operations remain"
+                    )
                 self._store_queue = self._store_worker_thread = None
-

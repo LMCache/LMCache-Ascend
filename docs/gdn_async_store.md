@@ -15,6 +15,12 @@ opt-in is intended for a dedicated supported GDN deployment. The local CPU tier
 is the only asynchronous checkpoint destination; other GDN compatibility guards
 remain in force. Synchronous mode remains the default.
 
+The measured prototype's `LMCACHE_GDN_ASYNC_EXPERIMENTAL=1` opt-in and
+`LMCACHE_GDN_ASYNC_STAGING_MIB` budget are accepted as migration aliases.
+Explicit `extra_config` values take precedence, including `false`. The queue
+and `store_async` guards still apply. Restore has a separate opt-in described
+in [gdn_async_restore.md](gdn_async_restore.md).
+
 A checkpoint capture reserves a bounded per-rank staging budget and clones every
 required recurrent-state plane into a private NPU tensor. A producer event orders
 the capture after inference; a device-side wait prevents the producer from
@@ -28,8 +34,11 @@ This does not promise recovery from device faults or process/container OOM.
 
 ## Draft validation status
 
-The upstream-native extraction has passed Python syntax compilation only.
-NPU runtime, cancellation/preemption, queue-pressure, shutdown and failure-path
-tests are still required before this should be considered for merging.
-Performance results from the combined local prototype are not an isolated
-measurement of this save-side change.
+The combined async branch has 30 passing source-bound host regressions, including
+private clone/config ownership, producer/capture ordering, staging pressure and
+Attention/state pending-store accounting. Python compilation and Ruff checks
+also pass. Run `python -m unittest discover -s tests/host -v` from the repository
+root. These use device doubles and do not replace an exact-commit NPU smoke.
+See [gdn_async_validation.md](gdn_async_validation.md) for preserved prototype
+measurements and the extraction gaps. The performance results are not an
+isolated measurement of this save-side change.
