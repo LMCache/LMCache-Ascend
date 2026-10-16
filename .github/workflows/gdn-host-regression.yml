@@ -1,0 +1,26 @@
+name: GDN host regressions
+
+on:
+  pull_request:
+    paths:
+      - "lmcache_ascend/**"
+      - "tests/host/**"
+      - ".github/workflows/gdn-host-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  host-regressions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run source-bound host tests without NPU dependencies
+        run: python -m unittest discover -s tests/host -v
