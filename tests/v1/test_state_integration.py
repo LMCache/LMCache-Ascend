@@ -122,12 +122,19 @@ def test_hybrid_minimum_rejects_entire_selection_and_skip_limits_query(monkeypat
     cancel.assert_called_once_with(connector.lookup_client, "r")
 
 
-def test_hybrid_multimodal_request_is_rejected_before_lookup(monkeypatch):
+def test_hybrid_multimodal_request_bypasses_before_lookup(monkeypatch):
     connector, request, lookup, _ = _scheduler(monkeypatch, [3072])
     request.mm_features = [object()]
-    with pytest.raises(ValueError, match="text"):
-        connector.get_num_new_matched_tokens(request, 0)
+    assert connector.get_num_new_matched_tokens(request, 0) == 0
     lookup.assert_not_called()
+    assert "r" in connector._state_mm_bypass_req_ids
+
+    # Cached/resumed scheduling data may no longer carry mm_features.
+    request.mm_features = []
+    assert connector.get_num_new_matched_tokens(request, 0) == 0
+    connector.update_state_after_alloc(request, 0)
+    lookup.assert_not_called()
+    assert not connector.load_specs
 
 
 def _load_worker(monkeypatch, ret_mask=None):
@@ -240,8 +247,8 @@ def test_hybrid_restore_uses_selection_and_pre_movement_target(monkeypatch, capl
 
     worker.lmcache_engine.retrieve.side_effect = retrieve
     copy.side_effect = lambda _: advance(2)
-    worker.lmcache_engine.gpu_connector.load_stream.synchronize.side_effect = (
-        lambda: advance(3)
+    worker.lmcache_engine.gpu_connector.load_stream.synchronize.side_effect = lambda: (
+        advance(3)
     )
     assert worker._load_hybrid_request(request, execution)
     operation = copy.call_args.args[0]

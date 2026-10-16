@@ -18,6 +18,7 @@ from vllm.v1.request import RequestStatus
 import torch
 
 # First Party
+from lmcache_ascend.integration.vllm.gdn_async_receive import GDNAsyncReceiveMixin
 from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
     LMCacheConnectorV1ImplMultiGroup,
 )
@@ -48,7 +49,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
+class LMCacheAscendConnectorV1Impl(
+    GDNAsyncReceiveMixin, LMCacheConnectorV1ImplMultiGroup
+):
     # Type declarations for upstream-inherited attributes (mypy has-type fix)
     kv_caches: dict[str, Any]
 
@@ -73,6 +76,37 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         self._failed_state_loads: set[str] = set()
         self._finished_state_loads: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
+        self._init_gdn_receive()
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        if getattr(self, "_gdn_restore_enabled", False):
+            return self._gdn_lookup(request, num_computed_tokens)
+        return super().get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def update_state_after_alloc(self, request, num_external_tokens, blocks=None):
+        if getattr(
+            self, "_gdn_restore_enabled", False
+        ) and not self._bypass_multimodal_state_request(request):
+            return self._gdn_allocated(request, num_external_tokens, blocks)
+        return self._update_state_after_alloc_sync(request, num_external_tokens, blocks)
+
+    def _update_state_after_alloc_sync(self, request, num_external_tokens, blocks=None):
+        return super().update_state_after_alloc(
+            request, num_external_tokens, blocks=blocks
+        )
+
+    def build_connector_meta(self, output):
+        if getattr(self, "_gdn_restore_enabled", False):
+            return self._gdn_metadata(output)
+        return self._build_connector_meta_sync(output)
+
+    def _build_connector_meta_sync(self, output):
+        return super().build_connector_meta(output)
+
+    def shutdown(self):
+        if getattr(self, "_gdn_restore_enabled", False):
+            self._gdn_shutdown()
+        return super().shutdown()
 
     @_lmcache_nvtx_annotate
     def register_kv_caches(
@@ -224,13 +258,23 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
             if not requested <= set(locations):
                 raise ValueError("GDN checkpoint locations must be available")
 
+        if getattr(self, "_gdn_restore_enabled", False):
+            engine._gdn_full_impl = self
+
     # Upstream start_load_kv only transfers the primary group's slot_mapping.
     # Multi-group retrieve needs ALL per-group slot mappings on NPU so the
     # connector can DMA each spec's KV plane to the correct paged blocks.
     @_lmcache_nvtx_annotate
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        if getattr(self, "_gdn_restore_enabled", False):
+            return self._gdn_start_load(forward_context, **kwargs)
         self.current_layer = 0
         self._wait_for_save_done = False
+        metadata = self._parent._get_connector_metadata()
+        # Keep this frame's exclusions through repeated completion polling.
+        self._state_mm_native_finished_req_ids = getattr(
+            metadata, "native_mm_finished_req_ids", ()
+        )
 
         if self._num_kv_groups <= 1:
             super().start_load_kv(forward_context, **kwargs)
@@ -1013,8 +1057,20 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if getattr(self, "_gdn_restore_enabled", False):
+            return self._gdn_finished(finished_req_ids)
+        return self._get_finished_sync(finished_req_ids)
+
+    def _get_finished_sync(
+        self, finished_req_ids: set[str]
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if self.lmcache_engine is None:
             return None, None
+        # Native multimodal requests have no offload to acknowledge. Exclude
+        # them before querying stores, not by swallowing unknown scheduler IDs.
+        finished_req_ids = set(finished_req_ids).difference(
+            getattr(self, "_state_mm_native_finished_req_ids", ())
+        )
         if getattr(self, "state_layouts", ()):
             for req_id in finished_req_ids:
                 self.lmcache_engine.lookup_unpin(req_id)
@@ -1052,6 +1108,13 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         )
 
     def handle_preemptions(self, preempted_req_ids: set[str]) -> None:
+        if (
+            getattr(self, "_gdn_restore_enabled", False)
+            and preempted_req_ids & self._full_ledger.owned()
+        ):
+            raise RuntimeError(
+                "Cannot preempt blocks owned by a GDN asynchronous receive"
+            )
         if self.lmcache_engine is None or not preempted_req_ids:
             return
 
@@ -1080,6 +1143,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        if self._bypass_multimodal_state_request(request):
+            # Retain classification until finished metadata reaches the workers.
+            return False, None
         if getattr(self, "_state_primary_kv_group_idx", None) is not None:
             try:
                 if self.lookup_client is not None:
@@ -1193,6 +1259,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
+        if self._bypass_multimodal_state_request(request):
+            return False, None
         if not block_ids:
             if getattr(self, "_state_primary_kv_group_idx", None) is not None:
                 return self.request_finished(request, [])

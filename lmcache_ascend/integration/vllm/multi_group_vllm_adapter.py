@@ -320,6 +320,10 @@ class AscendConnectorMetadata(LMCacheConnectorMetadata):
     # Independent of reqs: Attention may have no new chunk to save this round.
     state_executions: list[StateExecution] = field(default_factory=list)
     preempted_req_ids: set[str] = field(default_factory=set)
+    # Native-only requests never registered an external send obligation.
+    native_mm_finished_req_ids: set[str] = field(default_factory=set)
+    # Receive-only allocations do not appear in scheduled forward requests.
+    gdn_async_receives: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -690,9 +694,33 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 "sliding windowgroups."
             )
 
+    def _bypass_multimodal_state_request(self, request: Any) -> bool:
+        """Keep unsupported multimodal requests on the native inference path."""
+        if getattr(self, "_state_primary_kv_group_idx", None) is None:
+            return False
+        req_id = getattr(request, "request_id", None)
+        if req_id is None:
+            req_id = request.req_id
+        bypassed = getattr(self, "_state_mm_bypass_req_ids", None)
+        if bypassed is not None and req_id in bypassed:
+            return True
+        if not getattr(request, "mm_features", None):
+            return False
+        if bypassed is None:
+            bypassed = self._state_mm_bypass_req_ids = set()
+        bypassed.add(req_id)
+        logger.info(
+            "LMCACHE_MM_BYPASS request_id=%s: native vLLM multimodal path; "
+            "no LMCache lookup/load/store",
+            req_id,
+        )
+        return True
+
     def update_state_after_alloc(
         self, request: Any, num_external_tokens: int, blocks: Any = None
     ) -> None:
+        if self._bypass_multimodal_state_request(request):
+            return
         super().update_state_after_alloc(request, num_external_tokens)
         if (
             getattr(self, "_state_primary_kv_group_idx", None) is not None
@@ -714,8 +742,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     def get_num_new_matched_tokens(self, request: Any, num_computed_tokens: int):
         if self._state_primary_kv_group_idx is None:
             return super().get_num_new_matched_tokens(request, num_computed_tokens)
-        if getattr(request, "mm_features", None):
-            raise ValueError("GDN checkpoints support only text requests")
+        if self._bypass_multimodal_state_request(request):
+            return 0
         if request.request_id.startswith("mock_req"):
             return 0
         if self.kv_role == "kv_producer" and not hasattr(
@@ -805,6 +833,10 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
     ) -> AscendConnectorMetadata:
         if self._state_primary_kv_group_idx is None:
             return meta
+        # Native-hit requests may only be classified while building metadata.
+        meta.preempted_req_ids.difference_update(
+            getattr(self, "_state_mm_bypass_req_ids", ())
+        )
         state_sizes = tuple(
             (index, self._block_sizes_by_group[index])
             for index, group in enumerate(self._kv_cache_config.kv_cache_groups)
@@ -833,6 +865,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
                 for i, req_id in enumerate(cached.req_ids)
             )
         for req_id, (start, can_load) in intervals.items():
+            if req_id in getattr(self, "_state_mm_bypass_req_ids", ()):
+                continue
             tracker = self._request_trackers[req_id]
             end = start + output.num_scheduled_tokens[req_id]
             if tracker.mm_hashes or (
@@ -920,7 +954,15 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             )
         )
 
+        bypassed = getattr(self, "_state_mm_bypass_req_ids", set())
+        meta.native_mm_finished_req_ids = set(
+            scheduler_output.finished_req_ids
+        ).intersection(bypassed)
+        meta.preempted_req_ids.difference_update(bypassed)
         for finished_req_id in scheduler_output.finished_req_ids:
+            bypassed.discard(finished_req_id)
+            self.load_specs.pop(finished_req_id, None)
+            self._requests_priority.pop(finished_req_id, None)
             self._allocated_blocks.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
@@ -933,6 +975,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         for request in scheduler_output.scheduled_new_reqs:
             # Ignore DP attention mock requests
             if request.req_id.startswith("mock_req"):
+                continue
+            if self._bypass_multimodal_state_request(request):
                 continue
             load_spec = self.load_specs.pop(request.req_id, None)
             num_tokens_to_compute = (
@@ -984,6 +1028,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
         # changed from list to object `CachedRequestData`
         if isinstance(cached_reqs, list):
             for i, req in enumerate(cached_reqs):
+                if req.req_id in getattr(self, "_state_mm_bypass_req_ids", ()):
+                    continue
                 load_spec = self.load_specs.pop(req.req_id, None)
                 lmcache_cached_tokens = 0
                 vllm_cached_tokens = 0
@@ -1033,6 +1079,8 @@ class LMCacheConnectorV1ImplMultiGroup(LMCacheConnectorV1Impl):
             return self._attach_state_executions(meta, scheduler_output)
 
         for i, req_id in enumerate(cached_reqs.req_ids):
+            if req_id in getattr(self, "_state_mm_bypass_req_ids", ()):
+                continue
             request_tracker = self._request_trackers[req_id]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             # TODO: this is a dangerous reference to the request object inside vllm
