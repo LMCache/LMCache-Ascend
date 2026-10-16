@@ -141,7 +141,17 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
 
 
 def validate_state_config(config: Any, vllm_config: Any) -> None:
-    """The first hybrid path uses synchronous all-rank text/TP CPU/disk caching."""
+    """Validate the supported all-rank hybrid cache modes."""
+    async_store = bool(config.get_extra_config_value("gdn_async_store", False))
+    if async_store:
+        if not config.store_async or not 1 <= config.store_async_max_queue_size <= 32:
+            raise ValueError("gdn_async_store requires a bounded async store queue")
+        if not config.local_cpu or config.local_disk:
+            raise ValueError("gdn_async_store supports the local CPU tier only")
+        if config.store_location not in (None, "LocalCPUBackend"):
+            raise ValueError("gdn_async_store requires local CPU stores")
+        if config.retrieve_locations is not None and set(config.retrieve_locations) != {"LocalCPUBackend"}:
+            raise ValueError("gdn_async_store requires local CPU retrieval")
     speculative = vllm_config.speculative_config
     if speculative is not None:
         # vLLM normalizes the CLI's qwen3_5_mtp method to "mtp". Restrict
@@ -182,6 +192,8 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
         "gds_path",
         "maru_path",
     ):
+        if field == "store_async" and async_store:
+            continue
         if getattr(config, field):
             raise ValueError(f"GDN checkpoints do not support {field}")
     if config.hit_miss_ratio is not None:
