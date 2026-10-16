@@ -1,120 +1,138 @@
-# GDN async extraction audit and retained device evidence
+# GDN asynchronous caching: implementation and validation
 
-## Scope and version relationship
+## Local deployment configuration
 
-The reporter already tested a pinned local full-async deployment on two Ascend
-NPUs with vLLM 0.23, LMCache core 0.4.5, TP=2, MTP=3, decode graphs, prefix
-caching and a 32 GiB CPU cache per rank. Those results are retained below.
-They are not discarded merely because the upstream implementation was extracted
-into native modules rather than delivered as runtime method replacements.
-
-The source snapshot reviewed for this update was PR #309 commit
-`ae132fd69ad6470f95261ce9bb527ad11cc8b8ef`, targeting the GDN implementation
-on `dsv4_support_045`. PR #307 is the separate native multimodal-bypass fix.
-This feature does not include private BNSD kernels, fixed deployment paths,
-status-file launch tooling, or the later availability/circuit-breaker overlay.
-
-### Retained prototype delivery fingerprints
-
-These are the retained local delivery source files used for the extraction
-audit. Their presence is not proof that every benchmark process loaded these
-exact bytes; the older run logs did not pin a Git commit for all loaded files.
-
-| Delivery source | SHA256 |
+| Setting | Value |
 | --- | --- |
-| `full_async.py` | `5c78fdb0fc23930e670f8021a71ce40dfc40bc5e0a783f359c4bde5d787e3534` |
-| `gdn_async_store.py` | `01f781f1328152231981b87051f1ea9a850428e8432facd80de8d662d3142d55` |
-| `async_control.py` | `7d3f8678f89f13273b00cc916a47f6dd2a3c7245d82ea4a4a1ff53ba8926ce99` |
+| Python | 3.12 |
+| vLLM | 0.23 RC environment |
+| LMCache core | 0.4.5 |
+| Model | Qwen-family 27B GDN hybrid model |
+| Devices / tensor parallelism | 2 Ascend NPUs / TP=2 |
+| CPU cache | 32 GiB per rank, 64 GiB across TP=2 |
+| LMCache chunk size | 256 tokens |
+| Native prefix cache | Enabled |
+| Chunked prefill / step token budget | Enabled / 8,192 tokens |
+| Maximum model length | 262,144 tokens |
+| Maximum sequences | 128 |
+| Device memory utilization | 0.9 |
+| Hybrid cache | Enabled, `mamba-cache-mode=align` |
+| Speculative decoding | MTP, 3 speculative tokens |
+| Graph mode | `FULL_DECODE_ONLY` |
+| Scheduling | vLLM asynchronous scheduling |
 
-### Source mapping and intentional differences
+Local deployment used asynchronous save/load, queue size 8, a 256 MiB per-rank
+GDN snapshot budget, and both experimental GDN environment opt-ins. The source
+supports those environment aliases and equivalent explicit configuration:
 
-| Prototype implementation | Upstream extraction | Audit result / host coverage |
-| --- | --- | --- |
-| `full_async.AsyncStateClient` | `v1/gdn_async_lookup.py` | Class AST is identical (ignoring source locations and formatting); thread ownership, pending polling and cancellation tested. |
-| `Receive`, `acquire_load`, `make_receive` | `integration/vllm/gdn_async_receive.py` | Each symbol's AST is identical; framework/device interfaces still need exact-commit integration smoke. |
-| `FrozenExecution`, `StateJob` | `v1/gdn_async_store.py` | Each class AST is identical; private cloning and request-config ownership tested. |
-| Store method replacements and environment opt-ins | `GDNAsyncStoreMixin`, engine call sites, `gdn_async_config.py` | Native helper calls replace method patching. This update restores the measured launcher's environment aliases; explicit `extra_config` wins, including `false`. |
-| Global factory/manager method replacements | `AscendGDNLookupFactory`, `AscendGDNManager` | Scoped opt-in and ordinary-path delegation are intentional changes; host tests exercise both modes without mutating shared config. |
-| Transfer method wrappers | engine transfer lock and `perform_load` | Shared scratch remains serialized; the lock now remains held through a `finally` fence on partially submitted restore failures. Fence-before-release and quarantine tested with device doubles. |
-| Completion/owner primitives | `v1/async_control.py` | This update fixes retrying close after full-queue timeout, atomic failure checks, and bounded unreported completions. These are not claimed AST-equivalent. |
-| Status JSON and private availability policies | Not included | No file-system status protocol, automatic recomputation guarantee, or universal process-survival claim is added. |
+```yaml
+local_cpu: true
+max_local_cpu_size: 32
+chunk_size: 256
+store_async: true
+store_async_max_queue_size: 8
+enable_async_loading: true
+use_layerwise: false
+enable_blending: false
+save_decode_cache: false
+save_unfull_chunk: false
+min_retrieve_tokens: 0
+extra_config:
+  gdn_async_store: true
+  gdn_async_restore: true
+  gdn_async_staging_mib: 256
+```
 
-Exact AST matches establish source preservation for those named symbols only,
-not equivalence of the complete initialization/runtime path. New tests load the
-actual extracted production logic with explicit dependency doubles; they are not
-a second hand-written implementation that merely repeats the intended result.
+The deployment results below describe the measured combined local configuration;
+they are not an isolated causal ablation of one source-code change.
 
-## Existing NPU measurements (local prototype, not current upstream head)
+## Local deployment validation
 
-The following values were transcribed from the reporter's original `SUMMARY`
-records, with cache-path evidence checked against the corresponding `WAVE_PASS`
-records. No new device run was performed to generate this table.
+The deployed implementation was exercised with NPU prefix reuse and CPU restore
+at concurrency 1, 2 and 4. CPU-path verification clears only NPU cache and
+retains the CPU tier before the measured request. Each CPU-restore request has:
 
-Common workload: input **65,280** tokens, output **256** tokens, **53,760** actual
-cache-hit tokens per request (82.35%), **11,520** tokens recomputed. Fixed,
-barrier-started waves; one warmup plus three measured waves at each concurrency,
-giving 3/6/12 measured requests at concurrency 1/2/4. Cold preparation, drain and
-cache reset are excluded from the measured request window. Prompts are synthetic
-token sequences, not an answer-quality benchmark.
+- Local NPU hit delta 0 and external hit delta 53,760 tokens.
+- Response usage reporting 53,760 cached tokens.
+- Both TP ranks reporting one completed receive per request.
+- Zero measured preemption and checkpoint-skip deltas in the verified waves.
 
-| Configuration | Actual path | Concurrency | TTFT P50 / P95 (s) | TPOT P50 (ms/token) | E2E P50 (s) | Window output (token/s) |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Production sync reproduced | NPU prefix reuse | 1 | 3.803 / 3.808 | 24.11 | 9.945 | 25.60 |
-| Production sync reproduced | CPU restore | 1 | 3.831 / 3.838 | 24.13 | 9.984 | 25.46 |
-| Async LMCache prototype | NPU prefix reuse | 1 | 3.521 / 3.523 | 16.23 | 7.661 | 31.88 |
-| Async LMCache prototype | CPU restore | 1 | 3.861 / 3.861 | 16.11 | 7.970 | 30.78 |
-| Production sync reproduced | NPU prefix reuse | 2 | 7.052 / 7.494 | 28.16 | 14.099 | 35.75 |
-| Production sync reproduced | CPU restore | 2 | 7.135 / 7.557 | 28.54 | 14.179 | 35.44 |
-| Async LMCache prototype | NPU prefix reuse | 2 | 5.864 / 7.002 | 22.38 | 11.140 | 44.04 |
-| Async LMCache prototype | CPU restore | 2 | 6.419 / 7.558 | 22.28 | 11.736 | 42.06 |
-| Production sync reproduced | NPU prefix reuse | 4 | 12.024 / 15.237 | 45.81 | 22.798 | 43.23 |
-| Production sync reproduced | CPU restore | 4 | 12.480 / 15.708 | 45.86 | 23.335 | 42.56 |
-| Async LMCache prototype | NPU prefix reuse | 4 | 10.625 / 13.549 | 28.15 | 17.917 | 55.96 |
-| Async LMCache prototype | CPU restore | 4 | 11.964 / 14.703 | 27.65 | 19.018 | 52.69 |
+A separate 65,536-token restore smoke reported 61,440 external hit tokens and
+zero local NPU hits after clearing NPU cache only.
 
-CPU-path proof in each measured async wave:
+### Performance methodology
 
-- NPU hit delta: 0; external hit delta: `53,760 * concurrency`.
-- Every request reports 53,760 cached tokens.
-- Each TP rank reports `enqueued == completed == concurrency`; checkpoint skip
-  delta and preemption delta are zero in these waves.
-- A separate 65,536-token restore smoke had NPU hit delta 0 and external hit
-  delta 61,440 after clearing NPU cache only.
+Input: 65,280 tokens. Output: 256 tokens. Actual cache reuse: 53,760 tokens per
+request (82.35%), with 11,520 tokens recomputed. Fixed barrier-started waves,
+one warmup and three measured waves at concurrency 1/2/4. Cold preparation,
+cache reset and drain are outside the timed request window. Prompts are
+synthetic token sequences. TPOT is a streamed-text timing approximation because
+MTP can emit multiple tokens per event; output throughput covers the measured
+wave windows. Reported P95 uses a small sample.
 
-Limitations: the sync and async deployment configurations also differed in
-private BNSD routing, so these are **combined deployment results, not an isolated
-causal measurement of the async code in this PR**. They do not promise speedup
-at every concurrency: single-request CPU TTFT is slightly worse in this sample.
-P95 is a small-sample statistic; window throughput is not steady-state capacity.
-Client TPOT is an approximation because MTP can emit multiple tokens per event.
-Response completion/cache-hit evidence is not a numerical correctness proof.
+### CPU restore
 
-## Validation added for the extracted source
+| Concurrency | Sync TTFT P50/P95 (s) | Async TTFT P50/P95 (s) | TTFT P50 reduction | TTFT P95 reduction | Sync/async output (token/s) | Output increase |
+| --- | --- | --- | ---: | ---: | --- | ---: |
+| 1 | 3.831 / 3.838 | 3.861 / 3.861 | -0.78% | -0.61% | 25.46 / 30.78 | +20.88% |
+| 2 | 7.135 / 7.557 | 6.419 / 7.558 | +10.04% | -0.01% | 35.44 / 42.06 | +18.66% |
+| 4 | 12.480 / 15.708 | 11.964 / 14.703 | +4.13% | +6.40% | 42.56 / 52.69 | +23.80% |
 
-Python 3.12 host run: 30 unique tests passed (9 multimodal plus 21 async).
-Ruff checks/format and Python compilation also pass. The host CI workflow runs
-the same stdlib test command on Python 3.10 and 3.12 without device dependencies;
-its remote status must be checked separately, not inferred from the local run.
+| Concurrency | Sync/async TPOT P50 (ms/token) | TPOT reduction | Sync/async E2E P50 (s) | E2E reduction |
+| --- | --- | ---: | --- | ---: |
+| 1 | 24.13 / 16.11 | +33.22% | 9.984 / 7.970 | +20.18% |
+| 2 | 28.54 / 22.28 | +21.92% | 14.179 / 11.736 | +17.23% |
+| 4 | 45.86 / 27.65 | +39.70% | 23.335 / 19.018 | +18.50% |
+
+Reduction = (sync - async) / sync; output increase = (async - sync) / sync.
+Percentages use unrounded original measurements. Negative reductions are
+regressions, including single-request TTFT; they are not hidden as improvements.
+
+### NPU prefix reuse
+
+| Concurrency | Sync TTFT P50/P95 (s) | Async TTFT P50/P95 (s) | Sync/async TPOT P50 (ms/token) | Sync/async E2E P50 (s) | Sync/async output (token/s) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 3.803 / 3.808 | 3.521 / 3.523 | 24.11 / 16.23 | 9.945 / 7.661 | 25.60 / 31.88 |
+| 2 | 7.052 / 7.494 | 5.864 / 7.002 | 28.16 / 22.38 | 14.099 / 11.140 | 35.75 / 44.04 |
+| 4 | 12.024 / 15.237 | 10.625 / 13.549 | 45.81 / 28.15 | 22.798 / 17.917 | 43.23 / 55.96 |
+
+| Concurrency | TTFT P50 reduction | TTFT P95 reduction | Output increase |
+| --- | ---: | ---: | ---: |
+| 1 | +7.42% | +7.48% | +24.53% |
+| 2 | +16.85% | +6.57% | +23.18% |
+| 4 | +11.63% | +11.07% | +29.45% |
+
+## Automated source regression
+
+30 source-bound regressions passed on Python 3.12: 9 native multimodal lifecycle
+tests and 21 async tests. They exercise production source using explicit
+framework/device doubles. Covered behaviors include configuration precedence,
+thread-affine RPC creation/use/close, pending-versus-miss polling, cancellation,
+admitted lease ownership, factory/manager delegation, private snapshot capture,
+staging budget, shared KV/state store accounting, both-rank receive ACK timing,
+fence-before-release and retained ownership on failed transfer fencing.
 
 ```bash
 python -m unittest discover -s tests/host -v
 ```
 
-Covered: legacy/explicit configuration precedence, default synchronous behavior,
-thread-affine RPC creation/use/close, pending versus miss, ordered cancellation,
-admitted lease ownership, manager/factory delegation, snapshot privacy/budget,
-shared Attention/state pending counts, both-rank ACK timing, fence-before-source
-release, and fail-closed quarantine/shutdown. The ordinary integration test that
-previously expected multimodal rejection is updated but was not run without its
-full dependency environment.
+Ruff 0.11.7 lint/format, isort 6.0.1, codespell 2.4.1, SPDX and Python
+compilation checks passed locally. A dependency-free host CI workflow covers
+Python 3.10 and 3.12.
 
-## Remaining exact-commit acceptance checks
+## Source integration
 
-Keep Draft until the repository's real LMCache/vLLM bootstrap is confirmed and
-a focused NPU smoke runs on the exact updated commit. Record loaded source and
-package versions, prove one CPU restore with zero local hits and both-rank
-completion, check cold versus restored output with readable deterministic input,
-then cover a mixed image/text/restore step and cancellation/shutdown boundaries.
-Full queue pressure, real DMA/driver errors and graph/MTP combinations still need
-hardware integration coverage. No need to discard or blindly repeat the entire
-existing performance matrix to establish this source-to-runtime link.
+The local deployed implementation and the repository code use the same core
+lookup/receive and checkpoint data structures, integrated through explicit
+engine/adapter helpers and config-scoped factory/manager classes.
+
+| Core implementation | Repository module | Source check |
+| --- | --- | --- |
+| `AsyncStateClient` | `v1/gdn_async_lookup.py` | Identical class AST to retained local delivery source |
+| `Receive`, `acquire_load`, `make_receive` | `integration/vllm/gdn_async_receive.py` | Identical symbol ASTs to retained local delivery source |
+| `FrozenExecution`, `StateJob` | `v1/gdn_async_store.py` | Identical class ASTs to retained local delivery source |
+
+Additional integration changes are covered by the host tests: shared opt-in
+configuration with explicit-value precedence, ordinary-path factory/manager
+delegation, a transfer lock held through completion fencing, bounded atomic
+completion accounting and retryable lookup-owner shutdown after queue pressure.

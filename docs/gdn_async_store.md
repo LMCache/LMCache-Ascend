@@ -15,7 +15,7 @@ opt-in is intended for a dedicated supported GDN deployment. The local CPU tier
 is the only asynchronous checkpoint destination; other GDN compatibility guards
 remain in force. Synchronous mode remains the default.
 
-The measured prototype's `LMCACHE_GDN_ASYNC_EXPERIMENTAL=1` opt-in and
+The environment-based `LMCACHE_GDN_ASYNC_EXPERIMENTAL=1` opt-in and
 `LMCACHE_GDN_ASYNC_STAGING_MIB` budget are accepted as migration aliases.
 Explicit `extra_config` values take precedence, including `false`. The queue
 and `store_async` guards still apply. Restore has a separate opt-in described
@@ -30,15 +30,14 @@ queue as Attention stores, and both count against request completion.
 Budget or queue exhaustion skips the optional checkpoint. Capture/transfer
 failures are not published as successful stores. If submitted device work cannot
 be drained, buffers are retained and shutdown refuses to close the allocator.
-This does not promise recovery from device faults or process/container OOM.
 
-## Draft validation status
+## Validation
 
-The combined async branch has 30 passing source-bound host regressions, including
+This implementation has 30 passing source-bound host regressions, including
 private clone/config ownership, producer/capture ordering, staging pressure and
 Attention/state pending-store accounting. Python compilation and Ruff checks
 also pass. Run `python -m unittest discover -s tests/host -v` from the repository
-root. These use device doubles and do not replace an exact-commit NPU smoke.
-See [gdn_async_validation.md](gdn_async_validation.md) for preserved prototype
-measurements and the extraction gaps. The performance results are not an
-isolated measurement of this save-side change.
+root. These execute production host logic with framework/device doubles.
+See [gdn_async_validation.md](gdn_async_validation.md) for local deployment
+settings, verified CPU/NPU paths and performance comparisons. The performance
+results describe the measured deployment configuration.

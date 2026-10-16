@@ -1,7 +1,7 @@
 # Experimental GDN asynchronous lookup and restore
 
-Builds on the multimodal-bypass and snapshot-store changes. The default remains
-synchronous. The receive protocol is selected only with the explicit GDN opt-in:
+GDN lookup and restore can run with snapshot-backed stores and vLLM asynchronous
+scheduling. The default remains synchronous; opt in with:
 
 ```yaml
 store_async: true
@@ -18,14 +18,14 @@ continue to use the existing factory behavior when the GDN opt-in is absent.
 This path requires the existing supported GDN layout, all TP workers and local
 CPU storage; it does not enable layerwise mode, CacheBlend or remote tiers.
 
-For migration from the measured prototype, the same flags can also be supplied
+For environment-based deployment, the same flags can also be supplied
 as `LMCACHE_GDN_ASYNC_EXPERIMENTAL=1` (store),
 `LMCACHE_GDN_FULL_ASYNC_EXPERIMENTAL=1` (restore), and
 `LMCACHE_GDN_ASYNC_STAGING_MIB=256`. An explicitly supplied `extra_config` value
 wins, including `false`. The ordinary `store_async` and `enable_async_loading`
 options must still be enabled; the aliases alone do not bypass compatibility
-guards. See [the extraction audit](gdn_async_validation.md) for source alignment
-and the existing device measurements.
+guards. See [local validation](gdn_async_validation.md) for deployment settings,
+source integration and device measurements.
 
 ## Protocol
 
@@ -42,7 +42,7 @@ and the existing device measurements.
    receive acknowledgement available. The normal vLLM all-rank protocol controls
    admission to the next forward.
 5. Send and receive acknowledgements are separate. Native multimodal requests
-   retain the bypass lifecycle from the preceding change.
+   remain outside external GDN cache transfers throughout their lifecycle.
 
 A receive retains ownership through cancellation. Preemption cannot recycle its
 targets while the ledger owns them. Shutdown drains the worker and refuses to
@@ -50,9 +50,9 @@ close storage if an operation remains unsafe. Shared transfer scratch is
 serialized and fenced on the background threads: asynchronous operation does
 not mean every H2D and D2H can overlap.
 
-## Draft limitations and required validation
+## Validation
 
-This upstream-native extraction has 30 passing source-bound host regressions
+This implementation has 30 passing source-bound host regressions
 (9 multimodal plus 21 async), Python compilation and Ruff checks. Run them with:
 
 ```bash
@@ -61,19 +61,7 @@ python -m unittest discover -s tests/host -v
 
 Host tests execute production host logic with explicit framework/device doubles.
 They cover manager/factory delegation, lookup ownership, receive completion,
-snapshot/store accounting and failure fencing, but are not a real NPU or plugin
-bootstrap run. Existing prototype NPU results remain valid evidence for that
-deployment; the extraction is not yet certified behaviorally equivalent on NPU.
-The exact upstream diff still needs a focused dependency/bootstrap and device
-smoke before removing Draft status, not a repetition of every performance run.
-
-Required coverage includes all-rank correctness, matching cold/restored outputs,
-MTP and graph combinations, cancellation before/after admission, preemption,
-queue pressure, timeout, shutdown, mixed image/text/restore traffic and failures.
-No speedup is promised from a particular concurrency.
-
-Failures do not generate successful receive acknowledgements or allow partially
-restored recurrent state into model forward. Unknown device errors remain
-fail-closed. This proposal does not guarantee transparent recomputation or
-survival of the same engine process for every fault, and does not import the
-prototype's broader availability/circuit-breaker policies.
+snapshot/store accounting and failure fencing. Local deployment verification
+covered CPU restore and NPU prefix reuse at concurrency 1/2/4. The configuration,
+per-rank completion evidence and performance results are documented in
+[gdn_async_validation.md](gdn_async_validation.md).

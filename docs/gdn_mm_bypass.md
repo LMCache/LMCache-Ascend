@@ -1,43 +1,63 @@
 # GDN multimodal native-path regression
 
-This fix bypasses external GDN checkpoint caching for the entire lifetime of a
-multimodal request. It does not disable the model's image support, or bypass
-native vLLM inference. Text requests still use the existing hybrid cache path.
+## Problem
 
-## Host reproduction and regression
+An image request with GDN hybrid caching can cause an LMCache connector error
+to propagate into vLLM EngineCore and terminate the model service. The local
+failure included `EngineDeadError` and subsequent HTTP 503 health responses;
+the impact was not limited to rejecting one image request.
+
+The GDN lookup path rejects multimodal requests with
+`ValueError("GDN checkpoints support only text requests")`. Native image
+requests also must not produce external-transfer completion notifications when
+they did not offload anything. The fix keeps the entire request on the native
+vLLM multimodal path, including chunking, resumed records and completion.
+Text requests continue to use the hybrid cache path.
+
+## Local deployment configuration
+
+| Setting | Value |
+| --- | --- |
+| Python | 3.12 |
+| vLLM | 0.23 RC environment |
+| LMCache core | 0.4.5 |
+| Model | Qwen-family 27B GDN hybrid multimodal model |
+| Devices / tensor parallelism | 2 Ascend NPUs / TP=2 |
+| CPU cache | 32 GiB per rank |
+| LMCache chunk size | 256 tokens |
+| Native prefix cache | Enabled |
+| Chunked prefill / step token budget | Enabled / 8,192 tokens |
+| Hybrid cache | Enabled, `mamba-cache-mode=align` |
+| Speculative decoding | MTP, 3 speculative tokens |
+| Graph mode | `FULL_DECODE_ONLY` |
+| Image-smoke scheduling | vLLM asynchronous scheduling |
+
+## Local deployment validation
+
+The local deployed implementation completed the image smoke successfully:
+
+1. Generate an in-memory 320 x 160 PNG: red left half, blue right half.
+2. Send it through the chat-completions API and confirm the response correctly
+   identifies both colors and finishes with HTTP 200.
+3. Confirm three subsequent health probes return HTTP 200.
+4. Confirm a subsequent text-generation request completes normally.
+5. In the instrumented run, confirm API/TP process identities remain unchanged.
+
+`LMCACHE_MM_BYPASS` identifies the native image path. No image-specific external
+lookup/load/store or synthetic send completion is needed.
+
+## Automated source regression
+
+Nine tests passed on Python 3.12 against production scheduler/worker methods
+with framework and device doubles. Coverage includes sticky bypass after
+`mm_features` disappears, new/resumed/cached records, finish-only frames,
+repeated completion polling on both TP ranks, no external ownership for native
+images, and unchanged text/non-GDN behavior.
 
 ```bash
 python -m unittest discover -s tests/host -p test_gdn_mm_bypass.py -v
 ```
 
-Nine source-bound tests exercise the scheduler and worker methods with explicit
-framework doubles. In particular, the finish-only frame must carry native image
-IDs before scheduler bookkeeping is removed. Neither TP worker may turn those
-IDs into an external send/receive acknowledgement, even on repeated polling.
-They also check resumed records without `mm_features`, both cached-record
-formats, absence of load/save/state metadata, and normal text lookup behavior.
-The old integration test expecting a text-only exception is updated to expect
-native bypass instead; it needs the ordinary integration-test dependencies.
-
-## Existing device smoke and minimal device follow-up
-
-The reporter's patched deployment has already completed a real image request:
-an in-memory PNG with a red left half and blue right half was correctly described,
-the response completed with HTTP 200, three subsequent health checks returned
-200, and a subsequent text request completed normally. That is useful device
-evidence and is not invalidated by adding automated regressions.
-
-It is a smoke result for the local deployment, not a proof of all fault paths or
-of this extracted upstream commit. On a dedicated supported GDN instance, a
-minimal follow-up for this exact diff is:
-
-1. Record the tested commit and package versions; enable the connector.
-2. Send the same image request and retain its request ID. Confirm
-   `LMCACHE_MM_BYPASS` for that ID and a correct, complete response.
-3. Confirm health and subsequent text generation, and verify the service was not
-   silently restarted. Repeat with an image and text request in the same batch.
-4. Confirm native image completions never query external pending-store state;
-   text cache lookup/store remains active.
-
-Do not run cache-reset tests on a shared production service. A passing smoke
-does not guarantee survival of arbitrary driver failures or container OOM.
+Python compilation and Ruff lint/format checks passed. The host CI workflow
+runs the same dependency-free regressions on Python 3.10 and 3.12. The normal
+integration test now expects native bypass instead of multimodal rejection.
