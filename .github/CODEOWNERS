@@ -1,16 +1,45 @@
-# ------------------------------------------------------------------
+# LMCache-Ascend CODEOWNERS
+
 # GLOBAL DEFAULT
-# ------------------------------------------------------------------
-# Any file not matching a specific rule below requires approval 
-* @matthewygf @chloroethylene
+* @matthewygf @chloroethylene @marcobarlo
 
-# ------------------------------------------------------------------
-# CRITICAL INFRASTRUCTURE 
-# ------------------------------------------------------------------
-# Changes to CI/CD or Docker configs require explicit review.
+# PATCH CORE
+/lmcache_ascend/__init__.py            @matthewygf @chloroethylene @marcobarlo
 
-.github/                @matthewygf @chloroethylene
-.github/workflows/      @matthewygf @chloroethylene
-docker/                 @matthewygf @chloroethylene
-*.yaml                  @matthewygf @chloroethylene
-*.yml                   @matthewygf @chloroethylene
+# CORE ENGINE
+/lmcache_ascend/v1/                    @matthewygf @chloroethylene @marcobarlo @larksudo
+
+# STORAGE BACKENDS
+/lmcache_ascend/v1/storage_backend/    @matthewygf @chloroethylene @marcobarlo @shengyan-chen
+
+# TRANSFER CHANNELS
+/lmcache_ascend/v1/transfer_channel/   @matthewygf @chloroethylene @shengyan-chen
+
+# NATIVE OPS
+/csrc/                                 @matthewygf @chloroethylene @marcobarlo @larksudo
+/third_party/                          @matthewygf @chloroethylene @marcobarlo @larksudo
+/lmcache_ascend/serde/                 @matthewygf @chloroethylene @marcobarlo
+/csrc/hccl/                            @matthewygf @chloroethylene @marcobarlo @shengyan-chen
+/csrc/hixl/                            @matthewygf @chloroethylene @marcobarlo @shengyan-chen
+
+# CACHEBLEND
+/lmcache_ascend/v1/blend/              @matthewygf @chloroethylene @larksudo
+
+# SERVING-STACK INTEGRATION
+/lmcache_ascend/integration/           @matthewygf @chloroethylene @marcobarlo @larksudo
+
+# TESTS / DOCS / EXAMPLES
+/tests/                                @matthewygf @chloroethylene @marcobarlo @larksudo @shengyan-chen
+/docs/                                 @matthewygf @chloroethylene @marcobarlo
+/examples/                             @matthewygf @chloroethylene @marcobarlo @larksudo
+
+# PACKAGING
+setup.py                               @matthewygf @chloroethylene @marcobarlo
+CMakeLists.txt                         @matthewygf @chloroethylene @marcobarlo
+pyproject.toml                         @matthewygf @chloroethylene @marcobarlo
+
+# CI / INFRASTRUCTURE
+.github/                               @matthewygf @chloroethylene @marcobarlo
+docker/                                @matthewygf @chloroethylene @marcobarlo
+*.yaml                                 @matthewygf @chloroethylene @marcobarlo
+*.yml                                  @matthewygf @chloroethylene @marcobarlo
