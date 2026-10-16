@@ -142,7 +142,13 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
 
 def validate_state_config(config: Any, vllm_config: Any) -> None:
     """Validate the supported all-rank hybrid cache modes."""
+    async_restore = bool(config.get_extra_config_value("gdn_async_restore", False))
     async_store = bool(config.get_extra_config_value("gdn_async_store", False))
+    if async_restore and not (
+        async_store and config.store_async and config.enable_async_loading
+        and vllm_config.scheduler_config.async_scheduling
+    ):
+        raise ValueError("gdn_async_restore requires async store, loading and scheduling")
     if async_store:
         if not config.store_async or not 1 <= config.store_async_max_queue_size <= 32:
             raise ValueError("gdn_async_store requires a bounded async store queue")
@@ -167,7 +173,7 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
             raise ValueError("GDN MTP requires Qwen3.5 target and draft models")
         if config.save_decode_cache:
             raise ValueError("GDN MTP prefill reuse requires save_decode_cache=false")
-        if vllm_config.scheduler_config.async_scheduling:
+        if vllm_config.scheduler_config.async_scheduling and not async_restore:
             raise ValueError("GDN MTP requires synchronous scheduling")
         # The runner loads before model forward and finalizes stores after draft
         # forward, outside model graph replay. Eager flags need not be restricted.
@@ -193,6 +199,8 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
         "maru_path",
     ):
         if field == "store_async" and async_store:
+            continue
+        if field == "enable_async_loading" and async_restore:
             continue
         if getattr(config, field):
             raise ValueError(f"GDN checkpoints do not support {field}")

@@ -322,6 +322,8 @@ class AscendConnectorMetadata(LMCacheConnectorMetadata):
     preempted_req_ids: set[str] = field(default_factory=set)
     # Native-only requests never registered an external send obligation.
     native_mm_finished_req_ids: set[str] = field(default_factory=set)
+    # Receive-only allocations do not appear in scheduled forward requests.
+    gdn_async_receives: list[Any] = field(default_factory=list)
 
 
 @dataclass

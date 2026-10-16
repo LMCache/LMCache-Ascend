@@ -127,6 +127,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
             self.kv_events = ThreadSafeEventList()
 
         self._init_gdn_async_store()
+        self._gdn_transfer_lock = threading.RLock()
 
     def _is_pd_receiver(self) -> bool:
         config = getattr(self, "config", None)
@@ -887,7 +888,17 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
                 self._store_queue.task_done()
 
     @torch.inference_mode()
-    def _run_store_pipeline(
+    def _run_store_pipeline(self, *args, **kwargs):
+        if self.config.get_extra_config_value("gdn_async_restore", False):
+            # Shared connector scratch cannot be reused until D2H is fenced.
+            with self._gdn_transfer_lock:
+                try:
+                    return self._run_store_pipeline_impl(*args, **kwargs)
+                finally:
+                    self.gpu_connector.store_stream.synchronize()
+        return self._run_store_pipeline_impl(*args, **kwargs)
+
+    def _run_store_pipeline_impl(
         self,
         req_id: str,
         tokens: Optional[Union[torch.Tensor, list]],
@@ -1209,6 +1220,13 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
 
     def lookup_unpin(self, lookup_id: str) -> None:
         check_failure(self)
+        impl = getattr(self, "_gdn_full_impl", None)
+        if impl is not None:
+            if lookup_id in impl._full_ledger.owned():
+                return
+            if (lookup_id not in getattr(self, "_state_lookup_selections", {})
+                    and lookup_id not in self.lookup_pins):
+                return
         with self._engine_state_lock:
             # First Party
             from lmcache_ascend.v1.state_lookup import release_engine_selection
@@ -1277,6 +1295,15 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
 
     @torch.inference_mode()
     def _store_state_sync(self, execution, layouts, kv_caches, ordering_event):
+        if self.config.get_extra_config_value("gdn_async_restore", False):
+            with self._gdn_transfer_lock:
+                try:
+                    return self._store_state_sync_impl(execution, layouts, kv_caches, ordering_event)
+                finally:
+                    self.gpu_connector.store_stream.synchronize()
+        return self._store_state_sync_impl(execution, layouts, kv_caches, ordering_event)
+
+    def _store_state_sync_impl(self, execution, layouts, kv_caches, ordering_event):
         """The managed synchronous path, also used by the snapshot worker."""
         if self._is_passive() or not self.is_healthy() or self.is_frozen():
             return
