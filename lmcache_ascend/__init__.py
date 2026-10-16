@@ -720,6 +720,10 @@ def _patch_vllm_v1_adapter():
         LMCacheAscendConnectorV1Impl as ascend_LMCacheAscendConnectorV1Impl,
     )
 
+    from lmcache_ascend.v1.gdn_async_lookup import AscendGDNManager
+
+    # Only this vLLM integration uses the config-scoped GDN manager subclass.
+    lmc_vllm_v1_adapter.LMCacheManager = AscendGDNManager
     lmc_vllm_v1_adapter.RequestTracker = mg.RequestTracker
     lmc_vllm_v1_adapter.ReqMeta = mg.ReqMeta
     lmc_vllm_v1_adapter.LMCacheConnectorV1Impl = ascend_LMCacheAscendConnectorV1Impl
@@ -991,6 +995,12 @@ def _patch_lookup_client_factory():
     )
 
     lmc_async.LMCacheAsyncLookupClient = LMCacheAsyncLookupClient
+    import lmcache.v1.lookup_client.factory as lookup_factory
+    from lmcache_ascend.v1.gdn_async_lookup import AscendGDNLookupFactory
+
+    # The subclass delegates unchanged for every configuration without the
+    # explicit GDN restore opt-in; this does not replace ordinary-KV async RPC.
+    lookup_factory.LookupClientFactory = AscendGDNLookupFactory
 
 
 def _patch_api_server():
