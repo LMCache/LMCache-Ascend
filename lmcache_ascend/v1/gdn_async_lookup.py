@@ -1,19 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """Thread-owned synchronous all-rank GDN RPC behind a nonblocking client."""
+
+# Standard
 from copy import copy
 from types import SimpleNamespace
 
+# Third Party
 from lmcache.v1.lookup_client.factory import LookupClientFactory
 from lmcache.v1.manager import LMCacheManager
+
+# First Party
 from lmcache_ascend.v1.async_control import SerialOwner
+from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
+
 
 def async_gdn(config):
-    return bool(config.get_extra_config_value("gdn_async_restore", False))
+    return gdn_async_restore_enabled(config)
+
 
 class AsyncStateClient:
     """Own ZMQ sockets and token database on one RPC thread, never scheduler."""
+
     def __init__(self, config, metadata, create_client):
+        # Third Party
         from lmcache.v1.token_database import ChunkedTokenDatabase
+
         self.config = copy(config)
         # This config describes the synchronous *wire protocol*, not H2D mode.
         self.config.enable_async_loading = False
@@ -24,7 +35,8 @@ class AsyncStateClient:
         self._jobs = {}
         self._admitted = set()
         self._owner = SerialOwner(
-            lambda: create_client(self.config, metadata, None), "gdn-async-lookup")
+            lambda: create_client(self.config, metadata, None), "gdn-async-lookup"
+        )
         self._error = None
 
     def poll(self, req_id, signature, operation):
@@ -47,7 +59,9 @@ class AsyncStateClient:
             raise
 
     def cancel_lookup(self, req_id):
+        # First Party
         from lmcache_ascend.v1.state_lookup import cancel_state_lookup
+
         self._jobs.pop(req_id, None)
         if req_id in self._admitted:
             # Scheduler has allocated receive targets. Worker owns cleanup via
@@ -75,22 +89,29 @@ class AsyncStateClient:
     def received(self, req_ids):
         self._admitted.difference_update(req_ids)
 
+
 class AscendGDNLookupFactory(LookupClientFactory):
     """Preserve the ordinary-KV factory unless GDN restore is opted in."""
 
     @staticmethod
     def create_lookup_client(config, metadata, lmcache_engine=None):
         if not async_gdn(config):
-            return LookupClientFactory.create_lookup_client(config, metadata, lmcache_engine)
+            return LookupClientFactory.create_lookup_client(
+                config, metadata, lmcache_engine
+            )
         if not config.enable_async_loading:
             raise ValueError("gdn_async_restore requires enable_async_loading=true")
-        return AsyncStateClient(config, metadata, LookupClientFactory.create_lookup_client)
+        return AsyncStateClient(
+            config, metadata, LookupClientFactory.create_lookup_client
+        )
 
     @staticmethod
     def create_lookup_server(engine, metadata):
         if not async_gdn(engine.config):
             return LookupClientFactory.create_lookup_server(engine, metadata)
+        # Third Party
         from lmcache.v1.lookup_client.lmcache_lookup_client import LMCacheLookupServer
+
         workers = engine.config.get_lookup_server_worker_ids(False, metadata.world_size)
         if workers and sorted(workers) != list(range(metadata.world_size)):
             raise ValueError("GDN restore requires every lookup worker")
@@ -102,7 +123,11 @@ class AscendGDNManager(LMCacheManager):
     """GDN uses checkpoint RPC, not the ordinary-KV prefetch server."""
 
     def post_init(self):
-        if not async_gdn(self.config) or self.lmcache_engine is None or self._init_failed:
+        if (
+            not async_gdn(self.config)
+            or self.lmcache_engine is None
+            or self._init_failed
+        ):
             return super().post_init()
         try:
             self.lmcache_engine.post_init(async_lookup_server=None)

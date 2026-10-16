@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """Host-only async ownership primitives; no torch/NPU imports."""
+
+# Standard
 from concurrent.futures import Future
 import queue
 import threading
+import time
 
 
 class SerialOwner:
     """Create/use/close a thread-affine resource on one owner thread."""
+
     def __init__(self, factory, name, max_pending=128):
         self._factory = factory
         self._queue = queue.Queue(maxsize=max_pending)
         self._ready = Future()
         self._closed = False
+        self._stop_sent = False
         self._guard = threading.Lock()
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
@@ -53,17 +58,24 @@ class SerialOwner:
                 resource.close()
 
     def close(self, timeout=120):
+        if threading.current_thread() is self._thread:
+            raise RuntimeError("Owner cannot join itself")
+        deadline = time.monotonic() + timeout
         with self._guard:
-            if not self._closed:
-                self._closed = True
-                self._queue.put(None, timeout=timeout)
-        self._thread.join(timeout)
+            self._closed = True
+            if not self._stop_sent:
+                # If a full queue times out, a later close must retry the
+                # sentinel; marking the owner closed is not proof it was sent.
+                self._queue.put(None, timeout=max(0, deadline - time.monotonic()))
+                self._stop_sent = True
+        self._thread.join(max(0, deadline - time.monotonic()))
         if self._thread.is_alive():
             raise TimeoutError("Owner did not drain; resource must not be freed")
 
 
 class CompletionLedger:
     """Receive ACK exists only after copies AND reference cleanup complete."""
+
     def __init__(self):
         self.lock = threading.Lock()
         self.active = set()
@@ -72,21 +84,24 @@ class CompletionLedger:
 
     def check(self):
         with self.lock:
-            error = self.error
-        if error:
-            raise RuntimeError("GDN_FULL_ASYNC_FATAL: " + error)
+            self._check_locked()
+
+    def _check_locked(self):
+        if self.error:
+            raise RuntimeError("GDN_FULL_ASYNC_FATAL: " + self.error)
 
     def begin(self, req_id):
-        self.check()
         with self.lock:
+            self._check_locked()
             if req_id in self.active or req_id in self.done:
                 raise RuntimeError("Duplicate in-flight receive: " + req_id)
-            if len(self.active) >= 128:
+            if len(self.active) + len(self.done) >= 128:
                 raise RuntimeError("Receive ownership limit exceeded")
             self.active.add(req_id)
 
     def complete(self, req_id):
         with self.lock:
+            self._check_locked()
             if req_id not in self.active:
                 raise RuntimeError("Receive accounting underflow")
             self.active.remove(req_id)
@@ -103,8 +118,7 @@ class CompletionLedger:
             return self.active | self.done
 
     def drain(self):
-        self.check()
         with self.lock:
+            self._check_locked()
             result, self.done = self.done, set()
             return result
-

@@ -18,6 +18,10 @@ from lmcache_ascend.integration.vllm.skip_state_groups import (
     parse_skip_state_policy_from_env,
     should_skip_layer,
 )
+from lmcache_ascend.v1.gdn_async_config import (
+    gdn_async_restore_enabled,
+    gdn_async_store_enabled,
+)
 from lmcache_ascend.v1.state_layout import StateGroupLayout, build_state_group_layout
 
 
@@ -142,13 +146,17 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
 
 def validate_state_config(config: Any, vllm_config: Any) -> None:
     """Validate the supported all-rank hybrid cache modes."""
-    async_restore = bool(config.get_extra_config_value("gdn_async_restore", False))
-    async_store = bool(config.get_extra_config_value("gdn_async_store", False))
+    async_restore = gdn_async_restore_enabled(config)
+    async_store = gdn_async_store_enabled(config)
     if async_restore and not (
-        async_store and config.store_async and config.enable_async_loading
+        async_store
+        and config.store_async
+        and config.enable_async_loading
         and vllm_config.scheduler_config.async_scheduling
     ):
-        raise ValueError("gdn_async_restore requires async store, loading and scheduling")
+        raise ValueError(
+            "gdn_async_restore requires async store, loading and scheduling"
+        )
     if async_store:
         if not config.store_async or not 1 <= config.store_async_max_queue_size <= 32:
             raise ValueError("gdn_async_store requires a bounded async store queue")
@@ -156,7 +164,9 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
             raise ValueError("gdn_async_store supports the local CPU tier only")
         if config.store_location not in (None, "LocalCPUBackend"):
             raise ValueError("gdn_async_store requires local CPU stores")
-        if config.retrieve_locations is not None and set(config.retrieve_locations) != {"LocalCPUBackend"}:
+        if config.retrieve_locations is not None and set(config.retrieve_locations) != {
+            "LocalCPUBackend"
+        }:
             raise ValueError("gdn_async_store requires local CPU retrieval")
     speculative = vllm_config.speculative_config
     if speculative is not None:

@@ -10,6 +10,7 @@ import threading
 from lmcache.logging import init_logger
 
 # First Party
+from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
 from lmcache_ascend.v1.state_checkpoint import CheckpointRef, state_checkpoint_key
 from lmcache_ascend.v1.state_memory import adopt_state_checkpoint
 
@@ -54,6 +55,7 @@ def cancel_state_lookup(client, lookup_id):
     Unreachable workers expire their selection lease. A subsequent probe replaces
     any previous selection even when cancellation could not reach that worker.
     """
+    # First Party
     from lmcache_ascend.v1.gdn_async_lookup import AsyncStateClient
 
     if isinstance(client, AsyncStateClient):
@@ -240,7 +242,7 @@ def dispatch_state_lookup(engine, lookup_id, operation, configs, **inputs):
         or engine.config.enable_blending
         or (
             engine.config.enable_async_loading
-            and not engine.config.get_extra_config_value("gdn_async_restore", False)
+            and not gdn_async_restore_enabled(engine.config)
         )
         or engine.config.pin_timeout_sec <= 0
     ):

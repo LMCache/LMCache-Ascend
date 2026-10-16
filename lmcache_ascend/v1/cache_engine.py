@@ -27,9 +27,14 @@ from lmcache.v1.token_database import TokenDatabase
 import torch
 
 # First Party
+from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
+from lmcache_ascend.v1.gdn_async_store import (
+    GDNAsyncStoreMixin,
+    check_failure,
+    wait_pending,
+)
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 from lmcache_ascend.v1.state_cache import StateCache
-from lmcache_ascend.v1.gdn_async_store import GDNAsyncStoreMixin, check_failure, wait_pending
 from lmcache_ascend.v1.storage_backend.pd.handoff import (
     split_pd_handoff_request_config,
 )
@@ -177,7 +182,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
         return handoff_id
 
     def _ensure_store_worker(self) -> None:
-        if self._gdn_async_enabled:
+        if getattr(self, "_gdn_async_enabled", False):
             return self._gdn_ensure_store_worker()
         if self._store_queue is not None:
             return
@@ -845,7 +850,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
         return ret_mask
 
     def _store_worker_loop(self) -> None:
-        if self._gdn_async_enabled:
+        if getattr(self, "_gdn_async_enabled", False):
             return self._gdn_store_worker_loop()
         if not self.is_store_async:
             return
@@ -889,7 +894,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
 
     @torch.inference_mode()
     def _run_store_pipeline(self, *args, **kwargs):
-        if self.config.get_extra_config_value("gdn_async_restore", False):
+        if gdn_async_restore_enabled(self.config):
             # Shared connector scratch cannot be reused until D2H is fenced.
             with self._gdn_transfer_lock:
                 try:
@@ -1113,7 +1118,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
         if not self.is_store_async:
             return set()
 
-        if self._gdn_async_enabled:
+        if getattr(self, "_gdn_async_enabled", False):
             return wait_pending(self, req_ids)
         req_id_set = set(req_ids)
         if not req_id_set:
@@ -1224,8 +1229,10 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
         if impl is not None:
             if lookup_id in impl._full_ledger.owned():
                 return
-            if (lookup_id not in getattr(self, "_state_lookup_selections", {})
-                    and lookup_id not in self.lookup_pins):
+            if (
+                lookup_id not in getattr(self, "_state_lookup_selections", {})
+                and lookup_id not in self.lookup_pins
+            ):
                 return
         with self._engine_state_lock:
             # First Party
@@ -1289,19 +1296,23 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
     def store_state(self, execution, layouts, kv_caches, ordering_event):
         """Save a planned endpoint after the worker's forward gate."""
         check_failure(self)
-        if self._gdn_async_enabled:
+        if getattr(self, "_gdn_async_enabled", False):
             return self._gdn_store_state(execution, layouts, kv_caches, ordering_event)
         return self._store_state_sync(execution, layouts, kv_caches, ordering_event)
 
     @torch.inference_mode()
     def _store_state_sync(self, execution, layouts, kv_caches, ordering_event):
-        if self.config.get_extra_config_value("gdn_async_restore", False):
+        if gdn_async_restore_enabled(self.config):
             with self._gdn_transfer_lock:
                 try:
-                    return self._store_state_sync_impl(execution, layouts, kv_caches, ordering_event)
+                    return self._store_state_sync_impl(
+                        execution, layouts, kv_caches, ordering_event
+                    )
                 finally:
                     self.gpu_connector.store_stream.synchronize()
-        return self._store_state_sync_impl(execution, layouts, kv_caches, ordering_event)
+        return self._store_state_sync_impl(
+            execution, layouts, kv_caches, ordering_event
+        )
 
     def _store_state_sync_impl(self, execution, layouts, kv_caches, ordering_event):
         """The managed synchronous path, also used by the snapshot worker."""
@@ -1436,7 +1447,7 @@ class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
 
     def close(self) -> None:
         """Stop the bg worker gracefully, then close the base engine."""
-        if self._gdn_async_enabled:
+        if getattr(self, "_gdn_async_enabled", False):
             self._gdn_close_store()
         # Push poison pill first so any in-flight work drains before
         # ``storage_manager.close()`` runs inside ``super().close()``.
