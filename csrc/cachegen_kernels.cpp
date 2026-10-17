@@ -5,7 +5,6 @@
 
 #include "tiling/platform/platform_ascendc.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <pybind11/pybind11.h>
 

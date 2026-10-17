@@ -6,7 +6,6 @@
 
 #include "tiling/platform/platform_ascendc.h"
 #include <torch_npu/csrc/core/npu/NPUStream.h>
-#include <torch_npu/csrc/framework/OpCommand.h>
 
 #include <pybind11/pybind11.h>
 
@@ -37,24 +36,21 @@ void pac_prepare_enc_metadata(const at::Tensor &input_sym,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(input_sym));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
+  // .stream() drains torch_npu's ACL task queue first so the direct launch
+  // below keeps Python-call order (the old OpCommand path relied on the
+  // queue's FIFO for this; .stream(false) is not enough for direct launch).
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto input_data_ptr = static_cast<uint8_t *>(input_sym.data_ptr());
 
   const char *socName = aclrtGetSocName();
-  auto _custom_handler = [=]() -> int {
-    auto ascendcPlatform =
-        platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
-    kvcache_ops::pac_coder::pac_prep_enc_metadata(
-        input_data_ptr, meta_data_data_ptr, stream, n_aiv, nbins, ntokens,
-        nlayers, nchannels);
-    return 0;
-  };
-
-  at_npu::native::OpCommand cmd;
-  cmd.Name("prep_encode_metadata").SetCustomHandler(_custom_handler).Run();
+  auto ascendcPlatform =
+      platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+  uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
+  kvcache_ops::pac_coder::pac_prep_enc_metadata(
+      input_data_ptr, meta_data_data_ptr, stream, n_aiv, nbins, ntokens,
+      nlayers, nchannels);
 }
 
 void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
@@ -89,7 +85,9 @@ void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(input_sym));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
+  // .stream() drains torch_npu's ACL task queue first (see
+  // pac_prepare_enc_metadata).
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto input_data_ptr = static_cast<uint8_t *>(input_sym.data_ptr());
@@ -101,19 +99,13 @@ void pac_encode(const at::Tensor &input_sym, const at::Tensor &meta_data,
   auto workGM_ptr = static_cast<uint8_t *>(workGM.data_ptr());
 
   const char *socName = aclrtGetSocName();
-  auto _custom_handler = [=]() -> int {
-    auto ascendcPlatform =
-        platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
-    kvcache_ops::pac_coder::pac_encode(input_data_ptr, meta_data_data_ptr,
-                                       output_data_ptr, output_lengths_data_ptr,
-                                       stream, n_aiv, nbins, ntokens, nlayers,
-                                       nchannels, chunk_size, workGM_ptr);
-    return 0;
-  };
-
-  at_npu::native::OpCommand cmd;
-  cmd.Name("pac_encode").SetCustomHandler(_custom_handler).Run();
+  auto ascendcPlatform =
+      platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+  uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
+  kvcache_ops::pac_coder::pac_encode(input_data_ptr, meta_data_data_ptr,
+                                     output_data_ptr, output_lengths_data_ptr,
+                                     stream, n_aiv, nbins, ntokens, nlayers,
+                                     nchannels, chunk_size, workGM_ptr);
 };
 
 void pac_decode(const at::Tensor &meta_data, const at::Tensor &bytestreams,
@@ -146,7 +138,9 @@ void pac_decode(const at::Tensor &meta_data, const at::Tensor &bytestreams,
       "of 32, contact LMCache Ascend about changing this limitation");
 
   const c10::OptionalDeviceGuard device_guard(device_of(bytestreams));
-  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream(false);
+  // .stream() drains torch_npu's ACL task queue first (see
+  // pac_prepare_enc_metadata).
+  const aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
 
   auto meta_data_data_ptr = static_cast<uint8_t *>(meta_data.data_ptr());
   auto bytestreams_data_ptr = static_cast<uint8_t *>(bytestreams.data_ptr());
@@ -154,16 +148,10 @@ void pac_decode(const at::Tensor &meta_data, const at::Tensor &bytestreams,
   auto output_data_ptr = static_cast<uint8_t *>(output.data_ptr());
 
   const char *socName = aclrtGetSocName();
-  auto _custom_handler = [=]() -> int {
-    auto ascendcPlatform =
-        platform_ascendc::PlatformAscendCManager::GetInstance(socName);
-    uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
-    kvcache_ops::pac_coder::pac_decode(
-        meta_data_data_ptr, lengths_data_ptr, bytestreams_data_ptr,
-        output_data_ptr, stream, n_aiv, nbins, ntokens, nlayers, nchannels);
-    return 0;
-  };
-
-  at_npu::native::OpCommand cmd;
-  cmd.Name("pac_decode").SetCustomHandler(_custom_handler).Run();
+  auto ascendcPlatform =
+      platform_ascendc::PlatformAscendCManager::GetInstance(socName);
+  uint32_t n_aiv = std::min(AIV_MAX, ascendcPlatform->GetCoreNumAiv());
+  kvcache_ops::pac_coder::pac_decode(
+      meta_data_data_ptr, lengths_data_ptr, bytestreams_data_ptr,
+      output_data_ptr, stream, n_aiv, nbins, ntokens, nlayers, nchannels);
 };
