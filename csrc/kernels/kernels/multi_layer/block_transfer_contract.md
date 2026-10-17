@@ -15,6 +15,7 @@ host layer enforces it and rejects violations with `TORCH_CHECK`.
 
 | Format | Enum | `separate_plane` | Work item | LMC layout |
 |---|---|---|---|---|
+| 2 | `NL_X_NB_TWO_BS_NH_HS` | `true` | (layer, plane, block) | same LMC layout as format 16. The pointer table is one base `data_ptr()` per layer; plane `p` is `base + plane_engine_base_offset_bytes[p]` |
 | 16 | `NL_X_TWO_X_NB_BS_NH_HS` | `true` | (layer, plane, block) | `[2, L, T, NH*HS]`, K slab then V slab |
 | 17 | `NL_X_NP_X_NB_BS_ONE_HS` | `false` | (layer, block), all planes moved by one core | `[L, T, sum(payload)]` packed byte rows |
 
@@ -28,8 +29,8 @@ cache lines with their row neighbours).
 Geometry (`prepare_group`, resolved once per group):
 
 - `nl, nb, bs, nh, hs > 0`; `element_size in {1, 2, 4}`
-- `kv_size == 2` for format 16, `== 1` for format 17
-- `1 <= num_planes <= 4`; exactly `2` for format 16; `nh == 1` for format 17
+- `kv_size == 2` for formats 2 and 16, `== 1` for format 17
+- `1 <= num_planes <= 4`; exactly `2` for formats 2 and 16; `nh == 1` for format 17
 - per plane: `payload_bytes > 0` and
   `AlignUp32(payload_bytes) <= ub_segment` (one aligned row of every plane
   fits one queue slot), where `ub_segment` is the host-queried UB budget
@@ -37,7 +38,8 @@ Geometry (`prepare_group`, resolved once per group):
 - per plane: `engine_block_stride_bytes >= bs * payload_bytes` (no block
   overlap) and `engine_block_stride_bytes % 32 == 0`
 - address-range probe `(nb - 1) * block_stride + bs * payload` fits int64
-- format 16: `payload_bytes == nh * hs * element_size` per plane
+- formats 2 and 16: `payload_bytes == nh * hs * element_size` per plane
+- format 2: `plane_engine_base_offset_bytes >= 0`, both planes share one block stride, `offset + bs * payload <= block_stride`, and the two plane windows do not overlap. Formats 16 and 17 require every offset to be 0
 - format 17: `sum(payload_bytes) == nh * hs * element_size`
   (the packed row width)
 - `bs * lmc_row_bytes % 32 == 0` (adjacent LMC pages do not share a 32B line)
@@ -110,6 +112,18 @@ path otherwise.
 
 ## 6. Pointer table
 
-`ptrs[layer * num_planes + plane]`: each entry is the plane tensor view's
-`data_ptr()`, already including the view's `storage_offset`. The table must
-live on the NPU and contain exactly `nl * num_planes` int64 entries.
+Formats 16 and 17: `ptrs[layer * num_planes + plane]`. Each entry is the
+plane tensor view's `data_ptr()`, already including that view's
+`storage_offset`. The table contains exactly `nl * num_planes` int64 entries.
+
+Format 2: `ptrs[layer]` is the `[NB, 2, BS, NH, HS]` tensor's `data_ptr()`
+(one entry per layer, `nl` total). Plane `p` starts at
+`ptrs[layer] + plane_engine_base_offset_bytes[p]`. Those offsets are
+`plane.data_ptr() - layer.data_ptr()` for `layer[:, 0]` and `layer[:, 1]`,
+so a nonzero storage offset on the 5D tensor is already inside the base
+pointer. The two planes are equal-width axis-1 slabs. They are semantic K
+and V for a normal fused cache, and the first and second halves of an
+opaque logical page after a sub-paged attention edit. Address calculation
+is the same in both cases.
+
+The table must live on the NPU.

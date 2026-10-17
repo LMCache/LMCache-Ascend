@@ -11,6 +11,11 @@ namespace kvcache_ops {
 // One launch moves one LMCache memory object
 //
 // Layout semantics per engine KV format:
+//   2  (NL_X_NB_TWO_BS_NH_HS): one [NB, 2, BS, NH, HS] tensor per layer.
+//       The pointer table is one base data_ptr() per layer. Plane p is
+//       base + plane.engine_base_offset_bytes. The planes are axis-1 slabs
+//       (semantic K/V, or the two halves of an opaque sub-paged page).
+//       LMC layout matches format 16.
 //   16 (NL_X_TWO_X_NB_BS_NH_HS): per-layer (K, V) equal-width NHD tensors
 //       -> LMC [2, L, T, NH*HS] (2LTD: K slab first, V slab after); work
 //       items are (layer, plane, block) since K/V live in disjoint slabs.
@@ -19,8 +24,10 @@ namespace kvcache_ops {
 //       items are (layer, block) and one AIV core moves every plane of the
 //       page, so no two cores ever share a 32B LMC line.
 //
-// Pointer table layout: ptrs[layer * num_planes + plane], each entry the
-// plane tensor view's data_ptr() .
+// Pointer table layout:
+//   format 2: ptrs[layer], plus PlaneLayout::engine_base_offset_bytes;
+//   formats 16/17: ptrs[layer * num_planes + plane], each entry the plane
+//   tensor view's data_ptr().
 
 void multi_layer_block_transfer_kernel(
     uint32_t block_dim,            // min(AIV cores, ACTIVE work items =
@@ -39,9 +46,10 @@ void multi_layer_block_transfer_kernel(
     BlockTransferLayout layout,    // full byte layout (block_transfer_layout.h)
     bool to_engine,                // H2D = LMC->engine (retrieve), D2H =
                                    // engine->LMC (store); device-to-device
-    int64_t ub_bytes = 0);         // usable UB staging budget, host-queried
+    int64_t ub_bytes = 0,          // usable UB staging budget, host-queried
                                    //   via GetCoreMemSize(CoreMemType::UB);
                                    //   0 = built-in default
+    bool one_pointer_per_layer = false); // format 2: one base pointer per layer
 } // namespace kvcache_ops
 
 #endif // MULTI_LAYER_BLOCK_MEM_KERNELS_H

@@ -53,6 +53,30 @@ def attach_tuple_block_strides(
     desc.plane_block_stride_bytes = strides
 
 
+def attach_tuple_engine_base_offsets(
+    desc: object,
+    plane_engine_base_offset_bytes: Sequence[int],
+) -> None:
+    """Record bytes from a format-2 layer base pointer to each plane.
+
+    Formats whose pointer table already has one entry per plane leave this
+    at zero. ``plane_engine_base_offset_bytes[i]`` is
+    ``plane.data_ptr() - layer.data_ptr()``.
+    """
+    offsets = tuple(int(b) for b in plane_engine_base_offset_bytes)
+    if len(offsets) > _MAX_PLANES:
+        raise ValueError(
+            "attach_tuple_engine_base_offsets: "
+            f"{len(offsets)} planes exceeds max {_MAX_PLANES}"
+        )
+    if any(offset < 0 for offset in offsets):
+        raise ValueError(
+            "attach_tuple_engine_base_offsets: offsets must be non-negative, "
+            f"got {offsets}"
+        )
+    desc.plane_engine_base_offset_bytes = offsets
+
+
 def install_plane_geometry_fill() -> None:
     """Wrap upstream ``make_page_buffer_shape_desc`` with plane geometry.
 
@@ -71,6 +95,15 @@ def install_plane_geometry_fill() -> None:
     element_size``; ``shape[2] == 1`` for fmt 17, reducing to its plane
     width) and the per-block stride is ``stride(0) * element_size``.
 
+    Format 2 (``NL_X_NB_TWO_BS_NH_HS``) is one ``[NB, 2, BS, NH, HS]``
+    tensor per layer. The pointer table stays one base pointer per layer.
+    Each plane's address is that base plus
+    ``plane.data_ptr() - layer.data_ptr()``. Axis 1 is two equal slabs:
+    semantic K and V for a normal fused cache, or the first and second
+    halves of an opaque logical page after a sub-paged attention edit.
+    Its row bytes and block stride use the same trailing-dim rule, on
+    ``layer[:, 0]`` and ``layer[:, 1]``.
+
     Upstream call sites (``kv_layer_groups`` and the MP transfer-context
     gather/scatter utilities) import the function lazily inside the call,
     so rebinding the module attribute takes effect regardless of import
@@ -81,6 +114,7 @@ def install_plane_geometry_fill() -> None:
     import lmcache.v1.gpu_connector.utils as gpu_connector_utils
 
     original = gpu_connector_utils.make_page_buffer_shape_desc
+    fmt2 = lmcache_native.EngineKVFormat.NL_X_NB_TWO_BS_NH_HS
     plane_tuple_fmts = (
         lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
         lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
@@ -104,6 +138,22 @@ def install_plane_geometry_fill() -> None:
             block_size,
             block_stride_elems,
         )
+        if int(engine_kv_format) == int(fmt2):
+            layer = kv_caches[layer_idx]
+            planes = (layer[:, 0], layer[:, 1])
+            base = int(layer.data_ptr())
+            desc.num_planes = len(planes)
+            desc.plane_slot_bytes = tuple(
+                int(t.shape[2]) * int(t.shape[3]) * int(t.element_size())
+                for t in planes
+            )
+            desc.plane_block_stride_bytes = tuple(
+                int(t.stride(0)) * int(t.element_size()) for t in planes
+            )
+            attach_tuple_engine_base_offsets(
+                desc, tuple(int(plane.data_ptr()) - base for plane in planes)
+            )
+            return desc
         if engine_kv_format in plane_tuple_fmts:
             planes = kv_caches[layer_idx]
             desc.num_planes = len(planes)

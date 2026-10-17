@@ -43,6 +43,9 @@ struct PlaneLayout {
   int64_t payload_bytes;             // valid bytes per token slot
   int64_t engine_block_stride_bytes; // dim-0 block step on the engine side
   int64_t lmc_base_offset_bytes;     // plane start inside the LMC object
+  // Format 2 only: bytes from the layer base pointer to this plane.
+  // Formats 16/17 pass one pointer per plane, so this stays 0.
+  int64_t engine_base_offset_bytes = 0;
 };
 
 struct BlockTransferLayout {

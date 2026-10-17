@@ -199,6 +199,16 @@ PYBIND11_MODULE(c_ops, m) {
           [](PageBufferShapeDesc &s, const std::vector<int64_t> &v) {
             plane_array_set(s.plane_block_stride_bytes, v,
                             "plane_block_stride_bytes");
+          })
+      .def_property(
+          "plane_engine_base_offset_bytes",
+          [](const PageBufferShapeDesc &s) {
+            return plane_array_get(s.plane_engine_base_offset_bytes,
+                                   s.num_planes);
+          },
+          [](PageBufferShapeDesc &s, const std::vector<int64_t> &v) {
+            plane_array_set(s.plane_engine_base_offset_bytes, v,
+                            "plane_engine_base_offset_bytes");
           });
   m.def(
       "multi_layer_block_kv_transfer",
