@@ -332,8 +332,9 @@ def _patch_ops():
     if not hasattr(ascend_c_ops, "GPUKVFormat"):
         ascend_c_ops.GPUKVFormat = ascend_c_ops.EngineKVFormat
 
-    # Native host only admits fmt 16/17.
+    # Native host admits fmt 13/16/17.
     _native_block = ascend_c_ops.multi_layer_block_kv_transfer
+    _fmt_13 = int(ascend_c_ops.EngineKVFormat.NL_X_NB_BS_NH_CS)
     _fmt_16 = int(ascend_c_ops.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS)
     _fmt_17 = int(ascend_c_ops.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS)
 
@@ -348,11 +349,12 @@ def _patch_ops():
         engine_kv_format,
         skip_prefix_n_blocks,
     ):
-        if int(engine_kv_format) not in (_fmt_16, _fmt_17):
+        if int(engine_kv_format) not in (_fmt_13, _fmt_16, _fmt_17):
             raise NotImplementedError(
                 f"engine_kv_format={int(engine_kv_format)} is not supported "
                 f"on NPU: the native block-transfer kernel only implements "
-                f"fmt {_fmt_16} (NL_X_TWO_X_NB_BS_NH_HS) and fmt {_fmt_17} "
+                f"fmt {_fmt_13} (NL_X_NB_BS_NH_CS), fmt {_fmt_16} "
+                f"(NL_X_TWO_X_NB_BS_NH_HS), and fmt {_fmt_17} "
                 f"(NL_X_NP_X_NB_BS_ONE_HS). Check the engine KV layout."
             )
         return _native_block(
@@ -597,7 +599,7 @@ def _patch_vllm_v1_adapter():
 
 
 def _patch_make_page_buffer_shape_desc():
-    """Attach per-plane byte geometry to upstream's desc factory (fmt 16/17)."""
+    """Attach per-plane byte geometry to upstream's desc factory (fmt 13/16/17)."""
     # First Party
     from lmcache_ascend.v1.shape_desc import install_plane_geometry_fill
 

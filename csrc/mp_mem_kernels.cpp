@@ -90,12 +90,14 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
                             EngineKVFormat engine_kv_format,
                             int64_t slots_per_object, int64_t ub_bytes) {
   PageBufferShapeDesc sd = shape_desc;
+  const bool fmt13 = engine_kv_format == EngineKVFormat::NL_X_NB_BS_NH_CS;
   const bool separate =
       engine_kv_format == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS;
   const bool fmt17 = engine_kv_format == EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS;
-  TORCH_CHECK(separate || fmt17,
+  TORCH_CHECK(fmt13 || separate || fmt17,
               "LMCache-Ascend block-level MP transfer currently supports "
-              "NL_X_TWO_X_NB_BS_NH_HS (16) and NL_X_NP_X_NB_BS_ONE_HS (17), "
+              "NL_X_NB_BS_NH_CS (13), NL_X_TWO_X_NB_BS_NH_HS (16), and "
+              "NL_X_NP_X_NB_BS_ONE_HS (17), "
               "got ",
               static_cast<int>(engine_kv_format));
   TORCH_CHECK(sd.nl > 0 && sd.nb > 0 && sd.bs > 0 && sd.nh > 0 && sd.hs > 0,
