@@ -706,6 +706,8 @@ def _build(
                 hs=hs,
                 dtype=dtype,
                 block_stride_elems=stride,
+                plane_slot_bytes=(hs * 4,),
+                plane_block_stride_bytes=(stride * 4,),
             )
             return dict(
                 fmt=NH_CS_FMT,
@@ -851,6 +853,8 @@ def _roundtrip_cases() -> list[Any]:
         ("interleaved_attn_tp1", "npu", True, 0, 2, 1, [0, 2], "interleaved-attn-tp1"),
         ("kg0", "npu", False, 1, 2, 1, [1, 3], "kg0-npu-skip"),
         ("kg0", "npu", False, 0, 21, 2, list(range(64)), "kg0-npu-2chunk"),
+        ("nh_cs", "npu", False, 0, 2, 1, [3, 1], "fmt13-tight"),
+        ("nh_cs_padded", "npu", False, 0, 2, 1, [3, 1], "fmt13-padded"),
         ("nh_cs_fmt17", "npu", False, 0, 2, 1, [0], "nh_cs-fmt17"),
         ("kg0_indep", "npu", False, 0, 2, 1, [0], "kg0-indep-mini"),
         ("kg0_bs16", "npu", False, 0, 2, 1, [0], "kg0-bs16-chunk16"),
