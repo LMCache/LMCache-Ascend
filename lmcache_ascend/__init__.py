@@ -368,16 +368,6 @@ def _patch_storage_manager():
     lm_local_disk_backend.LocalDiskBackend.touch_cache = local_disk_touch_cache
 
 
-def _patch_torch_capability():
-    # Third Party
-    from torch_npu.contrib import transfer_to_npu  # noqa: F401
-    import torch
-
-    # Note: torch_npu do not support get_device_capability
-    capability_mock = lambda *args: (0, 0)
-    torch.npu.get_device_capability = capability_mock
-
-
 def _patch_transfer_channel():
     # First Party
     from lmcache_ascend.v1.transfer_channel import (
@@ -868,12 +858,6 @@ if not LMCACHE_ASCEND_PATCHED:
 
     is_sgl = _is_sglang_runtime()
     is_vllm = _is_vllm_runtime()
-
-    # TODO (gingfung): Currently we patch all the cuda calls
-    # due to effort to port all torch.cuda will disabled torch.jit
-    # NOTE: this must be done early in the patch prior to the cache engine
-    # to avoid falling into non_cuda_equivalent
-    _patch_torch_capability()
 
     if is_vllm:
         _patch_gpu_connector()
