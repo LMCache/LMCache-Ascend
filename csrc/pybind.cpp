@@ -215,12 +215,8 @@ PYBIND11_MODULE(c_ops, m) {
             static_cast<TransferDirection>(py::int_(direction).cast<int>());
         const auto fmt =
             static_cast<EngineKVFormat>(py::int_(engine_kv_format).cast<int>());
-        // Direct launch path: release the GIL while the transfer drains
-        // torch_npu's ACL task queue (getCurrentNPUStream().stream()) and
-        // enqueues kernels + memcpys. A c10::Error from TORCH_CHECK
-        // re-acquires the GIL during unwinding, so failures still surface as
-        // Python exceptions (mp worker threads keep a clean error contract).
-        py::gil_scoped_release release;
+        // Keep the GIL through TORCH_CHECK so failures surface as Python
+        // exceptions instead of aborting the lmcache server.
         multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
             block_ids, device, dir, shape_desc, lmcache_chunk_size, fmt,
@@ -283,12 +279,10 @@ PYBIND11_MODULE(c_ops, m) {
             host_buffer_alignment, kernel_group_specs, batch_steps);
       },
       py::arg("direction"), py::arg("device"), py::arg("host_buffer_alignment"),
-      py::arg("kernel_group_specs"), py::arg("batch_steps"),
-      // Direct launch path (CUDA parity): every kernel launch and memcpy is
-      // enqueued on the calling thread after draining torch_npu's ACL task
-      // queue (getCurrentNPUStream().stream()), so the GIL can be released
-      // for the whole enqueue.
-      py::call_guard<py::gil_scoped_release>());
+      py::arg("kernel_group_specs"), py::arg("batch_steps"));
+  // No gil_scoped_release: NPU OpCommand.Run() posts to torch_npu's
+  // Python task queue. Releasing the GIL here deadlocks (CUDA launches
+  // without that queue). One Run() still implies one stream wait.
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
 }
