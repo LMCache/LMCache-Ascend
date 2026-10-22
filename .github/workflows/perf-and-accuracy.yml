@@ -106,7 +106,7 @@ jobs:
 
       - name: Checkout (Workflow Run)
         if: github.event_name == 'workflow_run'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           repository: ${{ github.event.workflow_run.head_repository.full_name }}
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -115,13 +115,13 @@ jobs:
 
       - name: Checkout (Dispatch or Call)
         if: github.event_name != 'workflow_run'
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: true
       
       - name: 🟡 Set Status to Running
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -213,7 +213,7 @@ jobs:
 
       - name: 📤 Upload Perf Output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: perf-output-910c
           path: /tmp/perf_output.txt
@@ -277,14 +277,14 @@ jobs:
 
       - name: 📤 Upload Accuracy Output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: accuracy-output-910c
           path: /tmp/accuracy_output.txt
 
       - name: 🟢🔴 Update Hardware Status
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
         with:
           script: |
             const { owner, repo } = context.repo;
