@@ -58,7 +58,7 @@ def install_plane_geometry_fill() -> None:
 
     Upstream's factory fills only the scalar fields; its compiled struct
     carries no plane arrays (the pybind class is ``dynamic_attr``), so the
-    per-plane byte geometry required by Ascend block transfer is attached here,
+    per-plane byte geometry both Ascend formats require is attached here,
     at the same construction point:
 
     - fmt 13 (``NL_X_NB_BS_NH_CS``): one fused-K/V tensor per layer,
@@ -83,7 +83,6 @@ def install_plane_geometry_fill() -> None:
     import lmcache.v1.gpu_connector.utils as gpu_connector_utils
 
     original = gpu_connector_utils.make_page_buffer_shape_desc
-    fmt13 = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
     plane_tuple_fmts = (
         lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
         lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
@@ -107,21 +106,7 @@ def install_plane_geometry_fill() -> None:
             block_size,
             block_stride_elems,
         )
-        if engine_kv_format == fmt13:
-            # Format 13 is one [NB, BS, NH, CS] tensor per layer, not a
-            # tuple of tensors.  In particular, ``len(t)`` would be NB, not
-            # the number of planes.
-            tensor = kv_caches[layer_idx]
-            desc.num_planes = 1
-            desc.plane_slot_bytes = (
-                int(tensor.shape[2])
-                * int(tensor.shape[3])
-                * int(tensor.element_size()),
-            )
-            desc.plane_block_stride_bytes = (
-                int(tensor.stride(0)) * int(tensor.element_size()),
-            )
-        elif engine_kv_format in plane_tuple_fmts:
+        if engine_kv_format in plane_tuple_fmts:
             planes = kv_caches[layer_idx]
             desc.num_planes = len(planes)
             desc.plane_slot_bytes = tuple(

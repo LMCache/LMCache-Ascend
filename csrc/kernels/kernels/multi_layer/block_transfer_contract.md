@@ -30,9 +30,14 @@ cache lines with their row neighbours).
 Geometry (`prepare_group`, resolved once per group):
 
 - `nl, nb, bs, nh, hs > 0`; `element_size in {1, 2, 4}`
-- `kv_size == 2` for formats 2 and 16, `== 1` for formats 13 and 17
-- `1 <= num_planes <= 4`; exactly `1` for format 13, exactly `2` for format
-  2 and 16; `nh == 1` for format 17
+- `kv_size == 2` for format 16, `== 1` for formats 13 and 17
+- format 13 with `num_planes == 0` derives its single-plane geometry in
+  `prepare_group`: `payload_bytes = nh * hs * element_size`, and
+  `engine_block_stride_bytes = block_stride_elems * element_size` when an
+  explicit block stride is present, otherwise `bs * payload_bytes`; explicitly
+  supplied geometry is preserved
+- after geometry resolution, `1 <= num_planes <= 4`; exactly `1` for format
+  13, exactly `2` for format 16; `nh == 1` for format 17
 - per plane: `payload_bytes > 0` and
   `AlignUp32(payload_bytes) <= ub_segment` (one aligned row of every plane
   fits one queue slot), where `ub_segment` is the host-queried UB budget

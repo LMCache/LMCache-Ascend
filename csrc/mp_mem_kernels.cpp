@@ -102,7 +102,8 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
   const bool fmt17 = engine_kv_format == EngineKVFormat::NL_X_NP_X_NB_BS_ONE_HS;
   TORCH_CHECK(fmt13 || separate || fmt17,
               "LMCache-Ascend block-level MP transfer currently supports "
-              "NL_X_NB_TWO_BS_NH_HS (2), NL_X_NB_BS_NH_CS (13), NL_X_TWO_X_NB_BS_NH_HS (16), and "
+              "NL_X_NB_TWO_BS_NH_HS (2), NL_X_NB_BS_NH_CS (13), "
+              "NL_X_TWO_X_NB_BS_NH_HS (16), and "
               "NL_X_NP_X_NB_BS_ONE_HS (17), "
               "got ",
               static_cast<int>(engine_kv_format));
@@ -115,6 +116,22 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
   TORCH_CHECK(sd.kv_size == (separate ? 2 : 1), "kv_size must be ",
               (separate ? 2 : 1), " for format ",
               static_cast<int>(engine_kv_format), ", got ", sd.kv_size);
+
+  const int64_t scalar_row =
+      checked_mul(checked_mul(sd.nh, sd.hs, "nh * hs"), sd.element_size,
+                  "LMC scalar row bytes");
+  if (fmt13 && sd.num_planes == 0) {
+    // Format 13 is one fused [NB, BS, NH, CS] tensor per layer. Its plane
+    // geometry is fully determined by the scalar descriptor fields, so no
+    // per-plane tensor introspection is needed during registration.
+    sd.num_planes = 1;
+    sd.plane_slot_bytes[0] = scalar_row;
+    sd.plane_block_stride_bytes[0] =
+        sd.block_stride_elems > 0
+            ? checked_mul(sd.block_stride_elems, sd.element_size,
+                          "format 13 block stride bytes")
+            : checked_mul(sd.bs, scalar_row, "format 13 block stride bytes");
+  }
 
   // Format 2 is one [NB, 2, BS, NH, HS] tensor. The scalar descriptor
   // fixes both plane addresses, so fill them here.
@@ -141,17 +158,21 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
     sd.plane_engine_base_offset_bytes[1] = half;
   }
 
-  // Formats 16/17 must carry explicit plane geometry filled at registration
-  // (num_planes == 0 is the "unfilled" sentinel). Format 2 is filled above.
+  // Formats 16/17 must carry explicit plane geometry filled at registration;
+  // format 13 derives it above when num_planes == 0.
   TORCH_CHECK(sd.num_planes >= 1 && sd.num_planes <= kvcache_ops::kMaxPlanes,
               "num_planes must be in [1, ", kvcache_ops::kMaxPlanes,
-              "] (explicit plane geometry from registration), got ",
-              sd.num_planes);
+              "] after resolving plane geometry, got ", sd.num_planes);
   if (separate) {
     TORCH_CHECK(
         sd.num_planes == 2,
         "separate-plane formats require exactly 2 physical planes, got ",
         sd.num_planes);
+  }
+  if (fmt13) {
+    TORCH_CHECK(sd.num_planes == 1,
+                "format 13 requires exactly 1 physical plane, got ",
+                sd.num_planes);
   }
   if (fmt17) {
     TORCH_CHECK(sd.nh == 1,
@@ -167,9 +188,6 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
   const int64_t ub_segment =
       ub_bytes > 0 ? ub_bytes / kvcache_ops::kBlockTransferQueueDepth
                    : kUbSegmentBytes;
-  const int64_t scalar_row =
-      checked_mul(checked_mul(sd.nh, sd.hs, "nh * hs"), sd.element_size,
-                  "LMC scalar row bytes");
   int64_t prefix = 0;
   for (int32_t p = 0; p < sd.num_planes; ++p) {
     const int64_t payload = sd.plane_slot_bytes[p];
