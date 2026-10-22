@@ -41,7 +41,7 @@ class BasePatcher:
             ver = importlib.metadata.version(package_name)
             return ver.lstrip("v") if ver else None
         except importlib.metadata.PackageNotFoundError:
-            logger.debug(f"Package {package_name} metadata not found.")
+            logger.debug("Package %s metadata not found.", package_name)
             return None
 
     @staticmethod
@@ -82,10 +82,10 @@ class BasePatcher:
             try:
                 path = cls._find_module_path(task["module"])
                 task["func"](path)
-                logger.info(f"Successfully applied: {task['name']}")
+                logger.info("Successfully applied: %s", task["name"])
                 success_count += 1
             except Exception as e:
-                logger.error(f"Failed to apply {task['name']}: {e}")
+                logger.error("Failed to apply %s: %s", task["name"], e)
 
         return success_count == len(enabled_tasks)
 
@@ -101,7 +101,7 @@ class BasePatcher:
             if not path.exists():
                 raise FileNotFoundError(f"Resolved path does not exist: {path}")
 
-            logger.debug(f"Located {module_name} at {path}")
+            logger.debug("Located %s at %s", module_name, path)
             return path
         except Exception as e:
             raise RuntimeError(f"Locating module {module_name} failed: {e}") from e
@@ -112,7 +112,7 @@ class BasePatcher:
         backup = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
         try:
             shutil.copy2(path, backup)
-            logger.info(f"Backup created: {backup}")
+            logger.info("Backup created: %s", backup)
         except Exception as e:
             raise RuntimeError(f"Failed to create backup for {path}: {e}") from e
 
@@ -131,13 +131,15 @@ class BasePatcher:
                 start = idx
                 indent = len(line) - len(stripped)
                 logger.debug(
-                    f"Found function '{func_name}' at line {idx + 1} "
-                    f"with indent {indent}"
+                    "Found function '%s' at line %s with indent %s",
+                    func_name,
+                    idx + 1,
+                    indent,
                 )
                 break
 
         if start is None:
-            logger.warning(f"Function '{func_name}' not found in the provided lines.")
+            logger.warning("Function '%s' not found in the provided lines.", func_name)
             return None
 
         end = len(lines)
@@ -151,5 +153,5 @@ class BasePatcher:
                 end = idx
                 break
 
-        logger.debug(f"Function '{func_name}' block: lines {start + 1} to {end}")
+        logger.debug("Function '%s' block: lines %s to %s", func_name, start + 1, end)
         return start, end

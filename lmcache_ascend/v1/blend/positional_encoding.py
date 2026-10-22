@@ -140,7 +140,7 @@ def _validate_fused_relocation(
     k_new_fused = fused_rope(old_positions, new_positions, k_old.clone())
 
     max_k_error_fused = (k_new_ref - k_new_fused).abs().max()
-    logger.info(f"Max K error (fused): {max_k_error_fused.item()}")
+    logger.info("Max K error (fused): %s", max_k_error_fused.item())
 
     return bool(max_k_error_fused < 0.1)
 
@@ -206,8 +206,8 @@ def validate_reverse_correctness(rope, reverse_rope, fused_rope, head_size) -> b
     max_q_error = (dumb_q - q1).abs().max()
     max_k_error = (dumb_k - k1).abs().max()
 
-    logger.info(f"Max Q error: {max_q_error.item()}")
-    logger.info(f"Max K error: {max_k_error.item()}")
+    logger.info("Max Q error: %s", max_q_error.item())
+    logger.info("Max K error: %s", max_k_error.item())
 
     positions2 = torch.arange(100, 100 + num_tokens, device="npu")
     return (

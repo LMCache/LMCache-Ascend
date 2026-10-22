@@ -30,7 +30,7 @@ def get_or_create_blender(
     """
 
     if instance_id not in cls._blenders:
-        logger.info(f"Creating blender for {instance_id}")
+        logger.info("Creating blender for %s", instance_id)
         vllm_model = VLLMModelTracker.get_model(instance_id)
         blender = LMCBlender(
             cache_engine=cache_engine,
@@ -41,6 +41,7 @@ def get_or_create_blender(
         cls._blenders[instance_id] = blender
     else:
         logger.info(
-            f"Blender for {instance_id} already exists, returning the original one."
+            "Blender for %s already exists, returning the original one.",
+            instance_id,
         )
     return cls._blenders[instance_id]

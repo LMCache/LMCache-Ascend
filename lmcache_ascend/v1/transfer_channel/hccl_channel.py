@@ -557,7 +557,8 @@ class HcclChannel(BaseMultiBufferChannel):
                 torch.npu.set_device(self.handle_device)
 
                 logger.info(
-                    f"Background: Waiting for connection from {req.local_id}..."
+                    "Background: Waiting for connection from %s...",
+                    req.local_id,
                 )
                 try:
                     accept_started_event.set()
@@ -567,10 +568,11 @@ class HcclChannel(BaseMultiBufferChannel):
                     with self._state_lock:
                         self.conn_handles_dict[req.local_id] = conn_handle
                     logger.info(
-                        f"Background: Connection established with {req.local_id}"
+                        "Background: Connection established with %s",
+                        req.local_id,
                     )
                 except Exception as e:
-                    logger.error(f"Handshake failed: {e}")
+                    logger.error("Handshake failed: %s", e)
                 finally:
                     ready_event.set()
 

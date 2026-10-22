@@ -118,11 +118,15 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
             gpu_buffer_size = num_elements * self.element_size
 
             logger.info(
-                f"Lazily initializing GPU buffer:\n"
-                f"  - Format: {self.kv_format.name}\n"
-                f"  - Key cache shape per layer: {k_cache_shape_per_layer}\n"
-                f"  - Max tokens: {max_tokens}\n"
-                f"  - gpu_buffer_size: {gpu_buffer_size / (1024 * 1024)} MB"
+                "Lazily initializing GPU buffer:\n"
+                "  - Format: %s\n"
+                "  - Key cache shape per layer: %s\n"
+                "  - Max tokens: %s\n"
+                "  - gpu_buffer_size: %s MB",
+                self.kv_format.name,
+                k_cache_shape_per_layer,
+                max_tokens,
+                gpu_buffer_size / (1024 * 1024),
             )
 
             self.gpu_buffer_allocator = GPUMemoryAllocator(
@@ -256,7 +260,10 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
                 )
                 del self.buffer_mapping[layer_id - 2]
 
-                logger.debug(f"Finished loading layer {layer_id - 2} into paged memory")
+                logger.debug(
+                    "Finished loading layer %s into paged memory",
+                    layer_id - 2,
+                )
 
             if layer_id > 0 and layer_id <= self.num_layers:
                 # NOTE: wait until both compute and load streams are done
@@ -283,7 +290,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
                 self.buffer_mapping[layer_id - 1] = compute_gpu_buffer_obj
 
-                logger.debug(f"Finished loading layer {layer_id - 1} into buffer")
+                logger.debug("Finished loading layer %s into buffer", layer_id - 1)
 
             if layer_id < self.num_layers:
                 memory_objs_layer = yield
@@ -415,7 +422,7 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
 
             yield
             self.store_stream.synchronize()
-            logger.debug(f"Finished offloading layer {layer_id}")
+            logger.debug("Finished offloading layer %s", layer_id)
 
         # free the buffer memory
         tmp_gpu_buffer_obj.ref_count_down()
@@ -1193,7 +1200,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                     "Unable to determine the format of input kv_caches."
                 )
 
-            logger.info(f"Detected KV cache format: {self.kv_format.name}")
+            logger.info("Detected KV cache format: %s", self.kv_format.name)
 
             first_layer_cache = kv_caches[0]
 
@@ -1233,10 +1240,13 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
             max_tokens = k_cache_shape_per_layer[0] * k_cache_shape_per_layer[1]
 
             logger.info(
-                f"Lazily initializing GPU buffer:\n"
-                f"  - Format: {self.kv_format.name}\n"
-                f"  - Key cache shape per layer: {k_cache_shape_per_layer}\n"
-                f"  - Max tokens: {max_tokens}"
+                "Lazily initializing GPU buffer:\n"
+                "  - Format: %s\n"
+                "  - Key cache shape per layer: %s\n"
+                "  - Max tokens: %s",
+                self.kv_format.name,
+                k_cache_shape_per_layer,
+                max_tokens,
             )
 
             num_elements_key = k_cache_shape_per_layer.numel()
@@ -1321,7 +1331,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
             if sync:
                 current_stream.wait_stream(self.load_stream)
             if layer_id > 0:
-                logger.debug(f"Finished loading layer {layer_id - 1}")
+                logger.debug("Finished loading layer %s", layer_id - 1)
             # memobj -> gpu_buffer -> kvcaches
             with torch.cuda.stream(self.load_stream):
                 if self.use_gpu:
@@ -1360,7 +1370,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
-                logger.debug(f"Finished loading layer {layer_id}")
+                logger.debug("Finished loading layer %s", layer_id)
         yield
 
         # synchronize the last layer
@@ -1491,7 +1501,7 @@ class VLLMPagedMemLayerwiseNPUConnector(VLLMPagedMemLayerwiseGPUConnector):
                             True,
                             self.vllm_two_major,
                         )
-                logger.debug(f"Finished offloading layer {layer_id}")
+                logger.debug("Finished offloading layer %s", layer_id)
             yield
 
             if sync:
@@ -1548,12 +1558,17 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
             gpu_buffer_size = num_elements * self.element_size
 
             logger.info(
-                f"Lazily initializing GPU buffer:\n"
-                f"  - Format: {self.kv_format.name}\n"
-                f"  - Key cache shape per layer: {k_cache_shape_per_layer}\n"
-                f"  - Max tokens: {max_tokens}\n"
-                f"  - num_elements: {num_elements}\n"
-                f"  - gpu_buffer_size: {gpu_buffer_size / (1024 * 1024)} MB"
+                "Lazily initializing GPU buffer:\n"
+                "  - Format: %s\n"
+                "  - Key cache shape per layer: %s\n"
+                "  - Max tokens: %s\n"
+                "  - num_elements: %s\n"
+                "  - gpu_buffer_size: %s MB",
+                self.kv_format.name,
+                k_cache_shape_per_layer,
+                max_tokens,
+                num_elements,
+                gpu_buffer_size / (1024 * 1024),
             )
 
             self.gpu_buffer_allocator = GPUMemoryAllocator(
@@ -1622,7 +1637,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
         for layer_id in range(self.num_layers):
             memory_objs_layer = yield
             if layer_id > 0:
-                logger.debug(f"Finished loading layer {layer_id - 1}")
+                logger.debug("Finished loading layer %s", layer_id - 1)
 
             current_layer_kv = (self.kvcaches[0][layer_id], self.kvcaches[1][layer_id])
 
@@ -1661,7 +1676,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
         if self.use_gpu:
             tmp_gpu_buffer_obj.ref_count_down()
 
-        logger.debug(f"Finished loading layer {layer_id}")
+        logger.debug("Finished loading layer %s", layer_id)
         yield
 
     @_lmcache_nvtx_annotate
@@ -1774,7 +1789,7 @@ class SGLangLayerwiseNPUConnector(SGLangLayerwiseGPUConnector):
                     )
 
             yield
-            logger.debug(f"Finished offloading layer {layer_id}")
+            logger.debug("Finished offloading layer %s", layer_id)
 
         # free the buffer memory
         if self.use_gpu:

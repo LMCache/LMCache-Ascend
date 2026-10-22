@@ -318,8 +318,8 @@ class AscendP2PBackend(P2PBackend):
                 logger.warning("NPU buffer already initialize.")
             else:
                 logger.info(
-                    "Initializing NPU memory allocator with "
-                    f"size {config.p2p_npu_buffer_size} bytes"
+                    "Initializing NPU memory allocator with size %s bytes",
+                    config.p2p_npu_buffer_size,
                 )
                 # get align bytes
                 _align_bytes = self.memory_allocator.cpu_allocator.align_bytes
@@ -350,9 +350,9 @@ class AscendP2PBackend(P2PBackend):
             )
             if total_npu_mb <= 1024 and not self.delay_pull:
                 logger.warning(
-                    f"NPU buffer size ({total_npu_mb} MB) "
-                    f"is quite small with "
-                    f"(page size: {page_size_mb} MB). "
+                    "NPU buffer size (%s MB) is quite small with (page size: %s MB). ",
+                    total_npu_mb,
+                    page_size_mb,
                 )
 
             buffer_ptrs.append(gpu_alloc.buffer_ptr)

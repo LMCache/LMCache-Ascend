@@ -41,5 +41,5 @@ def _read_from_sys() -> Optional[NUMAMapping]:
             logger.warning("No valid NUMA mapping for current device, returning None")
             return None
     except Exception as e:
-        logger.warning(f"Failed to auto read NUMA mapping from system: {e}")
+        logger.warning("Failed to auto read NUMA mapping from system: %s", e)
         return None

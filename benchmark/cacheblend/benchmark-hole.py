@@ -1216,7 +1216,7 @@ def run_batched_queries(
             )
 
         except Exception as e:
-            logger.error(f"Error preparing query {idx}: {e}")
+            logger.error("Error preparing query %s: %s", idx, e)
 
     if not all_query_prompts:
         logger.warning("No final query prompts generated. Skipping generation.")
@@ -1268,8 +1268,9 @@ def run_batched_queries(
 
     if len(outputs) != len(metadata_list):
         logger.error(
-            f"Mismatch between outputs ({len(outputs)}) and metadata "
-            f"({len(metadata_list)})."
+            "Mismatch between outputs (%s) and metadata (%s).",
+            len(outputs),
+            len(metadata_list),
         )
         return []
 

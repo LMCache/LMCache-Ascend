@@ -35,19 +35,19 @@ def run_integration_patches():
 
     for package_name, module_path, class_name in patch_tasks:
         if is_installed(package_name):
-            logger.info(f"Detected {package_name}. Applying patches...")
+            logger.info("Detected %s. Applying patches...", package_name)
             try:
                 module = importlib.import_module(module_path)
                 patcher_cls = getattr(module, class_name)
 
                 if patcher_cls.apply_all():
-                    logger.info(f"Successfully patched {package_name}.")
+                    logger.info("Successfully patched %s.", package_name)
                 else:
-                    logger.error(f"Failed to apply patches for {package_name}.")
+                    logger.error("Failed to apply patches for %s.", package_name)
             except Exception as e:
-                logger.error(f"Error while patching {package_name}: {e}")
+                logger.error("Error while patching %s: %s", package_name, e)
         else:
-            logger.debug(f"{package_name} is not installed, skipping.")
+            logger.debug("%s is not installed, skipping.", package_name)
 
 
 if __name__ == "__main__":

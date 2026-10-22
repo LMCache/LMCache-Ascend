@@ -91,7 +91,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
             os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.send_device_id)
-        logger.info(f"Sender: Using device {config.send_device_id}")
+        logger.info("Sender: Using device %s", config.send_device_id)
         allocator = get_allocator(
             config.send_device_id, config.kv_shape, config.dtype, config.sender_use_host
         )
@@ -158,7 +158,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
             "remote_indexes": list(range(len(objs))),
         }
 
-        logger.info(f"Sender ({alloc_type}): Starting HIXL transfer...")
+        logger.info("Sender (%s): Starting HIXL transfer...", alloc_type)
         start_time = time.time()
 
         channel.batched_write(
@@ -167,7 +167,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
         )
 
         duration = time.time() - start_time
-        logger.info(f"Sender: HIXL Transfer finished in {duration:.4f}s")
+        logger.info("Sender: HIXL Transfer finished in %.4fs", duration)
 
         shared_dict["expected_values"] = expected_sums
         shared_dict["write_complete"] = True
@@ -175,7 +175,7 @@ def sender_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> None:
         channel.close()
 
     except Exception as e:
-        logger.error(f"Sender Process Failed: {e}")
+        logger.error("Sender Process Failed: %s", e)
         sys.exit(1)
 
 
@@ -188,7 +188,7 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
             os.environ["HCCL_INTRA_ROCE_ENABLE"] = "1"
         logger = init_logger(__name__)
         torch.npu.set_device(config.recv_device_id)
-        logger.info(f"Receiver: Using device {config.recv_device_id}")
+        logger.info("Receiver: Using device %s", config.recv_device_id)
         allocator = get_allocator(
             config.recv_device_id,
             config.kv_shape,
@@ -248,7 +248,7 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
                 raise TimeoutError("Timed out waiting for write completion.")
 
         expected_values = shared_dict["expected_values"]
-        logger.info(f"Receiver ({alloc_type}): Verifying data integrity...")
+        logger.info("Receiver (%s): Verifying data integrity...", alloc_type)
 
         for i, obj in enumerate(objs):
             expected_val = expected_values[i]
@@ -259,15 +259,18 @@ def receiver_process(config: HixlTestConfig, shared_dict: Dict[str, Any]) -> Non
             if not is_equal:
                 sample = tensor_data.flatten()[:5].float().numpy()
                 logger.error(
-                    f"Mismatch in object {i}. Expected {expected_val}, got: {sample}"
+                    "Mismatch in object %s. Expected %s, got: %s",
+                    i,
+                    expected_val,
+                    sample,
                 )
                 raise AssertionError(f"Data verification failed for object {i}")
 
-        logger.info(f"Receiver: Successfully verified {config.num_objs} objects.")
+        logger.info("Receiver: Successfully verified %s objects.", config.num_objs)
         channel.close()
 
     except Exception as e:
-        logger.error(f"Receiver Process Failed: {e}")
+        logger.error("Receiver Process Failed: %s", e)
         sys.exit(1)
 
 

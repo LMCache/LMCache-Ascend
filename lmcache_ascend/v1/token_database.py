@@ -63,14 +63,16 @@ def TokenDatabase_process_tokens(
         # NOTE(niming): Boundary case - return gracefully without raising exceptions
         if len(tokens) == 0:
             logger.warning(
-                f"Process aborted: 'tokens' is empty. (num_falses={num_falses})"
+                "Process aborted: 'tokens' is empty. (num_falses=%s)",
+                num_falses,
             )
             return
 
         if num_falses == len(tokens):
             logger.warning(
-                f"Full mask detected: All {len(tokens)} tokens are masked as False. "
-                f"Nothing to process for this request."
+                "Full mask detected: All %s tokens are masked as False. "
+                "Nothing to process for this request.",
+                len(tokens),
             )
             return
 

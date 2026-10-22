@@ -250,8 +250,11 @@ class KVSizeCalculator:
         # ratio = heads * dim * layers * precision * (k + v)
         self.ratio = num_key_value_heads * head_dim * num_layers * precision * 2
         logger.info(
-            f"num_key_value_heads:{num_key_value_heads} head_dim:{head_dim} "
-            f"num_layers:{num_layers} precision:{precision}"
+            "num_key_value_heads:%s head_dim:%s num_layers:%s precision:%s",
+            num_key_value_heads,
+            head_dim,
+            num_layers,
+            precision,
         )
 
     def get_kv_size(self, token_cnt: int) -> int:
@@ -375,11 +378,17 @@ class BaseRAGManager(ABC):
             df = df[final_cols_order]
 
             logger.info(
-                f"Summary: {cnt} requests, average_ttft={avg_ttft:.4f} (second)\n"
-                f"average_tpot={avg_tpot:.4f} (second)\n"
-                f"average_e2e_latency={avg_e2e_latency:.4f} (second)\n"
-                f"throughput={thput:.4f} (req/s)\n"
-                f"average_quality={avg_quality:.4f}\n"
+                "Summary: %s requests, average_ttft=%.4f (second)\n"
+                "average_tpot=%.4f (second)\n"
+                "average_e2e_latency=%.4f (second)\n"
+                "throughput=%.4f (req/s)\n"
+                "average_quality=%.4f\n",
+                cnt,
+                avg_ttft,
+                avg_tpot,
+                avg_e2e_latency,
+                thput,
+                avg_quality,
             )
         else:
             summary_data["throughput"] = [thput] * cnt
@@ -389,9 +398,13 @@ class BaseRAGManager(ABC):
             df = df[offline_cols_order]
 
             logger.info(
-                f"Summary: {cnt} requests, total_time={total_time:.4f} (second)\n"
-                f"throughput={thput:.4f} (req/s)\n"
-                f"average_quality={avg_quality:.4f}\n"
+                "Summary: %s requests, total_time=%.4f (second)\n"
+                "throughput=%.4f (req/s)\n"
+                "average_quality=%.4f\n",
+                cnt,
+                total_time,
+                thput,
+                avg_quality,
             )
 
         return df
@@ -496,15 +509,15 @@ class OfflineRAGManager(BaseRAGManager):
         kv_storage_size_bytes = int(kv_storage_size_gb * GB_TO_BYTES)
 
         logger.info(
-            f"KV cache storage size limit: {kv_storage_size_gb} GB"
-            " ({kv_storage_size_bytes} bytes)"
+            "KV cache storage size limit: %s GB ({kv_storage_size_bytes} bytes)",
+            kv_storage_size_gb,
         )
 
         for i, doc_tokens_list in enumerate(self._document_tokens):
             if current_size_taken >= kv_storage_size_bytes:
                 logger.info(
-                    f"KV cache size limit reached ({kv_storage_size_gb} GB)."
-                    " Stopping precomputation."
+                    "KV cache size limit reached (%s GB). Stopping precomputation.",
+                    kv_storage_size_gb,
                 )
                 break
 
@@ -519,8 +532,10 @@ class OfflineRAGManager(BaseRAGManager):
 
             if current_size_taken + this_case_size > kv_storage_size_bytes:
                 logger.info(
-                    f"Document set {i} requires {this_case_size} bytes, "
-                    f"which exceeds the remaining limit. Stopping precomputation."
+                    "Document set %s requires %s bytes, "
+                    "which exceeds the remaining limit. Stopping precomputation.",
+                    i,
+                    this_case_size,
                 )
                 break
 
@@ -534,15 +549,15 @@ class OfflineRAGManager(BaseRAGManager):
                         sampling_params=sampling_params,
                     )
                 except Exception as e:
-                    logger.warning(f"Precompute failed for document chunk: {e}")
+                    logger.warning("Precompute failed for document chunk: %s", e)
                     continue
 
             current_size_taken += this_case_size
             precomputed_count += 1
 
         logger.info(
-            f"Precomputed {precomputed_count} document sets, "
-            "used {current_size_taken} bytes of KV cache"
+            "Precomputed %s document sets, used {current_size_taken} bytes of KV cache",
+            precomputed_count,
         )
         return precomputed_count
 
@@ -554,7 +569,7 @@ class OfflineRAGManager(BaseRAGManager):
         self._results = []
 
         precomputed_count = self._precompute_documents(llm)
-        logger.info(f"Precomputed {precomputed_count} document chunks for KV cache")
+        logger.info("Precomputed %s document chunks for KV cache", precomputed_count)
 
         logger.info("Starting benchmark (throughput-focused with batch processing)...")
 
@@ -590,7 +605,7 @@ class OfflineRAGManager(BaseRAGManager):
                 self._results.append(response)
 
         except Exception as e:
-            logger.error(f"Batch processing failed: {e}")
+            logger.error("Batch processing failed: %s", e)
             logger.info("Falling back to sequential processing...")
             elapsed_time = self._run_sequential_fallback(
                 llm, sampling_params, self._request_tokens
@@ -611,7 +626,7 @@ class OfflineRAGManager(BaseRAGManager):
             print(f"Tokens per second: {total_tokens / elapsed_time:.2f}")
             print(f"Output tokens per second: {total_output_tokens / elapsed_time:.2f}")
 
-        logger.info(f"Completed {len(self._results)} requests")
+        logger.info("Completed %s requests", len(self._results))
         return elapsed_time
 
     def _run_sequential_fallback(
@@ -657,7 +672,7 @@ class OfflineRAGManager(BaseRAGManager):
 
             except Exception as e:
                 request_end_time = time.perf_counter()
-                logger.error(f"Error processing request {i} sequentially: {e}")
+                logger.error("Error processing request %s sequentially: %s", i, e)
 
                 # Add dummy response for failed requests
                 request_duration = request_end_time - request_start_time
@@ -753,7 +768,7 @@ class OnlineRAGManager(BaseRAGManager):
             return True
 
         except Exception as e:
-            logger.warning(f"Warmup request failed: {e}")
+            logger.warning("Warmup request failed: %s", e)
             return False
 
     def _precompute_documents(self) -> int:
@@ -789,11 +804,12 @@ class OnlineRAGManager(BaseRAGManager):
                 precomputed_count += 1
 
             except Exception as e:
-                logger.warning(f"Precompute failed for document chunk {i}: {e}")
+                logger.warning("Precompute failed for document chunk %s: %s", i, e)
                 continue
 
         logger.info(
-            f"Precomputed {precomputed_count} document chunks for online serving"
+            "Precomputed %s document chunks for online serving",
+            precomputed_count,
         )
         return precomputed_count
 
@@ -805,7 +821,7 @@ class OnlineRAGManager(BaseRAGManager):
         if self.workload_config.lmconfig.enable_blending:
             # Use original precomputation logic for cacheblend
             precomputed_count = self._precompute_documents()
-            logger.info(f"Precomputed {precomputed_count} document sets")
+            logger.info("Precomputed %s document sets", precomputed_count)
         else:
             # Send warmup request when cacheblend is disabled
             self._send_warmup_request()
@@ -870,7 +886,7 @@ class OnlineRAGManager(BaseRAGManager):
                 else:
                     tpot = 0.0
 
-                logger.info(f"completion_tokens:{completion_tokens}")
+                logger.info("completion_tokens:%s", completion_tokens)
 
                 response = Response(
                     request_id=i,
@@ -888,7 +904,7 @@ class OnlineRAGManager(BaseRAGManager):
                 self._results.append(response)
 
             except Exception as e:
-                logger.error(f"Error processing request {i}: {e}")
+                logger.error("Error processing request %s: %s", i, e)
                 # Add dummy response for failed requests
                 request_end_time = time.perf_counter()
 
@@ -945,7 +961,7 @@ class OnlineRAGManager(BaseRAGManager):
         print(f"Average TPOT (Successful): {avg_tpot:.4f} seconds")
         print(f"Average End-to-End Latency (Successful): {avg_e2e_latency:.4f} seconds")
 
-        logger.info(f"Completed {len(self._results)} requests")
+        logger.info("Completed %s requests", len(self._results))
         return total_elapsed
 
 
@@ -984,7 +1000,7 @@ def run_rag_benchmark(args):
         manager = OnlineRAGManager(workload_config)
         total_time = manager.run_benchmark()
 
-        logger.info(f"Finished online benchmarking, dumping summary to {args.output}")
+        logger.info("Finished online benchmarking, dumping summary to %s", args.output)
         summary = manager.summary(total_time, is_online=True)
         summary.to_csv(args.output, index=False)
     else:
@@ -1015,7 +1031,8 @@ def run_rag_benchmark(args):
             total_time = manager.run_benchmark(llm, sampling_params)
 
             logger.info(
-                f"Finished offline benchmarking, dumping summary to {args.output}"
+                "Finished offline benchmarking, dumping summary to %s",
+                args.output,
             )
             summary = manager.summary(total_time, is_online=False)
             summary.to_csv(args.output, index=False)

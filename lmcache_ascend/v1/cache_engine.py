@@ -842,8 +842,8 @@ class AscendLMCacheEngine(LMCacheEngine):
                     logger.warning(
                         "Local cpu memory under pressure so"
                         " choosing to store only "
-                        f" {len(memory_objs)}"
-                        " total chunks of KV cache."
+                        " %d total chunks of KV cache.",
+                        len(memory_objs),
                     )
                     break
 
@@ -1090,7 +1090,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         )
 
         if self._is_passive():
-            logger.debug(f"rank={self.metadata.worker_id} ignore store")
+            logger.debug("rank=%d ignore store", self.metadata.worker_id)
             return
 
         assert self.storage_manager is not None

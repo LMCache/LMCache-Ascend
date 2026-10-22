@@ -238,7 +238,8 @@ def patched_prefetch_all_done_callback(
 
     retrieved_length = cum_chunk_lengths_total[total_retrieved_chunks]
     logger.info(
-        f"Responding to scheduler for lookup id {lookup_id}"
-        f" with retrieved length {retrieved_length}"
+        "Responding to scheduler for lookup id %s with retrieved length %s",
+        lookup_id,
+        retrieved_length,
     )
     self.async_lookup_server.send_response_to_scheduler(lookup_id, retrieved_length)

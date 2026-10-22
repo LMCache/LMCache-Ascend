@@ -211,10 +211,10 @@ def CreateStorageBackends(
             if not isinstance(backend, LocalCPUBackend):
                 audited_backend = AuditBackend(backend)
                 audited_backends[name] = audited_backend
-                logger.info(f"Wrapped {name} with AuditBackend")
+                logger.info("Wrapped %s with AuditBackend", name)
             else:
                 audited_backends[name] = backend
-                logger.info(f"Do not wrap {name} as it is a LocalCPUBackend")
+                logger.info("Do not wrap %s as it is a LocalCPUBackend", name)
         return audited_backends
     else:
         # If audit is not enabled, use the original backends

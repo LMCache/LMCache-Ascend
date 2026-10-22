@@ -226,7 +226,7 @@ def write_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) ->
             "remote_mem_indexes": recv_mem_indexes,
         }
 
-        logger.info(f"Sender ({alloc_type}): Starting batched_write...")
+        logger.info("Sender (%s): Starting batched_write...", alloc_type)
         start_time = time.time()
 
         channel.batched_write(
@@ -235,7 +235,7 @@ def write_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) ->
         )
 
         duration = time.time() - start_time
-        logger.info(f"Sender: Transfer finished in {duration:.4f}s")
+        logger.info("Sender: Transfer finished in %.4fs", duration)
 
         shared_dict["expected_values"] = expected_sums
         shared_dict["write_complete"] = True
@@ -243,7 +243,7 @@ def write_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) ->
         channel.close()
 
     except Exception as e:
-        logger.error(f"Sender Process Failed: {e}")
+        logger.error("Sender Process Failed: %s", e)
         sys.exit(1)
 
 
@@ -319,7 +319,7 @@ def write_receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) 
                 raise TimeoutError("Timed out waiting for write completion.")
 
         expected_values = shared_dict["expected_values"]
-        logger.info(f"Receiver ({alloc_type}): Verifying data integrity...")
+        logger.info("Receiver (%s): Verifying data integrity...", alloc_type)
 
         for i, obj in enumerate(objs):
             expected_val = expected_values[i]
@@ -330,15 +330,18 @@ def write_receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) 
             if not is_equal:
                 sample = tensor_data.flatten()[:5].float().numpy()
                 logger.error(
-                    f"Mismatch in object {i}. Expected {expected_val}, got: {sample}"
+                    "Mismatch in object %s. Expected %s, got: %s",
+                    i,
+                    expected_val,
+                    sample,
                 )
                 raise AssertionError(f"Data verification failed for object {i}")
 
-        logger.info(f"Receiver: Successfully verified {config.num_objs} objects.")
+        logger.info("Receiver: Successfully verified %s objects.", config.num_objs)
         channel.close()
 
     except Exception as e:
-        logger.error(f"Receiver Process Failed: {e}")
+        logger.error("Receiver Process Failed: %s", e)
         sys.exit(1)
 
 
@@ -424,7 +427,7 @@ def read_data_provider_process(
         shared_dict["expected_values"] = expected_sums
         shared_dict["provider_init_done"] = True
 
-        logger.info(f"Data provider ({alloc_type}): Shared buffer refs, waiting...")
+        logger.info("Data provider (%s): Shared buffer refs, waiting...", alloc_type)
 
         # Keep alive until reader is done
         wait_start = time.time()
@@ -437,7 +440,7 @@ def read_data_provider_process(
         channel.close()
 
     except Exception as e:
-        logger.error(f"Data provider process failed: {e}")
+        logger.error("Data provider process failed: %s", e)
         sys.exit(1)
 
 
@@ -519,7 +522,7 @@ def read_reader_process(
             "remote_mem_indexes": provider_mem_indexes,
         }
 
-        logger.info(f"Reader ({alloc_type}): Starting read (submit={use_submit})...")
+        logger.info("Reader (%s): Starting read (submit=%s)...", alloc_type, use_submit)
         start_time = time.time()
 
         if use_submit:
@@ -535,9 +538,9 @@ def read_reader_process(
             )
 
         duration = time.time() - start_time
-        logger.info(f"Reader: Read finished in {duration:.4f}s")
+        logger.info("Reader: Read finished in %.4fs", duration)
 
-        logger.info(f"Reader ({alloc_type}): Verifying data integrity...")
+        logger.info("Reader (%s): Verifying data integrity...", alloc_type)
         for i, obj in enumerate(objs):
             expected_val = expected_values[i]
             tensor_data = obj.tensor if config.use_host_memory else obj.tensor.cpu()
@@ -546,16 +549,19 @@ def read_reader_process(
             if not is_equal:
                 sample = tensor_data.flatten()[:5].float().numpy()
                 logger.error(
-                    f"Mismatch in object {i}. Expected {expected_val}, got: {sample}"
+                    "Mismatch in object %s. Expected %s, got: %s",
+                    i,
+                    expected_val,
+                    sample,
                 )
                 raise AssertionError(f"Data verification failed for object {i}")
 
-        logger.info(f"Reader: Successfully verified {config.num_objs} objects.")
+        logger.info("Reader: Successfully verified %s objects.", config.num_objs)
         shared_dict["read_complete"] = True
         channel.close()
 
     except Exception as e:
-        logger.error(f"Reader process failed: {e}")
+        logger.error("Reader process failed: %s", e)
         sys.exit(1)
 
 
@@ -657,7 +663,7 @@ def multi_buffer_sender_process(
         )
 
         duration = time.time() - start_time
-        logger.info(f"Multi-buffer sender: Transfer finished in {duration:.4f}s")
+        logger.info("Multi-buffer sender: Transfer finished in %.4fs", duration)
 
         shared_dict["expected_values"] = expected_sums
         shared_dict["write_complete"] = True
@@ -665,7 +671,7 @@ def multi_buffer_sender_process(
         channel.close()
 
     except Exception as e:
-        logger.error(f"Multi-buffer sender failed: {e}")
+        logger.error("Multi-buffer sender failed: %s", e)
         sys.exit(1)
 
 
@@ -753,15 +759,18 @@ def multi_buffer_receiver_process(
             if not is_equal:
                 sample = tensor_data.flatten()[:5].float().numpy()
                 logger.error(
-                    f"Mismatch in object {i}. Expected {expected_val}, got: {sample}"
+                    "Mismatch in object %s. Expected %s, got: %s",
+                    i,
+                    expected_val,
+                    sample,
                 )
                 raise AssertionError(f"Data verification failed for object {i}")
 
-        logger.info(f"Multi-buffer receiver: Verified {config.num_objs} objects.")
+        logger.info("Multi-buffer receiver: Verified %s objects.", config.num_objs)
         channel.close()
 
     except Exception as e:
-        logger.error(f"Multi-buffer receiver failed: {e}")
+        logger.error("Multi-buffer receiver failed: %s", e)
         sys.exit(1)
 
 
@@ -844,7 +853,7 @@ def race_sender_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -> 
         channel.close()
 
     except Exception as e:
-        logger.error(f"Race sender failed: {e}")
+        logger.error("Race sender failed: %s", e)
         sys.exit(1)
 
 
@@ -902,7 +911,7 @@ def race_receiver_process(config: HcclTestConfig, shared_dict: Dict[str, Any]) -
         channel.close()
 
     except Exception as e:
-        logger.error(f"Race receiver failed: {e}")
+        logger.error("Race receiver failed: %s", e)
         sys.exit(1)
 
 

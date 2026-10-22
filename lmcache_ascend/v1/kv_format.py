@@ -121,8 +121,11 @@ class KVCacheFormat(Enum):
                 if all(isinstance(t, torch.Tensor) for t in first_cache):
                     if k_cache.shape != v_cache.shape:
                         logger.debug(
-                            f"Detected DSA_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}, dsa_k_shape={dsa_k_cache.shape}"
+                            "Detected DSA_KV format: k_shape=%s, "
+                            "v_shape=%s, dsa_k_shape=%s",
+                            k_cache.shape,
+                            v_cache.shape,
+                            dsa_k_cache.shape,
                         )
                         return KVCacheFormat.DSA_KV
 
@@ -135,8 +138,9 @@ class KVCacheFormat(Enum):
                     # MLA_KV: K/V shapes differ
                     if k_cache.shape != v_cache.shape:
                         logger.debug(
-                            f"Detected MLA_KV format: k_shape={k_cache.shape}, "
-                            f"v_shape={v_cache.shape}"
+                            "Detected MLA_KV format: k_shape=%s, v_shape=%s",
+                            k_cache.shape,
+                            v_cache.shape,
                         )
                         return KVCacheFormat.MLA_KV
                     # SEPARATE_KV: K/V shapes are same

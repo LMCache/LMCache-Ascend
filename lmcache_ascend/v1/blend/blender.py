@@ -105,7 +105,7 @@ class LMCBlender:
         mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
-        logger.debug(f"Blender is processing KV for layer {layer_id}")
+        logger.debug("Blender is processing KV for layer %s", layer_id)
         old_k, old_v = self.gpu_connector.get_kv(layer_id)
 
         if mask is not None:
@@ -160,8 +160,8 @@ class LMCBlender:
             q = q[top_indices]
             residual = residual[top_indices]
 
-            logger.debug(f"Number of indices picked: {len(top_indices)}")
-            logger.debug(f"Picking indices: {top_indices}")
+            logger.debug("Number of indices picked: %s", len(top_indices))
+            logger.debug("Picking indices: %s", top_indices)
             self.metadata.imp_indices = top_indices
             self.metadata.positions = self.metadata.positions[top_indices]
             attn_output = attn_output[:topk_num]

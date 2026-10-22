@@ -36,7 +36,7 @@ def run_patches():
 
         run_integration_patches()
     except Exception as e:
-        logger.error(f"Post-install patch system encountered an error: {e}")
+        logger.error("Post-install patch system encountered an error: %s", e)
         return
 
 
@@ -53,14 +53,14 @@ def _get_cann_version():
         ascend_home, f"{arch}-linux", "ascend_toolkit_install.info"
     )
     if not os.path.exists(info_path):
-        logger.warning(f"ascend_toolkit_install.info not found at {info_path}")
+        logger.warning("ascend_toolkit_install.info not found at %s", info_path)
         return None
     with open(info_path) as f:
         for line in f:
             line = line.strip()
             if line.startswith("version="):
                 version = line.split("=", 1)[1].strip()
-                logger.info(f"Detected CANN toolkit version: {version}")
+                logger.info("Detected CANN toolkit version: %s", version)
                 return version
     logger.warning("Could not parse version from ascend_toolkit_install.info")
     return None
@@ -169,7 +169,8 @@ def _get_npu_soc():
             continue
         except FileNotFoundError as e:
             logger.info(
-                f"Failed to execute npu-smi command and retrieve SoC version: {e}"
+                "Failed to execute npu-smi command and retrieve SoC version: %s",
+                e,
             )
             continue
 
@@ -197,12 +198,12 @@ def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
         )
 
     # read the file and extract
-    logger.info(f"Extracting AIC Version from: {ini_file}")
+    logger.info("Extracting AIC Version from: %s", ini_file)
     cp = configparser.ConfigParser()
     cp.read(ini_file)
 
     aic_version = cp.get("version", "AIC_version")
-    logger.info(f"AIC Version: {aic_version}")
+    logger.info("AIC Version: %s", aic_version)
 
     version_number = aic_version.split("-")[-1]
     return version_number
@@ -230,8 +231,9 @@ class custom_build_info(build_py):
             f.write("    parts = re.findall(r'\\d+', __cann_version__)\n")
             f.write("    return tuple(int(p) for p in parts)\n")
         logging.info(
-            f"Generated _build_info.py with SOC version: {soc_version}, "
-            f"CANN version: {cann_version}"
+            "Generated _build_info.py with SOC version: %s, CANN version: %s",
+            soc_version,
+            cann_version,
         )
         super().run()
 
@@ -253,7 +255,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         # build the so as c_ops
         ext_name = ext.name.split(".")[-1]
         so_name = ext_name + ".so"
-        logger.info(f"Building {so_name} ...")
+        logger.info("Building %s ...", so_name)
         BUILD_OPS_DIR = os.path.join(ROOT_DIR, "build")
         os.makedirs(BUILD_OPS_DIR, exist_ok=True)
 
@@ -280,9 +282,9 @@ class CustomAscendCmakeBuildExt(build_ext):
             )
 
         if self._cann_version_8_5:
-            logger.info(f"CANN {cann_version}: building HCCL agent (hcomm headers)")
-            logger.info(f"CANN {cann_version}: building HIXL transfer channel")
-            logger.info(f"CANN {cann_version}: building hcomm one-sided channel")
+            logger.info("CANN %s: building HCCL agent (hcomm headers)", cann_version)
+            logger.info("CANN %s: building HIXL transfer channel", cann_version)
+            logger.info("CANN %s: building hcomm one-sided channel", cann_version)
 
         try:
             # if pybind11 is installed via pip
@@ -347,7 +349,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         cmake_cmd += [f" && cmake --install {BUILD_OPS_DIR}"]
         cmake_cmd = "".join(cmake_cmd)
 
-        logger.info(f"Start running CMake commands:\n{cmake_cmd}")
+        logger.info("Start running CMake commands:\n%s", cmake_cmd)
         try:
             _ = subprocess.run(
                 cmake_cmd, cwd=ROOT_DIR, text=True, shell=True, check=True
@@ -392,9 +394,9 @@ class CustomAscendCmakeBuildExt(build_ext):
                 f"No .so files found matching patterns {expected_patterns}"
             )
 
-        logger.info(f"Found {len(so_files)} .so files:")
+        logger.info("Found %s .so files:", len(so_files))
         for so_file in so_files:
-            logger.info(f"  - {so_file}")
+            logger.info("  - %s", so_file)
 
         # Copy each file with improved path validation and duplicate handling
         #  compared to previous implementation
@@ -406,7 +408,7 @@ class CustomAscendCmakeBuildExt(build_ext):
                 if os.path.exists(dst_path):
                     os.remove(dst_path)
                 shutil.copy2(src_path, dst_path)
-                logger.info(f"Copied {filename} to {dst_path}")
+                logger.info("Copied %s to %s", filename, dst_path)
 
             if is_develop_mode:
                 src_dir_file = os.path.join(src_dir, filename)
@@ -415,7 +417,9 @@ class CustomAscendCmakeBuildExt(build_ext):
                         os.remove(src_dir_file)
                     shutil.copy2(src_path, src_dir_file)
                     logger.info(
-                        f"Copied {filename} to source directory: {src_dir_file}"
+                        "Copied %s to source directory: %s",
+                        filename,
+                        src_dir_file,
                     )
 
         logger.info("All files copied successfully")

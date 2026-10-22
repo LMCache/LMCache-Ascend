@@ -106,8 +106,9 @@ def LMCacheLayerwiseConnector_start_load_kv(self, load_metadata: LoadMetadata) -
     if retrieve_token_num <= offset:
         self.lmcache_engine.lookup_unpin(lookup_id)
         logger.info(
-            f"LMCache retrieve skipped: lookup={retrieve_token_num}, "
-            f"offset={offset}, no new tokens to retrieve"
+            "LMCache retrieve skipped: lookup=%s, offset=%s, no new tokens to retrieve",
+            retrieve_token_num,
+            offset,
         )
         return 0
 
@@ -130,8 +131,10 @@ def LMCacheLayerwiseConnector_start_load_kv(self, load_metadata: LoadMetadata) -
 
     num_new_tokens = retrieve_token_num - offset
     logger.info(
-        f"LMCache retrieve started: lookup={retrieve_token_num}, "
-        f"offset={offset}, retrieve {num_new_tokens} new tokens"
+        "LMCache retrieve started: lookup=%s, offset=%s, retrieve %s new tokens",
+        retrieve_token_num,
+        offset,
+        num_new_tokens,
     )
 
     return num_new_tokens
