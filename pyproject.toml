@@ -64,8 +64,16 @@ select = [
     #"SIM",
     # Ruff does not support isort's import_headings feature, yet.
     # "I",
-    # flake8-logging-format
-    #"G",
+    # flake8-logging-format: f-string in a logging call. %-format defers the
+    # formatting until the record is actually emitted. Only G004 is enabled;
+    # G201/G002 change the logged content rather than the evaluation cost.
+    "G004",
+    # flake8-self (private member access)
+    "SLF",
+    # pylint: logging call has more arguments than format placeholders
+    "PLE1205",
+    # flake8-tidy-imports: banned API imports
+    "TID251",
 ]
 ignore = [
     # star imports
@@ -78,6 +86,34 @@ ignore = [
     "UP032",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Ignore SLF everywhere except lmcache_ascend/v1/multiprocess/
+"!lmcache_ascend/v1/multiprocess/**" = ["SLF"]
+# G004: files that have not been migrated to lazy %-format logging yet. Drop an
+# entry once its file is converted so the rule protects it from regressing.
+"lmcache_ascend/integration/patch/apply_patch.py" = ["G004"]
+"lmcache_ascend/integration/patch/base_patcher.py" = ["G004"]
+"lmcache_ascend/integration/sglang/sglang_adapter.py" = ["G004"]
+"lmcache_ascend/v1/blend/blender.py" = ["G004"]
+"lmcache_ascend/v1/blend/models/utils.py" = ["G004"]
+"lmcache_ascend/v1/blend/positional_encoding.py" = ["G004"]
+"lmcache_ascend/v1/blend/utils.py" = ["G004"]
+"lmcache_ascend/v1/cache_engine.py" = ["G004"]
+"lmcache_ascend/v1/kv_format.py" = ["G004"]
+"lmcache_ascend/v1/npu_connector/npu_connectors.py" = ["G004"]
+"lmcache_ascend/v1/storage_backend/__init__.py" = ["G004"]
+"lmcache_ascend/v1/storage_backend/p2p_backend.py" = ["G004"]
+"lmcache_ascend/v1/storage_backend/storage_manager.py" = ["G004"]
+"lmcache_ascend/v1/system_detection.py" = ["G004"]
+"lmcache_ascend/v1/token_database.py" = ["G004"]
+"lmcache_ascend/v1/transfer_channel/hccl_channel.py" = ["G004", "TID251"]
+"tests/v1/transfer_channel/test_hccl_channel_write.py" = ["G004"]
+"tests/v1/transfer_channel/test_hixl_channel_write.py" = ["G004"]
+"benchmark/cacheblend/benchmark-hole.py" = ["G004"]
+"benchmark/v1/rag/rag.py" = ["G004"]
+"benchmark/v1/rag/utils.py" = ["G004"]
+"setup.py" = ["G004"]
+
 [tool.ruff.lint.isort]
 # same as .isort.cfg
 from-first = true
@@ -87,6 +123,13 @@ from-first = true
 # import-heading-thirdparty=Third Party
 # import-heading-firstparty=First Party
 # import-heading-localfolder=Local
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pickle".msg = "Use a data-only serialization format instead."
+
+[tool.codespell]
+# cann: Ascend CANN; enque: AscendC EnQue/DeQue queue API
+ignore-words-list = "cann,enque"
 
 [tool.mypy]
 modules = ["lmcache_ascend", "tests"]

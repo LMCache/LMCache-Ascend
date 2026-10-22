@@ -21,19 +21,18 @@ repos:
   hooks:
   - id: codespell
     additional_dependencies: ['tomli']
-    # cann: Ascend CANN; enque: AscendC EnQue/DeQue queue API
-    args: ['--toml', 'pyproject.toml', '--ignore-words-list', 'cann,enque']
+    args: ['--toml', 'pyproject.toml']
 - repo: https://github.com/pre-commit/mirrors-clang-format
   rev: v20.1.3
   hooks:
   - id: clang-format
-    types_or: [c++]
+    types_or: [c++, cuda]
     args: [--style=file, --verbose]
 - repo: https://github.com/pre-commit/mirrors-mypy
   rev: 'v1.17.1'
   hooks:
   - id: mypy
-    language_version: python3
+    language_version: python3.12
     args: [--config-file=pyproject.toml]
     #args: [--ignore-missing-imports]
     additional_dependencies:

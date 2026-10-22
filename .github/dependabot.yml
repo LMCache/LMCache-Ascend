@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
+      # torch / torch_npu are pinned by the vllm-ascend container image.
+      - dependency-name: "torch"
+      - dependency-name: "torch-npu"
+    groups:
+      minor-update:
+        applies-to: version-updates
+        update-types: ["minor"]
