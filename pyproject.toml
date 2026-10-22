@@ -87,8 +87,6 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Ignore SLF everywhere except lmcache_ascend/v1/multiprocess/
-"!lmcache_ascend/v1/multiprocess/**" = ["SLF"]
 # TID251: this file serializes HCCL agent metadata (client and memory handles)
 # for which there is no data-only codec yet; changing the wire format requires
 # a coordinated update with the peer. Keep the waiver scoped to this file.
