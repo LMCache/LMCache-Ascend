@@ -5,7 +5,8 @@ from unittest.mock import patch
 import random
 
 # Third Party
-from lmcache.v1.memory_management import MemoryFormat, PinMemoryAllocator
+from lmcache.v1.memory_allocators.pin_memory_allocator import PinMemoryAllocator
+from lmcache.v1.memory_management import MemoryFormat
 
 # TODO (gingfung): once we have sglang kernel, re-enable test_sglang_connector_with_gpu_and_mla
 from lmcache_tests.v1.test_gpu_connector import (
@@ -17,6 +18,7 @@ from lmcache_tests.v1.test_gpu_connector import (
 from lmcache_tests.v1.test_gpu_connector import (
     test_vllm_paged_connector_v2_to_gpu_bench as original_test_vllm_paged_connector_v2_to_gpu_bench,
 )
+import lmcache.lmcache_native as lmcache_native
 import pytest
 import torch
 
@@ -27,15 +29,12 @@ from lmcache_ascend.v1.npu_connector.npu_connectors import (
     VLLMPagedMemNPUConnectorV2,
 )
 from tests.v1.utils import check_sglang_npu_kv_cache_equal, generate_sglang_npu_kv_cache
-import lmcache_ascend.c_ops as lmc_ops
 
 
 @pytest.mark.parametrize("use_npu", [True])
 @pytest.mark.parametrize(
     "gpu_kv_format",
-    [
-        lmc_ops.GPUKVFormat.NL_X_TWO_NB_BS_NH_HS,  # vllm non-MLA flash attention
-    ],
+    [lmcache_native.EngineKVFormat.NL_X_TWO_NB_BS_NH_HS],
 )
 def test_layerwise_vllm_paged_connector_with_npu(use_npu, gpu_kv_format):
     target_patch = (

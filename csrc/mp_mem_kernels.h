@@ -52,11 +52,9 @@ struct PageBufferShapeDesc {
   int hs;
   int element_size;
   int block_stride_elems;
-  // Ascend-only physical plane count per layer. Formats 16/17 fill it at
-  // registration. prepare_group derives two planes for format 2. For format
-  // 13, it derives the single plane only when num_planes == 0, preserving
-  // explicitly supplied geometry. Unset 16/17 stays 0 and is rejected.
-  // A positive value means plane geometry has been resolved.
+  // Ascend-only: physical plane count per layer. Formats 16/17 fill it at
+  // registration; format 13 may leave it at 0 for prepare_group to derive its
+  // single plane from the scalar fields. >0 means explicit plane geometry.
   int32_t num_planes = 0;
   // Per-plane payload bytes per token slot (64-bit byte addressing). The
   // engine-side token step is derived from the payload (dense token rows).
