@@ -87,7 +87,7 @@ jobs:
           submodules: true
       
       - name: 🟡 Set Status to Running
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -201,7 +201,7 @@ jobs:
       
       - name: 🟢🔴 Update Hardware Status
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -295,7 +295,7 @@ jobs:
           submodules: true
       
       - name: 🟡 Set Status to Running
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
@@ -414,7 +414,7 @@ jobs:
       
       - name: 🟢🔴 Update Hardware Status
         if: always()
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
