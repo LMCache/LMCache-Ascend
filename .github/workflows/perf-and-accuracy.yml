@@ -96,10 +96,12 @@ jobs:
           git config --global http.version HTTP/1.1
           git config --global url."git@github.com:".insteadOf "https://github.com/"
           if getent hosts proxyhk.huawei.com >/dev/null 2>&1; then
-            echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+            {
+              echo "http_proxy=http://host.docker.internal:3128"
+              echo "https_proxy=http://host.docker.internal:3128"
+              echo "HTTP_PROXY=http://host.docker.internal:3128"
+              echo "HTTPS_PROXY=http://host.docker.internal:3128"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Checkout (Workflow Run)
@@ -151,15 +153,17 @@ jobs:
           pip install lmcache==0.4.4
 
           echo ">>> Building LMCache-Ascend..."
-          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
-          python3 -m pip install -v --no-build-isolation -e . 
+          ASCEND_ARCH="$(uname -i)"
+          export CPLUS_INCLUDE_PATH="/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/${ASCEND_ARCH}-openEuler-linux/:${CPLUS_INCLUDE_PATH}"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
+          python3 -m pip install -v --no-build-isolation -e .
       
       - name: ⏱ Run Performance Tests
         id: perf-step
         shell: bash
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           export ASCEND_RT_VISIBLE_DEVICES=14,15
           mkdir -p /tmp/lmcache_disk
 
@@ -175,9 +179,9 @@ jobs:
             --kv-transfer-config '{"kv_connector":"LMCacheAscendConnector","kv_role":"kv_both"}' \
             > server.log 2>&1 &
           VLLM_PID=$!
-          echo "VLLM_PID=$VLLM_PID" >> $GITHUB_ENV
+          echo "VLLM_PID=$VLLM_PID" >> "$GITHUB_ENV"
 
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             if curl -s http://localhost:8019/health > /dev/null 2>&1; then
               break
             fi
@@ -219,7 +223,8 @@ jobs:
         id: acc-step
         shell: bash
         run: |
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           export ASCEND_RT_VISIBLE_DEVICES=14,15
 
           pip install lm-eval[api]
@@ -246,7 +251,7 @@ jobs:
             task_name=$(echo "$tasks" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
             expected="${ACC_THRESHOLD[$task_name]}"
             if [ -n "$expected" ]; then
-              val=$(echo "$value" | sed 's/[[:space:]]//g')
+              val="${value//[[:space:]]/}"
               if awk -v v="$val" -v e="$expected" 'BEGIN { exit (v >= e) }'; then
                 FAILED_TASKS="${FAILED_TASKS}  ${task_name}: ${val} (expected >= ${expected})\n"
               fi
@@ -266,8 +271,8 @@ jobs:
         shell: bash
         run: |
           if [ -n "$VLLM_PID" ]; then
-            kill $VLLM_PID 2>/dev/null || true
-            wait $VLLM_PID 2>/dev/null || true
+            kill "$VLLM_PID" 2>/dev/null || true
+            wait "$VLLM_PID" 2>/dev/null || true
           fi
 
       - name: 📤 Upload Accuracy Output

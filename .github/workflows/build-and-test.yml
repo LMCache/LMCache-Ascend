@@ -64,10 +64,12 @@ jobs:
         run: |
           git config --global http.version HTTP/1.1
           if getent hosts proxyhk.huawei.com >/dev/null 2>&1; then
-            echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+            {
+              echo "http_proxy=http://host.docker.internal:3128"
+              echo "https_proxy=http://host.docker.internal:3128"
+              echo "HTTP_PROXY=http://host.docker.internal:3128"
+              echo "HTTPS_PROXY=http://host.docker.internal:3128"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Checkout (Workflow Run)
@@ -119,8 +121,9 @@ jobs:
           pip install lmcache==0.4.4
 
           echo ">>> Building LMCache-Ascend..."
-          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export CPLUS_INCLUDE_PATH="/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/${ASCEND_ARCH}-openEuler-linux/:${CPLUS_INCLUDE_PATH}"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           
           # Install in editable mode (-e) for testing
           python3 -m pip install -v --no-build-isolation -e . 
@@ -134,7 +137,8 @@ jobs:
         shell: bash
         run: |
           # 1. Setup Env
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           
           # 2. Disable Exit on Error (Manual Handling)
           set +e 
@@ -272,10 +276,12 @@ jobs:
         run: |
           git config --global http.version HTTP/1.1
           if getent hosts proxyhk.huawei.com >/dev/null 2>&1; then
-            echo "http_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "https_proxy=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTP_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
-            echo "HTTPS_PROXY=http://host.docker.internal:3128" >> $GITHUB_ENV
+            {
+              echo "http_proxy=http://host.docker.internal:3128"
+              echo "https_proxy=http://host.docker.internal:3128"
+              echo "HTTP_PROXY=http://host.docker.internal:3128"
+              echo "HTTPS_PROXY=http://host.docker.internal:3128"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Checkout (Workflow Run)
@@ -332,8 +338,9 @@ jobs:
           pip install lmcache==0.4.4
 
           echo ">>> Building LMCache-Ascend..."
-          export CPLUS_INCLUDE_PATH=/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/`uname -i`-openEuler-linux/:$CPLUS_INCLUDE_PATH
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export CPLUS_INCLUDE_PATH="/usr/include/c++/12:/usr/include/c++/12/backward:/usr/include/c++/12/${ASCEND_ARCH}-openEuler-linux/:${CPLUS_INCLUDE_PATH}"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           
           # Install in editable mode (-e) for testing
           python3 -m pip install -v --no-build-isolation -e . 
@@ -347,7 +354,8 @@ jobs:
         shell: bash
         run: |
           # 1. Setup Env
-          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib
+          ASCEND_ARCH="$(uname -i)"
+          export LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/Ascend/ascend-toolkit/latest/${ASCEND_ARCH}-linux/devlib"
           
           # 2. Disable Exit on Error (Manual Handling)
           set +e 
