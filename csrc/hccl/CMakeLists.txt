@@ -9,6 +9,20 @@ else()
   set(HCOMM_PUB_INC "${HCOMM_SRC_PATH}/src/pub_inc")
 endif()
 
+# hcomm v9.2.0 spread headers hccl_common.h depends on across new locations:
+# hccl_log_keywords.h -> src/base_comm/common, dtype_common.h -> pkg_inc/legacy/hccl,
+# log.h -> src/legacy/ascend950/common.
+set(HCOMM_EXTRA_INC "")
+foreach(_hcomm_extra_dir
+    src/base_comm/common
+    pkg_inc/legacy/hccl
+    src/legacy/ascend950/common
+)
+  if(EXISTS "${HCOMM_SRC_PATH}/${_hcomm_extra_dir}")
+    list(APPEND HCOMM_EXTRA_INC "${HCOMM_SRC_PATH}/${_hcomm_extra_dir}")
+  endif()
+endforeach()
+
 set(HCCL_SRC_FILES
     hccl_utils.cpp
     hccl_agent.cpp
@@ -22,6 +36,7 @@ target_include_directories(hccl_npu_comms PRIVATE
     ${HCOMM_PUB_INC}/inner
     ${HCOMM_PUB_INC}/new
     ${HCOMM_PUB_INC}/../common/error_manager
+    ${HCOMM_EXTRA_INC}
     ${HCOMM_SRC_PATH}/include
     ${HCOMM_SRC_PATH}/include/hccl
     ${HCOMM_SRC_PATH}/pkg_inc/hccl
