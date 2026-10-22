@@ -26,7 +26,7 @@
 
 LMCache-Ascend is a community maintained plugin for running LMCache on the Ascend NPU.
 
-> **Maintenance notice**: The stable in-process version (`LMCacheAscendConnectorV1Dynamic`) is maintained on the [`dsv4_support_045`](https://github.com/LMCache/LMCache-Ascend/tree/dsv4_support_045) branch. The `main` branch moves to MP mode (`LMCacheMPConnector`) and will no longer maintain the in-process mode.
+> **Maintenance notice**: The stable in-process version (`LMCacheAscendConnectorV1Dynamic`) is maintained on the [`dsv4_support_045`](https://github.com/LMCache/LMCache-Ascend/tree/dsv4_support_045) branch and is **tightly coupled with LMCache 0.4.5** — pair it with the LMCache 0.4.5 release line, not newer versions. The `main` branch moves to MP mode (`LMCacheMPConnector`) and will no longer maintain the in-process mode.
 
 ## Prerequisites
 
