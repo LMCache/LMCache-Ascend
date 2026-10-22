@@ -186,7 +186,7 @@ jobs:
       # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
       - name: 📤 Upload Debug Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: debug-logs-910b
           path: debug_logs.txt
@@ -194,7 +194,7 @@ jobs:
       # 📤 ARTIFACT 2: The XML Summary (For Tools)
       - name: 📤 Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
           path: test-results.xml
@@ -399,7 +399,7 @@ jobs:
       # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
       - name: 📤 Upload Debug Logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: debug-logs-910c
           path: debug_logs.txt
@@ -407,7 +407,7 @@ jobs:
       # 📤 ARTIFACT 2: The XML Summary (For Tools)
       - name: 📤 Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
           path: test-results.xml

@@ -209,7 +209,7 @@ jobs:
 
       - name: 📤 Upload Perf Output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: perf-output-910c
           path: /tmp/perf_output.txt
@@ -272,7 +272,7 @@ jobs:
 
       - name: 📤 Upload Accuracy Output
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: accuracy-output-910c
           path: /tmp/accuracy_output.txt
