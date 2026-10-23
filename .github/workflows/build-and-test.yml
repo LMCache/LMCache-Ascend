@@ -190,7 +190,7 @@ jobs:
       # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
       - name: 📤 Upload Debug Logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: debug-logs-910b
           path: debug_logs.txt
@@ -198,7 +198,7 @@ jobs:
       # 📤 ARTIFACT 2: The XML Summary (For Tools)
       - name: 📤 Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
           path: test-results.xml
@@ -407,7 +407,7 @@ jobs:
       # 📤 ARTIFACT 1: The Verbose Logs (For Debugging)
       - name: 📤 Upload Debug Logs
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: debug-logs-910c
           path: debug_logs.txt
@@ -415,7 +415,7 @@ jobs:
       # 📤 ARTIFACT 2: The XML Summary (For Tools)
       - name: 📤 Upload Test Results XML
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: test-results-xml-${{ github.job }}-${{ strategy.job-index || 0}}
           path: test-results.xml
