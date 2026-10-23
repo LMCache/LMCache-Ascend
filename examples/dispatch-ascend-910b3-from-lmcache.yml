@@ -1,0 +1,37 @@
+# Copy into LMCache/LMCache as .github/workflows/dispatch-ascend-910b3.yml
+# (requires maintainer merge + repo secret LMCACHE_ASCEND_NPU_DISPATCH_TOKEN).
+#
+# PAT: fine-grained or classic with permission to POST repository_dispatch to
+# LMCache/LMCache-Ascend (Actions: write on that repo).
+name: Dispatch Ascend 910B3 NPU CI
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger LMCache-Ascend 910B3 tests
+        env:
+          GH_TOKEN: ${{ secrets.LMCACHE_ASCEND_NPU_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo '::error::Set secret LMCACHE_ASCEND_NPU_DISPATCH_TOKEN on LMCache/LMCache'
+            exit 1
+          fi
+          gh api repos/LMCache/LMCache-Ascend/dispatches --input - <<EOF
+          {
+            "event_type": "lmcache-main-push",
+            "client_payload": {
+              "sha": "${GITHUB_SHA}",
+              "ref": "dev"
+            }
+          }
+          EOF
