@@ -96,7 +96,7 @@ class BasicReverseRope:
 
 class FusedRope:
     """
-    Directly use the fused kernel to ratate K cache from
+    Directly use the fused kernel to rotate K cache from
     the old positions to the new positions.
     """
 
@@ -174,16 +174,16 @@ def validate_rope_params(
     partial_rotary_factor: float = 1.0,
 ):
     if rotary_dim != head_size:
-        logger.error("Currently KV blending only support rotary_dim == head_size.")
+        logger.error("Currently KV blending only supports rotary_dim == head_size.")
         return False
 
     if rope_scaling is not None:
-        logger.error("Currently KV blending do not support rope scaling.")
+        logger.error("Currently KV blending does not support rope scaling.")
         return False
 
     if partial_rotary_factor != 1.0:
         logger.error(
-            "Currently KV blending do not support rotary factor other than 1.0."
+            "Currently KV blending does not support rotary factor other than 1.0."
         )
         return False
 
@@ -247,7 +247,7 @@ def get_fused_rope(
         partial_rotary_factor,
     ):
         logger.warning(
-            "The rope parameters is not supported! Cannot use cacheblend in this case"
+            "The rope parameters are not supported! Cannot use cacheblend in this case"
         )
         return None
 

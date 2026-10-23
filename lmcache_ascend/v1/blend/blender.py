@@ -180,7 +180,7 @@ class LMCBlender:
             return q, k, v, residual, attn_output, attn_metadata
 
     # NOTE(Jiayi): Exposing this `blend_layer` interface as we might
-    # want to ochestrate the blending process elsewhere
+    # want to orchestrate the blending process elsewhere
     def blend_layer(
         self,
         tokens: torch.Tensor,
@@ -188,7 +188,7 @@ class LMCBlender:
         **kwargs,
     ):
         """
-        Perform layerwiese retrieve + blending.
+        Perform layerwise retrieve + blending.
         """
 
         # TODO(Jiayi): store is currently not included in this function

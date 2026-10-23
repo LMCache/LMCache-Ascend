@@ -233,7 +233,7 @@ if __name__ == "__main__":
             "lmcache_online:LMCache (No Blend) Online",
             "cacheblend_online:CacheBlend Online",
         ],
-        help="Map filenames identifiers to scenario display names "
+        help="Map filename identifiers to scenario display names "
         '(e.g., "lmcache_offline:LMCache (No Blend) Offline")',
     )
     parser.add_argument("csv_paths", nargs="+", help="Paths to benchmark CSV files")
