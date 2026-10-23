@@ -92,10 +92,6 @@ ignore = [
 # upstream LMCache/vLLM objects that expose no public equivalent, and tests
 # assert on internals by design.
 "!lmcache_ascend/v1/multiprocess/**" = ["SLF"]
-# TID251: the HCCL transport objects (client meta and memory handles) are pybind
-# objects whose only serialization surface is py::pickle in csrc/hccl; replacing
-# pickle requires a coordinated C++ protocol change on both peers.
-"lmcache_ascend/v1/transfer_channel/hccl_channel.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 # same as .isort.cfg

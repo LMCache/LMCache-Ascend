@@ -3,7 +3,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Union
 import asyncio
-import pickle
 import threading
 
 # Third Party
@@ -33,6 +32,14 @@ from .buffer_config import (
     RemotePeerBufferList,
 )
 from .hccl_agent import HcclAgentWrapper
+from .hccl_metadata import (
+    decode_client_meta,
+    decode_mem_handles,
+    decode_server_meta,
+    encode_client_meta,
+    encode_mem_handles,
+    encode_server_meta,
+)
 from .transfer_spec import TS_RECEIVER_ID
 
 logger = init_logger(__name__)
@@ -48,23 +55,23 @@ class HcclMsgBase(msgspec.Struct, tag=True):
 
 class HcclInitRequest(HcclMsgBase):
     local_id: str  # Id of client connecting to server
-    client_meta_bytes: bytes  # Client meta from client (sender) for server to accept
+    client_meta_bytes: bytes  # Encoded ClientMeta (hccl_metadata) from the sender
 
 
 class HcclInitResponse(HcclMsgBase):
-    server_meta_bytes: bytes  # Server meta for client (sender) to connect to
+    server_meta_bytes: bytes  # Encoded ServerMeta (hccl_metadata)
 
 
 class HcclMemRegRequest(HcclMsgBase):
     local_id: str
     client_mem_handle_bytes: (
-        bytes  # Handle of client (sender) memory to register to server
+        bytes  # Encoded mem handle metadata (hccl_metadata) of the sender
     )
 
 
 class HcclMemRegResponse(HcclMsgBase):
     server_mem_handle_bytes: (
-        bytes  # Handle of server (receiver) memory to register to client
+        bytes  # Encoded mem handle metadata (hccl_metadata) of the receiver
     )
 
 
@@ -349,14 +356,14 @@ class HcclChannel(BaseMultiBufferChannel):
 
         hccl_init_req = HcclInitRequest(
             local_id=local_id,
-            client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
+            client_meta_bytes=encode_client_meta(self.hccl_agent.get_client_meta()),
         )
         init_tmp_socket.send(msgspec.msgpack.encode(hccl_init_req))
 
         # Wait remote agent metadata and connect to remote agent
         hccl_init_resp_bytes = init_tmp_socket.recv()
         hccl_init_resp = msgspec.msgpack.decode(hccl_init_resp_bytes, type=HcclMsg)
-        server_meta = pickle.loads(hccl_init_resp.server_meta_bytes)
+        server_meta = decode_server_meta(hccl_init_resp.server_meta_bytes)
 
         logger.info("Connecting to remote")
 
@@ -368,22 +375,18 @@ class HcclChannel(BaseMultiBufferChannel):
 
         # Exchange and register memory with peer
         mem_handles = self.hccl_wrapper.mem_handles
-        # Backward compatibility: wrap single handle if needed or send list
-        # For now, we assume protocol upgrade to send list of handles
         hccl_mem_reg_req = HcclMemRegRequest(
             local_id=local_id,
-            client_mem_handle_bytes=pickle.dumps(mem_handles),
+            client_mem_handle_bytes=encode_mem_handles(mem_handles),
         )
         init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
         hccl_mem_reg_resp_bytes = init_tmp_socket.recv()
         hccl_mem_reg_resp = msgspec.msgpack.decode(
             hccl_mem_reg_resp_bytes, type=HcclMsg
         )
-        server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-
-        # Handle both single item (legacy) and list (new)
-        if not isinstance(server_mem_handles, list):
-            server_mem_handles = [server_mem_handles]
+        server_mem_handles = decode_mem_handles(
+            hccl_mem_reg_resp.server_mem_handle_bytes
+        )
 
         for handle in server_mem_handles:
             self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
@@ -471,14 +474,14 @@ class HcclChannel(BaseMultiBufferChannel):
 
             hccl_init_req = HcclInitRequest(
                 local_id=local_id,
-                client_meta_bytes=pickle.dumps(self.hccl_agent.get_client_meta()),
+                client_meta_bytes=encode_client_meta(self.hccl_agent.get_client_meta()),
             )
             await init_tmp_socket.send(msgspec.msgpack.encode(hccl_init_req))
 
             # Wait remote agent metadata and connect to remote agent
             hccl_init_resp_bytes = await init_tmp_socket.recv()
             hccl_init_resp = msgspec.msgpack.decode(hccl_init_resp_bytes, type=HcclMsg)
-            server_meta = pickle.loads(hccl_init_resp.server_meta_bytes)
+            server_meta = decode_server_meta(hccl_init_resp.server_meta_bytes)
 
             conn_handle = self.hccl_agent.connect(server_meta)
             with self._state_lock:
@@ -489,17 +492,16 @@ class HcclChannel(BaseMultiBufferChannel):
 
             hccl_mem_reg_req = HcclMemRegRequest(
                 local_id=local_id,
-                client_mem_handle_bytes=pickle.dumps(mem_handles),
+                client_mem_handle_bytes=encode_mem_handles(mem_handles),
             )
             await init_tmp_socket.send(msgspec.msgpack.encode(hccl_mem_reg_req))
             hccl_mem_reg_resp_bytes = await init_tmp_socket.recv()
             hccl_mem_reg_resp = msgspec.msgpack.decode(
                 hccl_mem_reg_resp_bytes, type=HcclMsg
             )
-            server_mem_handles = pickle.loads(hccl_mem_reg_resp.server_mem_handle_bytes)
-
-            if not isinstance(server_mem_handles, list):
-                server_mem_handles = [server_mem_handles]
+            server_mem_handles = decode_mem_handles(
+                hccl_mem_reg_resp.server_mem_handle_bytes
+            )
 
             for handle in server_mem_handles:
                 self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
@@ -545,10 +547,10 @@ class HcclChannel(BaseMultiBufferChannel):
             logger.info("Processing HcclInitRequest")
             server_meta = self.hccl_agent.get_server_meta()
             resp = HcclInitResponse(
-                server_meta_bytes=pickle.dumps(server_meta),
+                server_meta_bytes=encode_server_meta(server_meta),
             )
 
-            client_meta = pickle.loads(req.client_meta_bytes)
+            client_meta = decode_client_meta(req.client_meta_bytes)
             accept_started_event = threading.Event()
             ready_event = threading.Event()
             self._peer_ready_events[req.local_id] = ready_event
@@ -610,9 +612,7 @@ class HcclChannel(BaseMultiBufferChannel):
                     )
                 conn_handle = self.conn_handles_dict[req.local_id]
 
-            client_mem_handles = pickle.loads(req.client_mem_handle_bytes)
-            if not isinstance(client_mem_handles, list):
-                client_mem_handles = [client_mem_handles]
+            client_mem_handles = decode_mem_handles(req.client_mem_handle_bytes)
 
             for handle in client_mem_handles:
                 self.hccl_agent.import_mem(conn_handle, handle.mem_handle)
@@ -629,7 +629,9 @@ class HcclChannel(BaseMultiBufferChannel):
 
             # Send back our handles (all of them)
             resp = HcclMemRegResponse(
-                server_mem_handle_bytes=pickle.dumps(self.hccl_wrapper.mem_handles),
+                server_mem_handle_bytes=encode_mem_handles(
+                    self.hccl_wrapper.mem_handles
+                ),
             )
 
             logger.info("Replying mem register response")
