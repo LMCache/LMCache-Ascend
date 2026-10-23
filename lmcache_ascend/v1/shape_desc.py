@@ -62,8 +62,7 @@ def install_plane_geometry_fill() -> None:
     per-plane byte geometry both Ascend formats require is attached here,
     at the same construction point:
 
-    - fmt 13 (``NL_X_NB_BS_NH_CS``): one fused-K/V tensor per layer,
-      ``[NB, BS, NH, CS]``;
+
     - fmt 17 (``NL_X_NP_X_NB_BS_ONE_HS``): MLA/DSA planes
       ``[NB, BS, 1, HS]``;
     - fmt 16 (``NL_X_TWO_X_NB_BS_NH_HS``): per-layer ``(K, V)`` planes
