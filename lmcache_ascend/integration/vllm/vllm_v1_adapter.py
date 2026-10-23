@@ -231,6 +231,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         self.current_layer = 0
         self._wait_for_save_done = False
+        metadata = self._parent._get_connector_metadata()
+        # Keep this frame's exclusions through repeated completion polling.
+        self._state_mm_native_finished_req_ids = getattr(
+            metadata, "native_mm_finished_req_ids", ()
+        )
 
         if self._num_kv_groups <= 1:
             super().start_load_kv(forward_context, **kwargs)
@@ -1015,6 +1020,11 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if self.lmcache_engine is None:
             return None, None
+        # Native multimodal requests have no offload to acknowledge. Exclude
+        # them before querying stores, not by swallowing unknown scheduler IDs.
+        finished_req_ids = set(finished_req_ids).difference(
+            getattr(self, "_state_mm_native_finished_req_ids", ())
+        )
         if getattr(self, "state_layouts", ()):
             for req_id in finished_req_ids:
                 self.lmcache_engine.lookup_unpin(req_id)
@@ -1080,6 +1090,9 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        if self._bypass_multimodal_state_request(request):
+            # Retain classification until finished metadata reaches the workers.
+            return False, None
         if getattr(self, "_state_primary_kv_group_idx", None) is not None:
             try:
                 if self.lookup_client is not None:
@@ -1193,6 +1206,8 @@ class LMCacheAscendConnectorV1Impl(LMCacheConnectorV1ImplMultiGroup):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         """vLLM HMA hook; delegates to :meth:`request_finished` (upstream LMCache)."""
+        if self._bypass_multimodal_state_request(request):
+            return False, None
         if not block_ids:
             if getattr(self, "_state_primary_kv_group_idx", None) is not None:
                 return self.request_finished(request, [])
