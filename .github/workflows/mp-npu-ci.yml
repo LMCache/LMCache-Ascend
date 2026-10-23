@@ -1,0 +1,201 @@
+name: MP NPU tests (910B3)
+
+# Self-hosted 910B3 runner for LMCache/LMCache-Ascend (label: 910b3).
+# LMCache/LMCache @ dev: daily schedule, repository_dispatch (see examples/), or workflow_dispatch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Nightly compatibility vs LMCache/LMCache dev (UTC).
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      lmcache_ref:
+        description: 'LMCache/LMCache git ref (branch, tag, or SHA)'
+        required: false
+        default: dev
+  repository_dispatch:
+    types: [mp-npu-ci, lmcache-main-push]
+
+run-name: >-
+  ${{ github.event_name == 'repository_dispatch'
+      && format('LMCache {0}', github.event.client_payload.sha)
+      || github.event_name == 'schedule' && 'Nightly vs LMCache dev'
+      || github.event.pull_request.title
+      || github.event.head_commit.message
+      || github.sha }}
+
+permissions:
+  contents: read
+  checks: write
+  statuses: write
+
+concurrency:
+  group: mp-npu-910b3-${{ github.event.pull_request.number || github.event_name || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-910b3:
+    name: Unit tests on 910B3
+    runs-on: [self-hosted, Linux, ARM64, 910b3]
+    # Up to 24 hourly NPU waits + install + pytest.
+    timeout-minutes: 1560
+    env:
+      NPU_WAIT_SECONDS: 3600
+      NPU_WAIT_MAX_TRIES: 24
+    defaults:
+      run:
+        shell: bash
+
+    container:
+      image: quay.io/ascend/vllm-ascend:v0.23.0
+      env:
+        SOC_VERSION: Ascend910B3
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple
+        LMCACHE_TRACK_USAGE: "false"
+        NO_GPU_EXT: "1"
+        BUILD_WITH_ASCEND: "1"
+        ENABLE_CXX11_ABI: "1"
+        ASCEND_HOME_PATH: /usr/local/Ascend/cann-9.1.0
+        LMCACHE_LOG_LEVEL: INFO
+        PYTHONHASHSEED: "0"
+      options: >-
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        -v /usr/local/dcmi:/usr/local/dcmi:ro
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro
+        --user root
+        --cap-add=SYS_PTRACE
+
+    steps:
+      - name: Wait for free NPUs (hourly retry)
+        run: |
+          set -euo pipefail
+          npu_free() {
+            python3 -c '
+          import re, subprocess, sys
+          out = subprocess.check_output(["npu-smi", "info"], text=True)
+          hbms = []
+          for line in out.splitlines():
+              pairs = re.findall(r"(\d+)\s*/\s*(\d+)", line)
+              mem = [(int(u), int(t)) for u, t in pairs if int(t) > 1024]
+              if mem:
+                  hbms.append(mem[-1])
+          print("parsed HBM (used, total):", hbms[:8])
+          if not hbms:
+              sys.exit(2)
+          if any(u > 8 * 1024 for u, _ in hbms):
+              sys.exit(1)
+          sys.exit(0)
+          '
+          }
+          npu-smi info
+          try=1
+          while true; do
+            if npu_free; then
+              echo "NPUs look free; continuing."
+              break
+            fi
+            status=$?
+            if [[ "$status" -eq 2 ]]; then
+              echo "::error::Could not parse HBM from npu-smi; refusing to run."
+              exit 1
+            fi
+            if [[ "$try" -ge "$NPU_WAIT_MAX_TRIES" ]]; then
+              echo "::error::NPUs still busy after ${NPU_WAIT_MAX_TRIES} hourly checks."
+              exit 1
+            fi
+            echo "NPUs busy; sleeping ${NPU_WAIT_SECONDS}s (check ${try}/${NPU_WAIT_MAX_TRIES})..."
+            sleep "$NPU_WAIT_SECONDS"
+            try=$((try + 1))
+            npu-smi info
+          done
+
+      - name: Checkout LMCache-Ascend
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: true
+          ref: >-
+            ${{ github.event_name == 'repository_dispatch' && 'main'
+                || github.event.pull_request.head.sha
+                || github.sha }}
+
+      - name: Checkout LMCache
+        uses: actions/checkout@v4
+        with:
+          repository: LMCache/LMCache
+          ref: >-
+            ${{ github.event.client_payload.sha
+                || github.event.inputs.lmcache_ref
+                || 'dev' }}
+          path: _lmcache_upstream
+          fetch-depth: 0
+
+      - name: Git safe directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install LMCache and LMCache-Ascend
+        run: |
+          set -euo pipefail
+          if [[ -d /usr/local/Ascend/cann-9.1.0/aarch64-linux/pkg_inc ]]; then
+            export CPLUS_INCLUDE_PATH="/usr/local/Ascend/cann-9.1.0/aarch64-linux/pkg_inc:${CPLUS_INCLUDE_PATH:-}"
+            export C_INCLUDE_PATH="/usr/local/Ascend/cann-9.1.0/aarch64-linux/pkg_inc:${C_INCLUDE_PATH:-}"
+          fi
+          export BUILD_WITH_ASCEND=1
+          export ASCEND_HOME_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/cann-9.1.0}"
+          export ENABLE_CXX11_ABI=1
+          export NO_GPU_EXT=1
+          unset NO_NATIVE_EXT NO_CUDA_EXT
+          rm -f _lmcache_upstream/lmcache/lmcache_native*.so 2>/dev/null || true
+          rm -rf _lmcache_upstream/build build
+          pip install -v --no-build-isolation -e _lmcache_upstream
+          pip install -v --no-build-isolation -e .
+          pip install pytest pytest-benchmark pytest-cov
+          python3 -c '
+          import lmcache
+          print("lmcache ok")
+          import lmcache_ascend
+          print("lmcache_ascend ok")
+          '
+
+      - name: Pytest tests/v1
+        id: test-step
+        shell: bash
+        run: |
+          LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}:/usr/local/Ascend/ascend-toolkit/latest/$(uname -i)-linux/devlib"
+          export LD_LIBRARY_PATH
+          set +e
+          python3 -u -m pytest -v tests/v1 \
+            --tb=short \
+            --junit-xml=test-results.xml \
+            --log-cli-level=CRITICAL \
+            --log-file=debug_logs.txt \
+            --log-file-level=INFO
+          EXIT_CODE=$?
+          set -e
+          echo "pytest exit=$EXIT_CODE"
+          exit "$EXIT_CODE"
+
+      - name: Publish JUnit summary
+        if: always()
+        uses: ./.github/actions/junit-summary
+        with:
+          junit-path: test-results.xml
+          ignore-missing: "true"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mp-npu-910b3-logs
+          path: |
+            debug_logs.txt
+            test-results.xml
+          if-no-files-found: ignore

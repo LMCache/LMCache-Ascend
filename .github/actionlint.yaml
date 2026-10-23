@@ -2,3 +2,4 @@ self-hosted-runner:
   labels:
     - 910b4
     - 910c
+    - 910b3
