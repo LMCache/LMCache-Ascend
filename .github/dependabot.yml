@@ -4,6 +4,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # init and analyze must run the same codeql-action version, otherwise
+      # CodeQL rejects the workflow.
+      codeql-action:
+        patterns: ["github/codeql-action*"]
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
