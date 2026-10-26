@@ -9,6 +9,18 @@ else()
   set(HCOMM_PUB_INC "${HCOMM_SRC_PATH}/src/pub_inc")
 endif()
 
+# hcomm v9.2.0 moved pkg_inc/hccl to pkg_inc/legacy/hccl and added
+# src/base_comm/common/hccl_log_keywords.h (included by hccl_common.h)
+if(EXISTS "${HCOMM_SRC_PATH}/pkg_inc/legacy/hccl")
+  set(HCOMM_PKG_INC
+      "${HCOMM_SRC_PATH}/pkg_inc/legacy"
+      "${HCOMM_SRC_PATH}/pkg_inc/legacy/hccl"
+      "${HCOMM_SRC_PATH}/src/base_comm/common"
+  )
+else()
+  set(HCOMM_PKG_INC "${HCOMM_SRC_PATH}/pkg_inc/hccl")
+endif()
+
 set(HCCL_SRC_FILES
     hccl_utils.cpp
     hccl_agent.cpp
@@ -24,7 +36,7 @@ target_include_directories(hccl_npu_comms PRIVATE
     ${HCOMM_PUB_INC}/../common/error_manager
     ${HCOMM_SRC_PATH}/include
     ${HCOMM_SRC_PATH}/include/hccl
-    ${HCOMM_SRC_PATH}/pkg_inc/hccl
+    ${HCOMM_PKG_INC}
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/include
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/pkg_inc/runtime
     ${ASCEND_CANN_PACKAGE_PATH}/${ARCH_SUBDIR}/pkg_inc/base
