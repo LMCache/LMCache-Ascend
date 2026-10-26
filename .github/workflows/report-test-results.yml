@@ -37,7 +37,7 @@ jobs:
           merge-multiple: true
 
       - name: 📊 Publish Test Report
-        uses: dorny/test-reporter@d61b558e8df85cb60d09ca3e5b09653b4477cea7 # v1
+        uses: dorny/test-reporter@b94dfe179d7ff66342276f4bd6b82c3c0f659f52 # v1
         with:
           name: NPU Test Results
           path: "**/*.xml"
