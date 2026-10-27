@@ -6,6 +6,7 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 # Third Party
@@ -195,3 +196,97 @@ def test_post_pr_skips_get_tokens_wrap() -> None:
         lbs._GET_TOKENS_WRAPPED = False
         lbs._INSTALLED = False
         lbs.install_overrides(scale_physical=True)
+
+
+def test_rebind_updates_only_existing_original_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    orig, wrapped, unrelated = object(), object(), object()
+    first = ModuleType("first_alias")
+    second = ModuleType("second_alias")
+    other = ModuleType("unrelated_alias")
+    empty = ModuleType("empty_module")
+    first.__dict__["get_tokens_per_block"] = orig
+    second.__dict__["get_tokens_per_block"] = orig
+    other.__dict__["get_tokens_per_block"] = unrelated
+    monkeypatch.setattr(
+        lbs,
+        "sys",
+        SimpleNamespace(modules={"a": first, "b": second, "c": other, "d": empty}),
+    )
+
+    lbs._rebind_get_tokens_per_block(orig, wrapped)
+    lbs._rebind_get_tokens_per_block(orig, wrapped)
+
+    assert first.__dict__["get_tokens_per_block"] is wrapped
+    assert second.__dict__["get_tokens_per_block"] is wrapped
+    assert other.__dict__["get_tokens_per_block"] is unrelated
+    assert "get_tokens_per_block" not in empty.__dict__
+
+
+def test_rebind_does_not_trigger_lazy_module_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    orig, wrapped = object(), object()
+    lazy = ModuleType("lazy_module")
+
+    def lazy_lookup(name: str) -> Any:
+        calls.append(name)
+        return orig
+
+    lazy.__dict__["__getattr__"] = lazy_lookup
+    monkeypatch.setattr(lbs, "sys", SimpleNamespace(modules={"lazy": lazy}))
+
+    lbs._rebind_get_tokens_per_block(orig, wrapped)
+
+    assert calls == []
+    assert "get_tokens_per_block" not in lazy.__dict__
+
+
+def test_rebind_bypasses_module_subclass_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+    orig, wrapped = object(), object()
+
+    class HookedModule(ModuleType):
+        def __getattribute__(self, name: str) -> Any:
+            if name in ("__dict__", "get_tokens_per_block"):
+                calls.append("get:" + name)
+            return super().__getattribute__(name)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if name == "get_tokens_per_block":
+                calls.append("set:" + name)
+            super().__setattr__(name, value)
+
+    module = HookedModule("hooked_module")
+    namespace = ModuleType.__getattribute__(module, "__dict__")
+    namespace["get_tokens_per_block"] = orig
+    monkeypatch.setattr(lbs, "sys", SimpleNamespace(modules={"hooked": module}))
+
+    lbs._rebind_get_tokens_per_block(orig, wrapped)
+
+    assert calls == []
+    assert namespace["get_tokens_per_block"] is wrapped
+
+
+def test_rebind_skips_non_module_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    orig, wrapped = object(), object()
+
+    class Proxy:
+        def __getattr__(self, name: str) -> Any:
+            calls.append(name)
+            return orig
+
+    proxy = Proxy()
+    monkeypatch.setattr(
+        lbs, "sys", SimpleNamespace(modules={"proxy": proxy, "missing": None})
+    )
+
+    lbs._rebind_get_tokens_per_block(orig, wrapped)
+
+    assert calls == []
+    assert "get_tokens_per_block" not in proxy.__dict__
