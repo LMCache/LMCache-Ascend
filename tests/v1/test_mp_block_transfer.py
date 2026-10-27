@@ -757,7 +757,7 @@ def _build(
     bs = bs or {"kg0_bs16": 16, "kg0_bs64": 64}.get(layout, 32)
     nb = nb or 32
     independent = layout == "kg0_indep"
-    layers, pools, block_stride, plane_strides = _kg0_planes(
+    layers, kg0_pools, block_stride, plane_strides = _kg0_planes(
         nl=nl, nb=nb, bs=bs, device=device, independent=independent
     )
     spec = dict(
@@ -775,7 +775,7 @@ def _build(
             plane_block_stride_bytes=plane_strides,
         ),
         layers=layers,
-        pools=pools,
+        pools=kg0_pools,
         table=_pointer_table(layers, device),
         obj_dtype=torch.uint8,
         obj_width=130,

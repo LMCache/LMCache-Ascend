@@ -117,15 +117,8 @@ modules = ["lmcache_ascend", "tests"]
 disable_error_code = [
     "annotation-unchecked",
     "union-attr",
-    "var-annotated",
     "arg-type",
-    "call-arg",
-    "import-untyped",
     "attr-defined",
-    "return-value",
-    "assignment",
-    "call-overload",
-    "misc",
 ]
 
 ignore_missing_imports = true
@@ -139,3 +132,41 @@ disallow_untyped_calls = false
 warn_return_any = false
 
 follow_imports = "silent"
+
+# In-process mode is maintained on the dsv4_support_045 branch; main only
+# maintains MP mode. Keep the legacy in-process modules out of mypy tightening
+# so this config only gates the MP surface (ops.py, shape_desc.py,
+# logical_block_size.py, and their tests).
+[[tool.mypy.overrides]]
+module = [
+    "lmcache_ascend.integration.patch.*",
+    "lmcache_ascend.integration.sglang.*",
+    "lmcache_ascend.integration.vllm.lmcache_ascend_connector_v1",
+    "lmcache_ascend.integration.vllm.vllm_v1_adapter",
+    "lmcache_ascend.integration.vllm.vllm_v1_adapter_hole",
+    "lmcache_ascend.serde.*",
+    "lmcache_ascend.v1.blend.*",
+    "lmcache_ascend.v1.cache_controller.*",
+    "lmcache_ascend.v1.cache_engine",
+    "lmcache_ascend.v1.hole_segment_utils",
+    "lmcache_ascend.v1.internal_api_server.*",
+    "lmcache_ascend.v1.kv_format",
+    "lmcache_ascend.v1.kv_layer_groups",
+    "lmcache_ascend.v1.lookup_client.*",
+    "lmcache_ascend.v1.memory_management",
+    "lmcache_ascend.v1.npu_connector.*",
+    "lmcache_ascend.v1.npu_hole_connector",
+    "lmcache_ascend.v1.proxy_memory_obj",
+    "lmcache_ascend.v1.storage_backend.*",
+    "lmcache_ascend.v1.system_detection",
+    "lmcache_ascend.v1.token_database",
+    "lmcache_ascend.v1.trace_utils_compat",
+    "lmcache_ascend.v1.transfer_channel.*",
+    "lmcache_ascend.v1.transfer_context",
+    "benchmark.*",
+    "tests.integration.*",
+    "tests.v1.storage_backend.*",
+    "tests.v1.test_cachegen_kernels",
+    "tests.v1.transfer_channel.*",
+]
+ignore_errors = true
