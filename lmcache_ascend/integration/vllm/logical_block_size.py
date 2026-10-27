@@ -88,7 +88,7 @@ def _restore_dropped_merge_fields(merged: Any, specs: list[Any]) -> Any:
     return merged
 
 
-def _wrap_merge(cls: type) -> None:
+def _wrap_merge(cls: Any) -> None:
     orig = cls.merge
     orig_fn = getattr(orig, "__func__", orig)
     if getattr(orig_fn, "_lmcache_ascend_logical_block_size", False):

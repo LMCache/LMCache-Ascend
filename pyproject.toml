@@ -116,9 +116,6 @@ modules = ["lmcache_ascend", "tests"]
 # TODO: tighten MyPy checks by enabling these checks over time.
 disable_error_code = [
     "annotation-unchecked",
-    "union-attr",
-    "arg-type",
-    "attr-defined",
 ]
 
 ignore_missing_imports = true
@@ -145,6 +142,7 @@ module = [
     "lmcache_ascend.integration.vllm.vllm_v1_adapter",
     "lmcache_ascend.integration.vllm.vllm_v1_adapter_hole",
     "lmcache_ascend.serde.*",
+    "lmcache_ascend.utils",
     "lmcache_ascend.v1.blend.*",
     "lmcache_ascend.v1.cache_controller.*",
     "lmcache_ascend.v1.cache_engine",

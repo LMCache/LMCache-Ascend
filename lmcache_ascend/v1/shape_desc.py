@@ -12,12 +12,13 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Sequence
+from typing import Any
 
 _MAX_PLANES = 4
 
 
 def attach_tuple_planes(
-    desc: object,
+    desc: Any,
     plane_slot_bytes: Sequence[int],
 ) -> None:
     """Record per-token plane widths (bytes) on ``desc``.
@@ -35,7 +36,7 @@ def attach_tuple_planes(
 
 
 def attach_tuple_block_strides(
-    desc: object,
+    desc: Any,
     plane_block_stride_bytes: Sequence[int],
 ) -> None:
     """Record per-block dim-0 byte strides on ``desc``.

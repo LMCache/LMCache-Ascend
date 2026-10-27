@@ -44,8 +44,10 @@ def test_surface_excludes_native_only_names(surface) -> None:
 
 def test_torch_fallback_reexports_are_filtered(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = types.ModuleType("lmcache_ascend.c_ops")
-    fake.PageBufferShapeDesc = real_c_ops.PageBufferShapeDesc
-    fake.record_completion_on_stream = torch_ops.record_completion_on_stream
+    monkeypatch.setattr(fake, "PageBufferShapeDesc", real_c_ops.PageBufferShapeDesc)
+    monkeypatch.setattr(
+        fake, "record_completion_on_stream", torch_ops.record_completion_on_stream
+    )
     monkeypatch.setitem(sys.modules, "lmcache_ascend.c_ops", fake)
     # ``import a.b as c`` resolves through the parent attribute, so patch
     # both the sys.modules entry and the real package's attribute.
@@ -64,8 +66,8 @@ def test_genuine_native_symbols_are_kept(monkeypatch: pytest.MonkeyPatch) -> Non
         pass
 
     fake = types.ModuleType("lmcache_ascend.c_ops")
-    fake.PageBufferShapeDesc = real_c_ops.PageBufferShapeDesc
-    fake.record_completion_on_stream = _native_recorder
+    monkeypatch.setattr(fake, "PageBufferShapeDesc", real_c_ops.PageBufferShapeDesc)
+    monkeypatch.setattr(fake, "record_completion_on_stream", _native_recorder)
     monkeypatch.setitem(sys.modules, "lmcache_ascend.c_ops", fake)
     # ``import a.b as c`` resolves through the parent attribute, so patch
     # both the sys.modules entry and the real package's attribute.
@@ -75,4 +77,4 @@ def test_genuine_native_symbols_are_kept(monkeypatch: pytest.MonkeyPatch) -> Non
     # First Party
     import lmcache_ascend.ops as ops_surface
 
-    assert ops_surface.record_completion_on_stream is _native_recorder
+    assert getattr(ops_surface, "record_completion_on_stream", None) is _native_recorder

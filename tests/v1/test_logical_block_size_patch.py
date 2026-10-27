@@ -148,11 +148,16 @@ def test_install_overrides_is_idempotent() -> None:
 
 
 class _PrePRPool:
+    block_size: int
+    compress_ratio: int
+
     def max_memory_usage_bytes(self, vllm_config: object) -> int:
         return self.block_size * self.compress_ratio
 
 
 class _PostPRPool:
+    block_size: int
+
     def max_memory_usage_bytes(self, vllm_config: object) -> int:
         return self.block_size
 

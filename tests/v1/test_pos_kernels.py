@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Standard
-from typing import Any, Callable, List
+from typing import Any, List, Protocol
 from unittest.mock import MagicMock
 import importlib.util
 
@@ -34,6 +34,19 @@ if VLLM_INSTALLED:
 
     # First Party
     from lmcache_ascend.v1.blend.positional_encoding import BasicReverseRope, FusedRope
+
+
+class _RopeLike(Protocol):
+    """Rotary embedding interface used by the correctness checks."""
+
+    dtype: torch.dtype
+
+    def __call__(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]: ...
 
 
 # ==============================================================================
@@ -70,7 +83,7 @@ class DummyFusedRope:
 
 
 def validate_correctness(
-    rope: Callable,
+    rope: _RopeLike,
     reverse_rope: BasicReverseRope,
     fused_rope: FusedRope,
     dummy_fused_rope: DummyFusedRope,
