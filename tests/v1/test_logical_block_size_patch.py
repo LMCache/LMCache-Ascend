@@ -6,8 +6,9 @@ from __future__ import annotations
 
 # Standard
 from dataclasses import dataclass, field
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 from typing import Any
+import sys
 
 # Third Party
 import lmcache.integration.vllm.kv_cache_groups as kg
@@ -198,12 +199,24 @@ def test_post_pr_skips_get_tokens_wrap() -> None:
         lbs.install_overrides(scale_physical=True)
 
 
-# These regression tests call the helper directly to isolate module-hook effects
-# from the public installer's imports and global installation state.
+@pytest.fixture
+def unwrapped_get_tokens_per_block(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Start each installer regression with a fresh, unwrapped function."""
+
+    def original(spec: Any, dcp_size: int) -> int:
+        return int(spec.block_size)
+
+    monkeypatch.setattr(kg, "get_tokens_per_block", original)
+    monkeypatch.setattr(lbs, "_INSTALLED", False)
+    monkeypatch.setattr(lbs, "_GET_TOKENS_WRAPPED", False)
+    monkeypatch.setattr(lbs, "_UNPATCHED_GET_TOKENS", None)
+    return original
+
+
 def test_rebind_updates_only_existing_original_aliases(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unwrapped_get_tokens_per_block: Any
 ) -> None:
-    orig, wrapped, unrelated = object(), object(), object()
+    orig, unrelated = unwrapped_get_tokens_per_block, object()
     first = ModuleType("first_alias")
     second = ModuleType("second_alias")
     other = ModuleType("unrelated_alias")
@@ -212,24 +225,27 @@ def test_rebind_updates_only_existing_original_aliases(
     first.__dict__["foo"] = orig
     second.__dict__["get_tokens_per_block"] = orig
     other.__dict__["get_tokens_per_block"] = unrelated
-    monkeypatch.setattr(
-        lbs,
-        "sys",
-        SimpleNamespace(modules={"a": first, "b": second, "c": other, "d": empty}),
-    )
+    for module in (first, second, other, empty):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
 
-    lbs._rebind_get_tokens_per_block(orig, wrapped)
-    lbs._rebind_get_tokens_per_block(orig, wrapped)
+    lbs.install_overrides(scale_physical=True)
+    wrapped = kg.get_tokens_per_block
+    assert wrapped is not orig
+    lbs.install_overrides(scale_physical=True)
 
+    assert kg.get_tokens_per_block is wrapped
     assert first.__dict__["get_tokens_per_block"] is wrapped
     assert first.__dict__["foo"] is orig
     assert second.__dict__["get_tokens_per_block"] is wrapped
     assert other.__dict__["get_tokens_per_block"] is unrelated
     assert "get_tokens_per_block" not in empty.__dict__
+    spec = AscendMLAAttentionSpec(block_size=32, compress_ratio=128)
+    assert first.get_tokens_per_block(spec, 1) == 4096
+    assert second.get_tokens_per_block(spec, 2) == 8192
 
 
 def test_rebind_does_not_trigger_lazy_module_lookup(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unwrapped_get_tokens_per_block: Any
 ) -> None:
     """Regression for #344: do not trigger unrelated lazy module lookups.
 
@@ -237,7 +253,7 @@ def test_rebind_does_not_trigger_lazy_module_lookup(
     Missing names must not invoke ``__getattr__`` or create a new binding.
     """
     calls: list[str] = []
-    orig, wrapped = object(), object()
+    orig = unwrapped_get_tokens_per_block
     lazy = ModuleType("lazy_module")
 
     def lazy_lookup(name: str) -> Any:
@@ -245,16 +261,17 @@ def test_rebind_does_not_trigger_lazy_module_lookup(
         return orig
 
     lazy.__dict__["__getattr__"] = lazy_lookup
-    monkeypatch.setattr(lbs, "sys", SimpleNamespace(modules={"lazy": lazy}))
+    monkeypatch.setitem(sys.modules, lazy.__name__, lazy)
 
-    lbs._rebind_get_tokens_per_block(orig, wrapped)
+    lbs.install_overrides(scale_physical=True)
 
+    assert kg.get_tokens_per_block is not orig
     assert calls == []
     assert "get_tokens_per_block" not in lazy.__dict__
 
 
 def test_rebind_bypasses_module_subclass_hooks(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, unwrapped_get_tokens_per_block: Any
 ) -> None:
     """Regression for #344: bypass module subclass attribute hooks.
 
@@ -262,7 +279,7 @@ def test_rebind_bypasses_module_subclass_hooks(
     Reading the namespace and updating aliases must not invoke module hooks.
     """
     calls: list[str] = []
-    orig, wrapped = object(), object()
+    orig = unwrapped_get_tokens_per_block
 
     class HookedModule(ModuleType):
         def __getattribute__(self, name: str) -> Any:
@@ -278,17 +295,20 @@ def test_rebind_bypasses_module_subclass_hooks(
     module = HookedModule("hooked_module")
     namespace = ModuleType.__getattribute__(module, "__dict__")
     namespace["get_tokens_per_block"] = orig
-    monkeypatch.setattr(lbs, "sys", SimpleNamespace(modules={"hooked": module}))
+    monkeypatch.setitem(sys.modules, module.__name__, module)
 
-    lbs._rebind_get_tokens_per_block(orig, wrapped)
+    lbs.install_overrides(scale_physical=True)
 
+    assert kg.get_tokens_per_block is not orig
     assert calls == []
-    assert namespace["get_tokens_per_block"] is wrapped
+    assert namespace["get_tokens_per_block"] is kg.get_tokens_per_block
 
 
-def test_rebind_skips_non_module_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_rebind_skips_non_module_entries(
+    monkeypatch: pytest.MonkeyPatch, unwrapped_get_tokens_per_block: Any
+) -> None:
     calls: list[str] = []
-    orig, wrapped = object(), object()
+    orig = unwrapped_get_tokens_per_block
 
     class Proxy:
         def __getattr__(self, name: str) -> Any:
@@ -296,11 +316,11 @@ def test_rebind_skips_non_module_entries(monkeypatch: pytest.MonkeyPatch) -> Non
             return orig
 
     proxy = Proxy()
-    monkeypatch.setattr(
-        lbs, "sys", SimpleNamespace(modules={"proxy": proxy, "missing": None})
-    )
+    monkeypatch.setitem(sys.modules, "rebind_test_proxy", proxy)
+    monkeypatch.setitem(sys.modules, "rebind_test_missing", None)
 
-    lbs._rebind_get_tokens_per_block(orig, wrapped)
+    lbs.install_overrides(scale_physical=True)
 
+    assert kg.get_tokens_per_block is not orig
     assert calls == []
     assert "get_tokens_per_block" not in proxy.__dict__
