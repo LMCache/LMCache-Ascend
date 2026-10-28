@@ -162,6 +162,7 @@ module = [
     "tests.integration.*",
     "tests.v1.storage_backend.*",
     "tests.v1.test_cachegen_kernels",
+    "tests.v1.test_pos_kernels",
     "tests.v1.transfer_channel.*",
 ]
 ignore_errors = true
