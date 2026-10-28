@@ -198,6 +198,8 @@ def test_post_pr_skips_get_tokens_wrap() -> None:
         lbs.install_overrides(scale_physical=True)
 
 
+# These regression tests call the helper directly to isolate module-hook effects
+# from the public installer's imports and global installation state.
 def test_rebind_updates_only_existing_original_aliases(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,6 +209,7 @@ def test_rebind_updates_only_existing_original_aliases(
     other = ModuleType("unrelated_alias")
     empty = ModuleType("empty_module")
     first.__dict__["get_tokens_per_block"] = orig
+    first.__dict__["foo"] = orig
     second.__dict__["get_tokens_per_block"] = orig
     other.__dict__["get_tokens_per_block"] = unrelated
     monkeypatch.setattr(
@@ -219,6 +222,7 @@ def test_rebind_updates_only_existing_original_aliases(
     lbs._rebind_get_tokens_per_block(orig, wrapped)
 
     assert first.__dict__["get_tokens_per_block"] is wrapped
+    assert first.__dict__["foo"] is orig
     assert second.__dict__["get_tokens_per_block"] is wrapped
     assert other.__dict__["get_tokens_per_block"] is unrelated
     assert "get_tokens_per_block" not in empty.__dict__
@@ -227,6 +231,11 @@ def test_rebind_updates_only_existing_original_aliases(
 def test_rebind_does_not_trigger_lazy_module_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression for #344: do not trigger unrelated lazy module lookups.
+
+    https://github.com/LMCache/LMCache-Ascend/pull/344
+    Missing names must not invoke ``__getattr__`` or create a new binding.
+    """
     calls: list[str] = []
     orig, wrapped = object(), object()
     lazy = ModuleType("lazy_module")
@@ -247,6 +256,11 @@ def test_rebind_does_not_trigger_lazy_module_lookup(
 def test_rebind_bypasses_module_subclass_hooks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Regression for #344: bypass module subclass attribute hooks.
+
+    https://github.com/LMCache/LMCache-Ascend/pull/344
+    Reading the namespace and updating aliases must not invoke module hooks.
+    """
     calls: list[str] = []
     orig, wrapped = object(), object()
 

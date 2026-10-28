@@ -128,6 +128,15 @@ def install_logical_block_size() -> bool:
 
 
 def _rebind_get_tokens_per_block(orig: Any, wrapped: Any) -> None:
+    """Rebind existing module globals named ``get_tokens_per_block``.
+
+    Only bindings whose value is ``orig`` are replaced. Renamed imports
+    such as ``from module import get_tokens_per_block as foo``, existing
+    local bindings, and captured references are not updated.
+
+    Access module dictionaries directly to avoid invoking lazy lookup
+    or assignment hooks.
+    """
     for mod in list(sys.modules.values()):
         if not isinstance(mod, ModuleType):
             continue
