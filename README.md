@@ -32,7 +32,7 @@ LMCache-Ascend is a community maintained plugin for running LMCache on the Ascen
 
 To use LMCache-Ascend on the NPU hardware, please make sure the following prerequisites are satisfied.
 
-- **Hardware**: Atlas 800I A2 Inference series. (A3 Inference/Training and 300I Duo are experimental).
+- **Hardware**: Atlas A2/A3 series (supported); Atlas A5 series (planned support); Atlas 300I Duo (not supported).
 - **OS**: Linux-based.
 - **Software**:
   - **Python**: >= 3.10
