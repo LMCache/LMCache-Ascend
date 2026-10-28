@@ -113,10 +113,7 @@ ignore-words-list = "cann,enque"
 [tool.mypy]
 modules = ["lmcache_ascend", "tests"]
 
-# TODO: tighten MyPy checks by enabling these checks over time.
-disable_error_code = [
-    "annotation-unchecked",
-]
+disable_error_code = []
 
 ignore_missing_imports = true
 explicit_package_bases = true
