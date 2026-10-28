@@ -18,6 +18,7 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Iterable
+from types import ModuleType
 from typing import Any
 import sys
 
@@ -127,14 +128,22 @@ def install_logical_block_size() -> bool:
 
 
 def _rebind_get_tokens_per_block(orig: Any, wrapped: Any) -> None:
+    """Rebind existing module globals named ``get_tokens_per_block``.
+
+    Only bindings whose value is ``orig`` are replaced. Renamed imports
+    such as ``from module import get_tokens_per_block as foo``, existing
+    local bindings, and captured references are not updated.
+
+    Access module dictionaries directly to avoid invoking lazy lookup
+    or assignment hooks.
+    """
     for mod in list(sys.modules.values()):
-        if mod is None:
+        if not isinstance(mod, ModuleType):
             continue
-        try:
-            if getattr(mod, "get_tokens_per_block", None) is orig:
-                mod.get_tokens_per_block = wrapped
-        except Exception:
-            continue
+        # Attribute probes can invoke lazy imports; only rebind existing aliases.
+        namespace = ModuleType.__getattribute__(mod, "__dict__")
+        if namespace.get("get_tokens_per_block") is orig:
+            namespace["get_tokens_per_block"] = wrapped
 
 
 def _wrap_get_tokens_per_block() -> None:
