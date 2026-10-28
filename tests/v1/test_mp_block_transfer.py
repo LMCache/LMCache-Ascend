@@ -11,7 +11,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from typing import Any
+from typing import Any, TypedDict
 
 # Third Party
 import lmcache.lmcache_native as native
@@ -114,12 +114,12 @@ def _assert_pointer_table_contract(spec: dict[str, Any]) -> None:
         assert table.numel() == nl * int(desc.num_planes)
 
 
-def _paged_ptr_tensor(paged: object, device: torch.device) -> torch.Tensor:
+def _paged_ptr_tensor(paged: Any, device: torch.device) -> torch.Tensor:
     """Native host wants a 1-D int64 pointer table, not nested layer tensors."""
     if isinstance(paged, torch.Tensor):
         return paged
     ptrs: list[int] = []
-    for layer in paged:  # type: ignore[union-attr]
+    for layer in paged:
         if isinstance(layer, (tuple, list)):
             ptrs.extend(int(plane.data_ptr()) for plane in layer)
         else:
@@ -757,7 +757,7 @@ def _build(
     bs = bs or {"kg0_bs16": 16, "kg0_bs64": 64}.get(layout, 32)
     nb = nb or 32
     independent = layout == "kg0_indep"
-    layers, pools, block_stride, plane_strides = _kg0_planes(
+    layers, kg0_pools, block_stride, plane_strides = _kg0_planes(
         nl=nl, nb=nb, bs=bs, device=device, independent=independent
     )
     spec = dict(
@@ -775,7 +775,7 @@ def _build(
             plane_block_stride_bytes=plane_strides,
         ),
         layers=layers,
-        pools=pools,
+        pools=kg0_pools,
         table=_pointer_table(layers, device),
         obj_dtype=torch.uint8,
         obj_width=130,
@@ -936,6 +936,7 @@ def test_roundtrip_restores_unskipped_selected_blocks(
         )
     _assert_engine_equal(spec["layers"], golden)
     if prefixes is not None:
+        assert storages is not None
         for storage, prefix in zip(storages, prefixes, strict=True):
             assert torch.equal(storage[:prefix_elems], prefix)
 
@@ -944,11 +945,18 @@ def test_roundtrip_restores_unskipped_selected_blocks(
 # Contract: native kernel matches torch_ops; nested list ≡ pointer table.
 # ---------------------------------------------------------------------------
 
-_SMALL = {
-    "kg0": dict(nl=2, nb=4, bs=32),
-    "mla_bf16": dict(nl=2, nb=4, bs=16),
-    "dsa3": dict(nl=2, nb=4, bs=16),
-    "dsa_c8_4": dict(nl=2, nb=4, bs=16),
+
+class _SmallParams(TypedDict):
+    nl: int
+    nb: int
+    bs: int
+
+
+_SMALL: dict[str, _SmallParams] = {
+    "kg0": {"nl": 2, "nb": 4, "bs": 32},
+    "mla_bf16": {"nl": 2, "nb": 4, "bs": 16},
+    "dsa3": {"nl": 2, "nb": 4, "bs": 16},
+    "dsa_c8_4": {"nl": 2, "nb": 4, "bs": 16},
 }
 
 
