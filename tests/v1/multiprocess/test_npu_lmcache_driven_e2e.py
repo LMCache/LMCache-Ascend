@@ -116,6 +116,9 @@ class _FakeMemoryObj:
     def data_ptr(self) -> int:
         return self.raw_tensor.data_ptr()
 
+    def get_l1_manager(self) -> int:
+        return 0
+
 
 class _FakeReadWindow:
     def __init__(self, objects: list[_FakeMemoryObj]) -> None:
@@ -139,7 +142,7 @@ class _FakeStorageManager:
         )
 
     def reserve_write(
-        self, keys: list[Any], layout_desc: Any, mode: str
+        self, keys: list[Any], layout_desc: Any
     ) -> dict[Any, _FakeMemoryObj]:
         reserved = {}
         for key in keys:
@@ -156,6 +159,31 @@ class _FakeStorageManager:
 
     def finish_read_prefetched(self, keys: list[Any], read_locks: int = 0) -> None:
         pass
+
+    def finish_write_by_owner(self, completion: Any) -> None:
+        pass
+
+    def finish_read_by_owner(self, completion: Any) -> None:
+        pass
+
+    def prepare_write_completion(
+        self, objects: dict[Any, _FakeMemoryObj]
+    ) -> list[tuple[int, list[Any]]]:
+        groups: dict[int, list[Any]] = {}
+        for key, obj in objects.items():
+            groups.setdefault(obj.get_l1_manager(), []).append(key)
+        return list(groups.items())
+
+    def prepare_read_completion(
+        self, keys: list[Any], l1_owners: Any = None
+    ) -> list[Any]:
+        return []
+
+    def unsafe_read(
+        self, keys: list[Any], l1_owners: Any = None
+    ) -> tuple[list[Any], list[_FakeMemoryObj]]:
+        found = [key for key in keys if key in self.objects]
+        return found, [self.objects[key] for key in found]
 
     def read_prefetched_results(self, keys: list[Any]) -> "_FakeReadWindow":
         return _FakeReadWindow([self.objects[k] for k in keys])
@@ -188,7 +216,12 @@ def test_forced_mode_selects_lmcache_driven_context() -> None:
             for i in range(NL)
         }
     )
-    context = create_transfer_context(tensors, mode="lmcache_driven")
+    context = create_transfer_context(
+        tensors,
+        instance_id=0,
+        req_client=object(),
+        mode="lmcache_driven",
+    )
     assert isinstance(context, LMCacheDrivenTransferContext)
     context.close()
 
@@ -235,6 +268,7 @@ def test_lmcache_driven_store_and_retrieve_roundtrip(
             module = lmcache_driven_transfer.LMCacheDrivenTransferModule(
                 SimpleNamespace(
                     chunk_size=CHUNK,
+                    null_block_id=0,
                     storage_manager=storage_manager,
                     event_bus=SimpleNamespace(
                         publish=lambda event: None,
@@ -242,6 +276,7 @@ def test_lmcache_driven_store_and_retrieve_roundtrip(
                         has_subscribers=lambda event_type: False,
                     ),
                     resolve_obj_keys=lambda key, group_ids: [[CHUNK_KEY]],
+                    get_read_owners=lambda request_id: None,
                 )
             )
             with closing(module):

@@ -44,7 +44,20 @@ def get_current_git_tag(path):
 
 
 def setup_lmcache_dependency():
-    """Clones or updates the upstream LMCache repo."""
+    """Clones or updates the upstream LMCache repo.
+
+    When ``LMCACHEPATH`` is set in the environment, that directory must exist
+    and is used as-is. When unset, the default path is synced to
+    ``LMCACHE_UPSTREAM_TAG``.
+    """
+    explicit = "LMCACHEPATH" in os.environ
+    if explicit:
+        if not os.path.exists(LMCACHEPATH):
+            raise FileNotFoundError(
+                f"LMCACHEPATH is set to {LMCACHEPATH!r} but that path does not exist"
+            )
+        return
+
     # 1. Check if Repo Exists
     if os.path.exists(LMCACHEPATH):
         current_tag = get_current_git_tag(LMCACHEPATH)
