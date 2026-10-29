@@ -104,8 +104,8 @@ regressions, including single-request TTFT; they are not hidden as improvements.
 
 ## Automated source regression
 
-30 source-bound regressions passed on Python 3.12: 9 native multimodal lifecycle
-tests and 21 async tests. They exercise production source using explicit
+The initial validation passed 30 source-bound regressions on Python 3.12: 9 native
+multimodal lifecycle tests and 21 async tests. They exercise production source using explicit
 framework/device doubles. Covered behaviors include configuration precedence,
 thread-affine RPC creation/use/close, pending-versus-miss polling, cancellation,
 admitted lease ownership, factory/manager delegation, private snapshot capture,
@@ -120,6 +120,18 @@ Ruff 0.11.7 lint/format, isort 6.0.1, codespell 2.4.1, SPDX and Python
 compilation checks passed locally. A dependency-free host CI workflow covers
 Python 3.10 and 3.12.
 
+### Review follow-up validation
+
+The host suite now has 45 passing tests: 9 native multimodal, 28 async protocol
+tests, and 8 correctness-client tests. The additions reproduce late-abort
+ordering, bounded lookup queue pressure, deferred cancellation, and retryable
+shutdown. The client tests use HTTP/device doubles and are not model evaluations.
+
+A concurrent long-context passkey evaluation is provided in
+[gdn_async_correctness.md](gdn_async_correctness.md). The real-device sync/async
+correctness comparison is pending execution; the earlier latency measurements
+do not establish answer correctness under concurrent CPU restore.
+
 ## Source integration
 
 The local deployed implementation and the repository code use the same core
@@ -128,7 +140,7 @@ engine/adapter helpers and config-scoped factory/manager classes.
 
 | Core implementation | Repository module | Source check |
 | --- | --- | --- |
-| `AsyncStateClient` | `v1/gdn_async_lookup.py` | Identical class AST to retained local delivery source |
+| `AsyncStateClient` | `v1/gdn_async_lookup.py` | Initial class matched the retained local source; queue-pressure handling was added during review and is covered by host regressions |
 | `Receive`, `acquire_load`, `make_receive` | `integration/vllm/gdn_async_receive.py` | Identical symbol ASTs to retained local delivery source |
 | `FrozenExecution`, `StateJob` | `v1/gdn_async_store.py` | Identical class ASTs to retained local delivery source |
 

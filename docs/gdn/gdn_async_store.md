@@ -33,7 +33,7 @@ be drained, buffers are retained and shutdown refuses to close the allocator.
 
 ## Validation
 
-This implementation has 30 passing source-bound host regressions, including
+The source-bound host regressions cover
 private clone/config ownership, producer/capture ordering, staging pressure and
 Attention/state pending-store accounting. Python compilation and Ruff checks
 also pass. Run `python -m unittest discover -s tests/host -v` from the repository

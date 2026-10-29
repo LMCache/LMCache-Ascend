@@ -1,5 +1,7 @@
 # GDN multimodal native-path regression
 
+Related protocols and validation are indexed in [GDN documentation](README.md).
+
 ## Problem
 
 An image request with GDN hybrid caching can cause an LMCache connector error

@@ -275,6 +275,8 @@ class GDNAsyncReceiveMixin:
         self._full_quarantine = []
         self._full_enqueued = self._full_completed = 0
         self._full_abort_receives = set()
+        # An emitted receive ACK is not proof the scheduler has processed it.
+        self._full_receive_acks = set()
 
     def _gdn_lookup(self, request, num_computed_tokens):
         # First Party
@@ -363,6 +365,12 @@ class GDNAsyncReceiveMixin:
     def _gdn_metadata(self, output):
         result = self._build_connector_meta_sync(output)
         result.gdn_async_receives = list(self._full_receives.values())
+        result.gdn_async_forward_req_ids = {
+            req_id
+            for req_id, tokens in output.num_scheduled_tokens.items()
+            if tokens > 0
+        }
+        result.gdn_async_finished_req_ids = set(output.finished_req_ids)
         self._full_receives = {}
         for req_id in output.finished_req_ids:
             self._full_resume_boundaries.pop(req_id, None)
@@ -376,6 +384,17 @@ class GDNAsyncReceiveMixin:
         self.current_layer = 0
         self._wait_for_save_done = False
         meta = self._parent._get_connector_metadata()
+        finished = set(getattr(meta, "gdn_async_finished_req_ids", ()))
+        # Retain only cancellations still owning a receive or in this metadata.
+        # Repeated completion polls on the same metadata remain suppressed.
+        self._full_abort_receives.intersection_update(
+            self._full_ledger.owned() | finished
+        )
+        # A scheduled forward proves the scheduler admitted this receive.
+        # Its later normal completion must still follow the store/send path.
+        self._full_receive_acks.difference_update(
+            getattr(meta, "gdn_async_forward_req_ids", ())
+        )
         receives = getattr(meta, "gdn_async_receives", ())
         # Allocator zeroing submitted before start_load must precede H2D.
         for received in receives:
@@ -404,8 +423,9 @@ class GDNAsyncReceiveMixin:
 
     def _gdn_finished(self, finished_req_ids):
         self._full_ledger.check()
-        owned = self._full_ledger.owned()
+        owned = self._full_ledger.owned() | self._full_receive_acks
         self._full_abort_receives.update(set(finished_req_ids) & owned)
+        self._full_receive_acks.difference_update(finished_req_ids)
         # Abort of an async receive frees via receive ACK, NOT sending ACK.
         sending, unused = self._get_finished_sync(
             set(finished_req_ids) - self._full_abort_receives
@@ -413,7 +433,7 @@ class GDNAsyncReceiveMixin:
         if unused:
             raise RuntimeError("Unexpected native receiver completion")
         receiving = self._full_ledger.drain()
-        self._full_abort_receives.difference_update(receiving)
+        self._full_receive_acks.update(receiving - self._full_abort_receives)
         return sending, receiving or None
 
     def _gdn_shutdown(self):

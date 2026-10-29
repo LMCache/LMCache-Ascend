@@ -326,6 +326,94 @@ class GDNHostTest(HostHarness):
         finally:
             client.close()
 
+    def pressured_lookup(self):
+        module, events = self.lookup_module()
+        with patch.object(
+            module,
+            "SerialOwner",
+            lambda factory, name: self.control.SerialOwner(
+                factory, name, max_pending=1
+            ),
+        ):
+            client = module.AsyncStateClient(
+                Config(),
+                NS(world_size=2),
+                module.LookupClientFactory.create_lookup_client,
+            )
+        entered, release = threading.Event(), threading.Event()
+
+        def slow_lookup(resource):
+            entered.set()
+            if not release.wait(2):
+                raise TimeoutError("test gate")
+            return 256
+
+        client.poll("running", ("running",), slow_lookup)
+        self.assertTrue(entered.wait(2))
+        client.poll("queued", ("queued",), lambda _: 512)
+        return client, events, release
+
+    def test_lookup_queue_pressure_returns_pending_and_retries_once(self):
+        client, _, release = self.pressured_lookup()
+        operation = Mock(return_value=768)
+        try:
+            self.assertIsNone(client.poll("retry", ("retry",), operation))
+            self.assertIsNone(client.poll("retry", ("retry",), operation))
+            self.assertNotIn("retry", client._jobs)
+            operation.assert_not_called()
+            release.set()
+            client._jobs["running"][1].result(2)
+            client._jobs["queued"][1].result(2)
+            self.assertIsNone(client.poll("retry", ("retry",), operation))
+            client._jobs["retry"][1].result(2)
+            self.assertEqual(client.poll("retry", ("retry",), operation), 768)
+            operation.assert_called_once()
+        finally:
+            release.set()
+            client.close()
+
+    def test_lookup_cancellation_survives_full_queue_and_precedes_new_lookup(self):
+        client, events, release = self.pressured_lookup()
+        try:
+            queued = client._jobs["queued"][1]
+            client.cancel_lookup("queued")
+            client.cancel_lookup("queued")
+            self.assertIsNone(client.poll("new", ("new",), lambda _: 768))
+            release.set()
+            client._jobs["running"][1].result(2)
+            queued.result(2)
+            client._owner._queue.join()
+            client.poll("new", ("new",), lambda _: events.append(("new", 0, False)))
+            client._owner._queue.join()
+            if "new" not in client._jobs:
+                client.poll("new", ("new",), lambda _: events.append(("new", 0, False)))
+            client._jobs["new"][1].result(2)
+            names = [entry[0] for entry in events]
+            self.assertEqual(names.count("cancel:queued"), 1)
+            self.assertLess(names.index("cancel:queued"), names.index("new"))
+        finally:
+            release.set()
+            client.close()
+
+    def test_lookup_close_retries_pending_cancellation_after_queue_timeout(self):
+        client, events, release = self.pressured_lookup()
+        try:
+            queued = client._jobs["queued"][1]
+            running = client._jobs["running"][1]
+            with self.assertRaises(queue.Full):
+                client.close(0)
+            release.set()
+            running.result(2)
+            queued.result(2)
+            client.close(2)
+            names = [entry[0] for entry in events]
+            self.assertEqual(names.count("cancel:queued"), 1)
+            self.assertEqual(names.count("cancel:running"), 1)
+            self.assertEqual(names[-1], "close")
+        finally:
+            release.set()
+            client.close(2)
+
     def test_gdn_manager_initializes_once_without_ordinary_prefetch_server(self):
         module, _ = self.lookup_module()
         manager = module.AscendGDNManager()
@@ -352,6 +440,74 @@ class GDNHostTest(HostHarness):
             ),
         )
         return self.load(RECEIVE, "gdn_host_receive", {"torch": torch}), torch
+
+    def completed_receive(self):
+        module, _ = self.receive_module()
+        obj = module.GDNAsyncReceiveMixin()
+        obj._state_primary_kv_group_idx = 0
+        obj.config = Config({"gdn_async_restore": True})
+        obj._vllm_config = NS(scheduler_config=NS(async_scheduling=True))
+        obj._init_gdn_receive()
+        obj._get_finished_sync = Mock(side_effect=lambda ids: (set(ids) or None, None))
+        meta = NS(
+            gdn_async_receives=[],
+            native_mm_finished_req_ids=set(),
+            gdn_async_forward_req_ids=set(),
+            gdn_async_finished_req_ids=set(),
+        )
+        obj._parent = NS(_get_connector_metadata=lambda: meta)
+        obj._full_ledger.begin("r")
+        obj._full_ledger.complete("r")
+        return obj, meta
+
+    def test_late_abort_after_receive_ack_is_not_a_send_completion(self):
+        for rank in (0, 1):
+            with self.subTest(rank=rank):
+                obj, meta = self.completed_receive()
+                self.assertEqual(obj._gdn_finished(set()), (None, {"r"}))
+                meta.gdn_async_finished_req_ids = {"r"}
+                obj._gdn_start_load(NS())
+                self.assertEqual(obj._gdn_finished({"r"}), (None, None))
+                self.assertEqual(obj._gdn_finished({"r"}), (None, None))
+                self.assertEqual(obj._full_receive_acks, set())
+                meta.gdn_async_finished_req_ids = set()
+                obj._gdn_start_load(NS())
+                self.assertEqual(obj._full_abort_receives, set())
+
+    def test_resumed_receive_can_report_its_later_send_completion(self):
+        obj, meta = self.completed_receive()
+        self.assertEqual(obj._gdn_finished(set()), (None, {"r"}))
+        meta.gdn_async_forward_req_ids = {"r"}
+        obj._gdn_start_load(NS())
+        self.assertEqual(obj._gdn_finished({"r"}), ({"r"}, None))
+        self.assertEqual(obj._full_receive_acks, set())
+
+    def test_abort_before_receive_ack_stays_suppressed_during_repeated_polling(self):
+        obj, meta = self.completed_receive()
+        meta.gdn_async_finished_req_ids = {"r"}
+        obj._gdn_start_load(NS())
+        self.assertEqual(obj._gdn_finished({"r"}), (None, {"r"}))
+        self.assertEqual(obj._gdn_finished({"r"}), (None, None))
+        meta.gdn_async_finished_req_ids = set()
+        obj._gdn_start_load(NS())
+        self.assertEqual(obj._full_abort_receives, set())
+
+    def test_receive_metadata_identifies_forward_and_finished_requests(self):
+        obj, _ = self.completed_receive()
+        obj._full_receives = {"pending": object()}
+        obj._full_resume_boundaries = {"finished": 256}
+        obj._build_connector_meta_sync = Mock(return_value=NS())
+        meta = obj._gdn_metadata(
+            NS(
+                num_scheduled_tokens={"resumed": 128, "pending": 0},
+                finished_req_ids={"finished"},
+            )
+        )
+        self.assertEqual(meta.gdn_async_forward_req_ids, {"resumed"})
+        self.assertEqual(meta.gdn_async_finished_req_ids, {"finished"})
+        self.assertEqual(len(meta.gdn_async_receives), 1)
+        self.assertEqual(obj._full_receives, {})
+        self.assertEqual(obj._full_resume_boundaries, {})
 
     def test_receive_worker_does_not_ack_before_transfer_finishes(self):
         for rank in (0, 1):

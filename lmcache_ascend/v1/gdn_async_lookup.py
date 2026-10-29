@@ -4,6 +4,8 @@
 # Standard
 from copy import copy
 from types import SimpleNamespace
+import queue
+import time
 
 # Third Party
 from lmcache.v1.lookup_client.factory import LookupClientFactory
@@ -34,6 +36,8 @@ class AsyncStateClient:
         self.token_database = ChunkedTokenDatabase(self.config, metadata)
         self._jobs = {}
         self._admitted = set()
+        self._submitted = set()
+        self._pending_cancels = {}
         self._owner = SerialOwner(
             lambda: create_client(self.config, metadata, None), "gdn-async-lookup"
         )
@@ -47,7 +51,14 @@ class AsyncStateClient:
             self.cancel_lookup(req_id)
             existing = None
         if existing is None:
-            self._jobs[req_id] = (signature, self._owner.submit(operation))
+            if not self._flush_cancellations():
+                return None
+            try:
+                future = self._owner.submit(operation)
+            except queue.Full:
+                return None
+            self._jobs[req_id] = (signature, future)
+            self._submitted.add(req_id)
             return None
         future = existing[1]
         if not future.done():
@@ -59,31 +70,53 @@ class AsyncStateClient:
             raise
 
     def cancel_lookup(self, req_id):
-        # First Party
-        from lmcache_ascend.v1.state_lookup import cancel_state_lookup
-
         self._jobs.pop(req_id, None)
         if req_id in self._admitted:
             # Scheduler has allocated receive targets. Worker owns cleanup via
             # receive ACK; a scheduler abort must not release its source lease
             # before receive-only metadata reaches the worker.
             return
-        # Release follows any preceding probe on the SAME owner/socket thread.
-        # Never Future.cancel(): a probe may already have acquired remote pins.
-        self._owner.submit(lambda client: cancel_state_lookup(client, req_id))
+        if req_id in self._submitted:
+            self._submitted.remove(req_id)
+            self._pending_cancels[req_id] = None
+        self._flush_cancellations()
+
+    def _flush_cancellations(self, deadline=None):
+        """Keep releases ordered after probes, even while the RPC queue is full."""
+        # First Party
+        from lmcache_ascend.v1.state_lookup import cancel_state_lookup
+
+        while self._pending_cancels:
+            req_id = next(iter(self._pending_cancels))
+            timeout = 0 if deadline is None else max(0, deadline - time.monotonic())
+            try:
+                # Never cancel a Future: its probe may already own remote pins.
+                self._owner.submit(
+                    lambda client, req_id=req_id: cancel_state_lookup(client, req_id),
+                    timeout=timeout,
+                )
+            except queue.Full:
+                if deadline is not None:
+                    raise
+                return False
+            del self._pending_cancels[req_id]
+        return True
 
     def clear_lookup_status(self, req_id):
         # Upstream calls this upon allocation to forget only the LOCAL result.
         # Remote cancellation here would destroy the selected receive lease.
         self._jobs.pop(req_id, None)
 
-    def close(self):
-        for req_id in list(self._jobs):
+    def close(self, timeout=120):
+        deadline = time.monotonic() + timeout
+        for req_id in list(self._submitted):
             self.cancel_lookup(req_id)
-        self._owner.close()
+        self._flush_cancellations(deadline)
+        self._owner.close(max(0, deadline - time.monotonic()))
 
     def mark_admitted(self, req_id):
         self._jobs.pop(req_id, None)
+        self._submitted.discard(req_id)
         self._admitted.add(req_id)
 
     def received(self, req_ids):

@@ -33,6 +33,9 @@ source integration and device measurements.
    The actual RPC client, token database and transport are owned by one thread.
    A pending lookup is not a cache miss. Cancellation is serialized on that
    same thread.
+   Queue pressure also returns pending, without blocking the scheduler. Deferred
+   cancellations are retried before new probes so a full queue cannot lose a
+   remote lease release. Shutdown drains those releases within its timeout.
 2. On external admission, construct receive-only metadata from the real allocated
    block tables. Receiving requests have no forward tokens in that step.
 3. A worker-owned load queue obtains the selected Attention objects and recurrent
@@ -43,6 +46,9 @@ source integration and device measurements.
    admission to the next forward.
 5. Send and receive acknowledgements are separate. Native multimodal requests
    remain outside external GDN cache transfers throughout their lifecycle.
+   Workers retain emitted receive ACK identities until scheduler metadata either
+   admits a forward or reports a finish. A late abort cannot generate a second,
+   sending ACK for a request already released by its receive ACK.
 
 A receive retains ownership through cancellation. Preemption cannot recycle its
 targets while the ledger owns them. Shutdown drains the worker and refuses to
@@ -52,8 +58,8 @@ not mean every H2D and D2H can overlap.
 
 ## Validation
 
-This implementation has 30 passing source-bound host regressions
-(9 multimodal plus 21 async), Python compilation and Ruff checks. Run them with:
+Run the source-bound host regressions, including queue-pressure and late-abort
+ordering coverage, with:
 
 ```bash
 python -m unittest discover -s tests/host -v

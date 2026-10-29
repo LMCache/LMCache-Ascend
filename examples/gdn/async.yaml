@@ -1,0 +1,15 @@
+local_cpu: true
+max_local_cpu_size: 32
+chunk_size: 256
+store_async: true
+store_async_max_queue_size: 8
+enable_async_loading: true
+use_layerwise: false
+enable_blending: false
+save_decode_cache: false
+save_unfull_chunk: false
+min_retrieve_tokens: 0
+extra_config:
+  gdn_async_store: true
+  gdn_async_restore: true
+  gdn_async_staging_mib: 256

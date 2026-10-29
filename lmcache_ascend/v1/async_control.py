@@ -21,13 +21,13 @@ class SerialOwner:
         self._thread = threading.Thread(target=self._run, name=name, daemon=True)
         self._thread.start()
 
-    def submit(self, operation):
+    def submit(self, operation, *, timeout=0):
+        """Enqueue work; only shutdown callers may wait for queue capacity."""
         future = Future()
         with self._guard:
             if self._closed:
                 raise RuntimeError("Owner already closed")
-            # Never block the scheduler on RPC or queue capacity.
-            self._queue.put_nowait((operation, future))
+            self._queue.put((operation, future), timeout=timeout)
         return future
 
     def _run(self):
