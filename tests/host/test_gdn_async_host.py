@@ -14,7 +14,7 @@ import unittest
 from _gdn_source import package, source_module
 
 CONFIG = "lmcache_ascend/v1/gdn_async_config.py"
-CONTROL = "lmcache_ascend/v1/async_control.py"
+CONTROL = "lmcache_ascend/v1/gdn_async_control.py"
 LOOKUP = "lmcache_ascend/v1/gdn_async_lookup.py"
 RECEIVE = "lmcache_ascend/integration/vllm/gdn_async_receive.py"
 STORE = "lmcache_ascend/v1/gdn_async_store.py"
@@ -43,7 +43,7 @@ class HostHarness(unittest.TestCase):
             source_module(CONFIG, "lmcache_ascend.v1.gdn_async_config")
         )
         self.control = self.stack.enter_context(
-            source_module(CONTROL, "lmcache_ascend.v1.async_control")
+            source_module(CONTROL, "lmcache_ascend.v1.gdn_async_control")
         )
         self.log = Mock()
         self.deps = {
@@ -55,7 +55,7 @@ class HostHarness(unittest.TestCase):
             "lmcache_ascend": package("lmcache_ascend"),
             "lmcache_ascend.v1": package("lmcache_ascend.v1"),
             "lmcache_ascend.v1.gdn_async_config": self.config_module,
-            "lmcache_ascend.v1.async_control": self.control,
+            "lmcache_ascend.v1.gdn_async_control": self.control,
         }
 
     def load(self, path, name, deps=None):

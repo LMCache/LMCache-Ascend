@@ -12,8 +12,8 @@ from lmcache.v1.lookup_client.factory import LookupClientFactory
 from lmcache.v1.manager import LMCacheManager
 
 # First Party
-from lmcache_ascend.v1.async_control import SerialOwner
 from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
+from lmcache_ascend.v1.gdn_async_control import SerialOwner
 
 
 def async_gdn(config):

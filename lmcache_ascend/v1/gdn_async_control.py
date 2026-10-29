@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Host-only async ownership primitives; no torch/NPU imports."""
+"""Host-only GDN async ownership primitives; no torch/NPU imports."""
 
 # Standard
 from concurrent.futures import Future

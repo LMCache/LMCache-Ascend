@@ -18,8 +18,8 @@ from lmcache.logging import init_logger
 import torch
 
 # First Party
-from lmcache_ascend.v1.async_control import CompletionLedger
 from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
+from lmcache_ascend.v1.gdn_async_control import CompletionLedger
 
 logger = init_logger(__name__)
 
