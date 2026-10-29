@@ -2,10 +2,12 @@
 
 ## Status
 
-The evaluation client and its host regressions are provided here. The new
-real-device synchronous/asynchronous answer comparison has **not yet been run**.
-Populate the result record below after running both configurations. Historical
-latency measurements and host protocol tests are separate evidence.
+The author completed the synchronous/asynchronous comparison on the local
+Ascend deployment on 2026-10-29, using plugin commit
+`887973d2e3d8e62d8bf1ad47824430eb79ae8a76`. Both configurations answered all
+21 measured passkey questions correctly, and all nine waves per configuration
+passed CPU-restore verification. The supplied terminal summary reports
+`all_correct=true` and `cpu_restore_verified=true`.
 
 ## Workload and acceptance criteria
 
@@ -97,18 +99,45 @@ If CPU hit verification fails, inspect the JSON and both TP worker logs before
 retrying. Confirm store completion, checkpoint availability and sufficient CPU
 capacity. Do not bypass the path checks or substitute native NPU hits.
 
-## Result record (pending device execution)
+## Local device result: 2026-10-29
 
 | Item | Synchronous | Asynchronous |
 | --- | --- | --- |
-| Plugin commit / actual module path | Pending | Pending |
-| Model/tokenizer, Ascend toolkit, vLLM and LMCache versions | Pending | Pending |
-| Startup command and config hash | Pending | Pending |
-| Verified waves / requests | Pending | Pending |
-| Passkey accuracy at each concurrency/depth | Pending | Pending |
-| External hits, native hits and preemptions | Pending | Pending |
-| Both TP ranks' receive/fence evidence | Pending | Pending |
-| JSON results and server logs | Pending | Pending |
+| Plugin package | `887973d2e3d8e62d8bf1ad47824430eb79ae8a76` | Same |
+| Requested context length | 32,768 tokens | Same |
+| Suite ID | `gdn-review-20261029-final` | Same |
+| Completed CPU-restore waves | 9/9 | 9/9 |
+| Correct measured answers | 21/21 | 21/21 |
+| CPU-cached tokens per measured request | 30,720 | 30,720 |
+| Total external-hit counter increment | 645,120 | 645,120 |
+| Native prefix-hit counter increment | 0 | 0 |
+| Preemption counter increment | 0 | 0 |
+
+The local deployment uses the Qwen3.8-27B model served under the alias
+`qwen3-30b-a3b-thinking`, with two Ascend 910B3 NPUs, TP=2, BF16,
+vLLM 0.23 RC, LMCache core 0.4.5 and CANN 9.0.1. Both modes use the
+same reviewed source package and the paired configurations above.
+
+| Concurrency | Needle positions | Synchronous correct | Asynchronous correct |
+| --- | --- | --- | --- |
+| 1 | 10%, 50%, 90% | 3/3 | 3/3 |
+| 2 | 10%, 50%, 90% | 6/6 | 6/6 |
+| 4 | 10%, 50%, 90% | 12/12 | 12/12 |
+
+Every wave reports `restore_verified=true`. The external-hit increment equals
+the sum of response cached tokens, while native hits and preemptions remain
+zero. Every needle lies inside the restored prefix; the latest needle ends
+at token 29,585, before the 30,720-token restore boundary. The final comparison
+also checks matching case IDs, prompt hashes and expected answers across modes.
+
+Configuration SHA256 values recorded by the client:
+
+- Sync: `dad6a00e4cac26e072b6abbecfbfe6e97ed04ebad0590a1de0b0e7505d4070fc`
+- Async: `f73b77b231e98f8327743213c20972d4de969a10c5f35b205824aa074264bef7`
+
+The reports are saved as `sync-correctness.json` and `async-correctness.json`
+on the author's device host. These results describe the focused passkey
+regression above; they do not measure latency or broad model-quality scores.
 
 Host regressions for the evaluation client's generation, path checks, reset
 behavior and comparison can run without an NPU:

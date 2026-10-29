@@ -128,9 +128,13 @@ ordering, bounded lookup queue pressure, deferred cancellation, and retryable
 shutdown. The client tests use HTTP/device doubles and are not model evaluations.
 
 A concurrent long-context passkey evaluation is provided in
-[gdn_async_correctness.md](gdn_async_correctness.md). The real-device sync/async
-correctness comparison is pending execution; the earlier latency measurements
-do not establish answer correctness under concurrent CPU restore.
+[gdn_async_correctness.md](gdn_async_correctness.md). The author completed the
+local device comparison on 2026-10-29 using plugin commit `887973d`: both modes
+answered all 21 measured questions correctly across concurrency 1, 2 and 4 and
+needle depths 10%, 50% and 90%. All nine waves per mode verified CPU restore of
+30,720 tokens per request, with zero native prefix-hit and preemption increments.
+Every needle lies inside the restored prefix. The final comparison checks
+matching inputs and reports `all_correct=true` and `cpu_restore_verified=true`.
 
 ## Source integration
 
