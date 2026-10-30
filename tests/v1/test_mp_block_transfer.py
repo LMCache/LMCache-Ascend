@@ -19,10 +19,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.v1.shape_desc import (
-    attach_tuple_block_strides,
-    attach_tuple_planes,
-)
 import lmcache_ascend.c_ops as lmc_ops
 
 requires_npu = pytest.mark.skipif(
@@ -75,9 +71,10 @@ def _shape_desc(
     desc.block_stride_elems = block_stride_elems
     desc.dtype = dtype
     if plane_slot_bytes is not None:
-        attach_tuple_planes(desc, plane_slot_bytes)
+        desc.num_planes = len(plane_slot_bytes)
+        desc.plane_slot_bytes = plane_slot_bytes
     if plane_block_stride_bytes is not None:
-        attach_tuple_block_strides(desc, plane_block_stride_bytes)
+        desc.plane_block_stride_bytes = plane_block_stride_bytes
     return desc
 
 
@@ -1197,8 +1194,10 @@ def test_format13_rejects_multiple_planes() -> None:
     desc = spec["desc"]
     payload = int(desc.nh) * int(desc.hs) * int(desc.element_size)
     block_stride = int(desc.bs) * payload
-    attach_tuple_planes(desc, (payload, payload))
-    attach_tuple_block_strides(desc, (block_stride, block_stride))
+    # Manually attach two planes to a format-13 desc: the kernel must reject it.
+    desc.num_planes = 2
+    desc.plane_slot_bytes = (payload, payload)
+    desc.plane_block_stride_bytes = (block_stride, block_stride)
     obj = torch.zeros(
         _obj_shape(spec, spec["bs"]), dtype=spec["obj_dtype"], device=device
     )
