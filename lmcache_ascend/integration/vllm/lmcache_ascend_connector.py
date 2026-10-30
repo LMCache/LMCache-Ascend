@@ -64,3 +64,21 @@ class LMCacheAscendConnector(LMCacheConnectorV1, SupportsHMA):
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
         return self._lmcache_engine.request_finished_all_groups(request, block_ids)
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        impl = self._lmcache_engine
+        if getattr(impl, "_gdn_restore_enabled", False):
+            external = impl.get_num_new_matched_tokens(request, num_computed_tokens)
+            # vLLM must wait for receive completion before forwarding the suffix.
+            return external, external is not None and external > 0
+        return super().get_num_new_matched_tokens(request, num_computed_tokens)
+
+    def update_connector_output(self, output):
+        result = super().update_connector_output(output)
+        # First Party
+        from lmcache_ascend.v1.gdn_async_lookup import AsyncStateClient
+
+        client = self._lmcache_engine.lookup_client
+        if isinstance(client, AsyncStateClient):
+            client.received(output.finished_recving or ())
+        return result

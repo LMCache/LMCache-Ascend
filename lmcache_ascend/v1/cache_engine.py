@@ -27,6 +27,12 @@ from lmcache.v1.token_database import TokenDatabase
 import torch
 
 # First Party
+from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
+from lmcache_ascend.v1.gdn_async_store import (
+    GDNAsyncStoreMixin,
+    check_failure,
+    wait_pending,
+)
 from lmcache_ascend.v1.memory_management import is_multi_group_memory_obj
 from lmcache_ascend.v1.state_cache import StateCache
 from lmcache_ascend.v1.storage_backend.pd.handoff import (
@@ -74,7 +80,7 @@ class ThreadSafeEventList:
         return out
 
 
-class AscendLMCacheEngine(LMCacheEngine):
+class AscendLMCacheEngine(GDNAsyncStoreMixin, LMCacheEngine):
     """Ascend NPU variant of ``LMCacheEngine`` with an async store path."""
 
     def __init__(
@@ -125,6 +131,9 @@ class AscendLMCacheEngine(LMCacheEngine):
         if self.kv_events_enabled and self.is_store_async:
             self.kv_events = ThreadSafeEventList()
 
+        self._init_gdn_async_store()
+        self._gdn_transfer_lock = threading.RLock()
+
     def _is_pd_receiver(self) -> bool:
         config = getattr(self, "config", None)
         return bool(
@@ -173,6 +182,8 @@ class AscendLMCacheEngine(LMCacheEngine):
         return handoff_id
 
     def _ensure_store_worker(self) -> None:
+        if getattr(self, "_gdn_async_enabled", False):
+            return self._gdn_ensure_store_worker()
         if self._store_queue is not None:
             return
         self._store_queue = queue.Queue(maxsize=self._store_queue_maxsize)
@@ -839,6 +850,8 @@ class AscendLMCacheEngine(LMCacheEngine):
         return ret_mask
 
     def _store_worker_loop(self) -> None:
+        if getattr(self, "_gdn_async_enabled", False):
+            return self._gdn_store_worker_loop()
         if not self.is_store_async:
             return
         if self._device_id is not None:
@@ -880,7 +893,17 @@ class AscendLMCacheEngine(LMCacheEngine):
                 self._store_queue.task_done()
 
     @torch.inference_mode()
-    def _run_store_pipeline(
+    def _run_store_pipeline(self, *args, **kwargs):
+        if gdn_async_restore_enabled(self.config):
+            # Shared connector scratch cannot be reused until D2H is fenced.
+            with self._gdn_transfer_lock:
+                try:
+                    return self._run_store_pipeline_impl(*args, **kwargs)
+                finally:
+                    self.gpu_connector.store_stream.synchronize()
+        return self._run_store_pipeline_impl(*args, **kwargs)
+
+    def _run_store_pipeline_impl(
         self,
         req_id: str,
         tokens: Optional[Union[torch.Tensor, list]],
@@ -1057,6 +1080,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         )
 
     def get_finished_stores(self, finished_req_ids: set) -> set:
+        check_failure(self)
         if not self.is_store_async:
             return None
         result: set = set()
@@ -1094,6 +1118,8 @@ class AscendLMCacheEngine(LMCacheEngine):
         if not self.is_store_async:
             return set()
 
+        if getattr(self, "_gdn_async_enabled", False):
+            return wait_pending(self, req_ids)
         req_id_set = set(req_ids)
         if not req_id_set:
             return set()
@@ -1149,6 +1175,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         pin: bool = False,
         request_configs: Optional[dict] = None,
     ) -> int:
+        check_failure(self)
         handoff_id, request_configs = split_pd_handoff_request_config(request_configs)
         # Serialize against the store-worker thread's
         with self._engine_state_lock:
@@ -1197,6 +1224,16 @@ class AscendLMCacheEngine(LMCacheEngine):
                     reset_current_pd_lookup_id(token)
 
     def lookup_unpin(self, lookup_id: str) -> None:
+        check_failure(self)
+        impl = getattr(self, "_gdn_full_impl", None)
+        if impl is not None:
+            if lookup_id in impl._full_ledger.owned():
+                return
+            if (
+                lookup_id not in getattr(self, "_state_lookup_selections", {})
+                and lookup_id not in self.lookup_pins
+            ):
+                return
         with self._engine_state_lock:
             # First Party
             from lmcache_ascend.v1.state_lookup import release_engine_selection
@@ -1245,6 +1282,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         after transfer completion, including errors. A missing/expired selection
         is a restore failure, never permission to invent a new recovery boundary.
         """
+        check_failure(self)
         with self._engine_state_lock:
             selection = getattr(self, "_state_lookup_selections", {}).get(lookup_id)
             if selection is None or selection.boundary != boundary:
@@ -1256,7 +1294,28 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     @torch.inference_mode()
     def store_state(self, execution, layouts, kv_caches, ordering_event):
-        """Synchronously save a planned endpoint after the worker's forward gate."""
+        """Save a planned endpoint after the worker's forward gate."""
+        check_failure(self)
+        if getattr(self, "_gdn_async_enabled", False):
+            return self._gdn_store_state(execution, layouts, kv_caches, ordering_event)
+        return self._store_state_sync(execution, layouts, kv_caches, ordering_event)
+
+    @torch.inference_mode()
+    def _store_state_sync(self, execution, layouts, kv_caches, ordering_event):
+        if gdn_async_restore_enabled(self.config):
+            with self._gdn_transfer_lock:
+                try:
+                    return self._store_state_sync_impl(
+                        execution, layouts, kv_caches, ordering_event
+                    )
+                finally:
+                    self.gpu_connector.store_stream.synchronize()
+        return self._store_state_sync_impl(
+            execution, layouts, kv_caches, ordering_event
+        )
+
+    def _store_state_sync_impl(self, execution, layouts, kv_caches, ordering_event):
+        """The managed synchronous path, also used by the snapshot worker."""
         if self._is_passive() or not self.is_healthy() or self.is_frozen():
             return
         if self.store_location not in (None, "LocalCPUBackend", "LocalDiskBackend"):
@@ -1303,6 +1362,7 @@ class AscendLMCacheEngine(LMCacheEngine):
         :raises: ValueError if the number of Falses in the mask is not a
             multiple of the chunk size.
         """
+        check_failure(self)
         # Handoff metadata is control-plane state, not a cache namespace.
         self._extract_pd_handoff_from_kwargs(kwargs)
 
@@ -1387,6 +1447,8 @@ class AscendLMCacheEngine(LMCacheEngine):
 
     def close(self) -> None:
         """Stop the bg worker gracefully, then close the base engine."""
+        if getattr(self, "_gdn_async_enabled", False):
+            self._gdn_close_store()
         # Push poison pill first so any in-flight work drains before
         # ``storage_manager.close()`` runs inside ``super().close()``.
         if self._store_queue is not None:

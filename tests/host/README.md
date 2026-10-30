@@ -23,6 +23,11 @@ Attention/state store accounting, transfer/cleanup ordering, receive ACKs and
 failure quarantine. Device operations in these tests are doubles: passing does
 not prove DMA, NPU numerical correctness or full plugin bootstrap compatibility.
 
+`test_gdn_correctness_host.py` verifies the standalone evaluation client's
+generation, CPU-hit accounting, non-clearing reset sequence and report comparison.
+Its HTTP responses are doubles. Run the actual concurrent model evaluation using
+the instructions in `docs/gdn/gdn_async_correctness.md`.
+
 The ordinary `tests/v1/test_state_integration.py` suite also contains the
 multimodal bypass expectation. Run it separately in the repository's normal
 dependency environment; the standalone host run is not a claim that the entire

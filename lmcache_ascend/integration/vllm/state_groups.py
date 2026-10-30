@@ -18,6 +18,10 @@ from lmcache_ascend.integration.vllm.skip_state_groups import (
     parse_skip_state_policy_from_env,
     should_skip_layer,
 )
+from lmcache_ascend.v1.gdn_async_config import (
+    gdn_async_restore_enabled,
+    gdn_async_store_enabled,
+)
 from lmcache_ascend.v1.state_layout import StateGroupLayout, build_state_group_layout
 
 
@@ -141,7 +145,29 @@ def select_state_primary(kv_cache_config: Any) -> int | None:
 
 
 def validate_state_config(config: Any, vllm_config: Any) -> None:
-    """The first hybrid path uses synchronous all-rank text/TP CPU/disk caching."""
+    """Validate the supported all-rank hybrid cache modes."""
+    async_restore = gdn_async_restore_enabled(config)
+    async_store = gdn_async_store_enabled(config)
+    if async_restore and not (
+        async_store
+        and config.store_async
+        and config.enable_async_loading
+        and vllm_config.scheduler_config.async_scheduling
+    ):
+        raise ValueError(
+            "gdn_async_restore requires async store, loading and scheduling"
+        )
+    if async_store:
+        if not config.store_async or not 1 <= config.store_async_max_queue_size <= 32:
+            raise ValueError("gdn_async_store requires a bounded async store queue")
+        if not config.local_cpu or config.local_disk:
+            raise ValueError("gdn_async_store supports the local CPU tier only")
+        if config.store_location not in (None, "LocalCPUBackend"):
+            raise ValueError("gdn_async_store requires local CPU stores")
+        if config.retrieve_locations is not None and set(config.retrieve_locations) != {
+            "LocalCPUBackend"
+        }:
+            raise ValueError("gdn_async_store requires local CPU retrieval")
     speculative = vllm_config.speculative_config
     if speculative is not None:
         # vLLM normalizes the CLI's qwen3_5_mtp method to "mtp". Restrict
@@ -157,7 +183,7 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
             raise ValueError("GDN MTP requires Qwen3.5 target and draft models")
         if config.save_decode_cache:
             raise ValueError("GDN MTP prefill reuse requires save_decode_cache=false")
-        if vllm_config.scheduler_config.async_scheduling:
+        if vllm_config.scheduler_config.async_scheduling and not async_restore:
             raise ValueError("GDN MTP requires synchronous scheduling")
         # The runner loads before model forward and finalizes stores after draft
         # forward, outside model graph replay. Eager flags need not be restricted.
@@ -182,6 +208,10 @@ def validate_state_config(config: Any, vllm_config: Any) -> None:
         "gds_path",
         "maru_path",
     ):
+        if field == "store_async" and async_store:
+            continue
+        if field == "enable_async_loading" and async_restore:
+            continue
         if getattr(config, field):
             raise ValueError(f"GDN checkpoints do not support {field}")
     if config.hit_miss_ratio is not None:

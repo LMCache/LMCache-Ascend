@@ -256,6 +256,12 @@ ktc = KVTransferConfig(
 )
 ```
 
+## GDN hybrid caching
+
+For the in-process GDN integration, see the [GDN documentation](docs/gdn/README.md)
+for native multimodal bypass, asynchronous caching, deployment validation and
+the concurrent CPU-restore correctness evaluation.
+
 ## FAQ
 
 1. Why do I have HostRegisterError ? 

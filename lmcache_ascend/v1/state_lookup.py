@@ -10,6 +10,7 @@ import threading
 from lmcache.logging import init_logger
 
 # First Party
+from lmcache_ascend.v1.gdn_async_config import gdn_async_restore_enabled
 from lmcache_ascend.v1.state_checkpoint import CheckpointRef, state_checkpoint_key
 from lmcache_ascend.v1.state_memory import adopt_state_checkpoint
 
@@ -54,6 +55,11 @@ def cancel_state_lookup(client, lookup_id):
     Unreachable workers expire their selection lease. A subsequent probe replaces
     any previous selection even when cancellation could not reach that worker.
     """
+    # First Party
+    from lmcache_ascend.v1.gdn_async_lookup import AsyncStateClient
+
+    if isinstance(client, AsyncStateClient):
+        return client.cancel_lookup(lookup_id)
     try:
         _exchange(client, [], [], lookup_id, None, {"op": "release"})
     finally:
@@ -209,6 +215,9 @@ def local_candidate(
 
 
 def release_engine_selection(engine, lookup_id):
+    impl = getattr(engine, "_gdn_full_impl", None)
+    if impl is not None and lookup_id in impl._full_ledger.owned():
+        return
     selections = getattr(engine, "_state_lookup_selections", {})
     selection = selections.pop(lookup_id, None)
     if selection is not None:
@@ -231,7 +240,10 @@ def dispatch_state_lookup(engine, lookup_id, operation, configs, **inputs):
     if (
         engine.use_layerwise
         or engine.config.enable_blending
-        or engine.config.enable_async_loading
+        or (
+            engine.config.enable_async_loading
+            and not gdn_async_restore_enabled(engine.config)
+        )
         or engine.config.pin_timeout_sec <= 0
     ):
         raise ValueError("Unsupported hybrid lookup configuration")
