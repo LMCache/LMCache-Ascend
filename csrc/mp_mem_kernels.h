@@ -40,9 +40,9 @@ enum class EngineKVFormat : int {
 };
 
 // Compile-time shape descriptor, field-for-field aligned with upstream
-// PageBufferShapeDesc (LMCache csrc/mp_mem_kernels.cuh:11). block_stride_elems
-// honours engine-side dim-0 padding when > 0, else falls back to the tight
-// bs * nh * hs stride.
+// PageBufferShapeDesc in LMCache csrc/kv_transfer_plan_types.h.
+// block_stride_elems honours engine-side dim-0 padding when > 0, else
+// falls back to the tight bs * nh * hs stride.
 struct PageBufferShapeDesc {
   int kv_size;
   int nl;

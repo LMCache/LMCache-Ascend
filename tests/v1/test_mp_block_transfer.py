@@ -19,10 +19,6 @@ import pytest
 import torch
 
 # First Party
-from lmcache_ascend.v1.shape_desc import (
-    attach_tuple_block_strides,
-    attach_tuple_planes,
-)
 import lmcache_ascend.c_ops as lmc_ops
 
 requires_npu = pytest.mark.skipif(
@@ -68,9 +64,10 @@ def _shape_desc(
     desc.block_stride_elems = block_stride_elems
     desc.dtype = dtype
     if plane_slot_bytes is not None:
-        attach_tuple_planes(desc, plane_slot_bytes)
+        desc.num_planes = len(plane_slot_bytes)
+        desc.plane_slot_bytes = plane_slot_bytes
     if plane_block_stride_bytes is not None:
-        attach_tuple_block_strides(desc, plane_block_stride_bytes)
+        desc.plane_block_stride_bytes = plane_block_stride_bytes
     return desc
 
 
