@@ -11,7 +11,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict, cast
 
 # Third Party
 import lmcache.lmcache_native as native
@@ -29,6 +29,13 @@ requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
     reason="Ascend NPU required",
 )
+
+
+class _FactoryShapeDesc(Protocol):
+    num_planes: int
+    plane_slot_bytes: Sequence[int]
+    plane_block_stride_bytes: Sequence[int]
+
 
 KG0_FMT = native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS
 NH_CS_FMT = native.EngineKVFormat.NL_X_NB_BS_NH_CS
@@ -72,6 +79,33 @@ def _shape_desc(
     if plane_block_stride_bytes is not None:
         attach_tuple_block_strides(desc, plane_block_stride_bytes)
     return desc
+
+
+def _factory_shape_desc(
+    kv_caches: Sequence[Any],
+    engine_kv_format: object,
+    *,
+    nl: int,
+    nb: int,
+    bs: int,
+    block_stride_elems: int | None = None,
+) -> _FactoryShapeDesc:
+    """Build a descriptor through upstream's production factory."""
+    # Third Party
+    from lmcache.v1.gpu_connector.utils import make_page_buffer_shape_desc
+
+    return cast(
+        _FactoryShapeDesc,
+        make_page_buffer_shape_desc(
+            kv_caches,
+            engine_kv_format,
+            layer_idx=0,
+            num_layers_in_group=nl,
+            num_blocks=nb,
+            block_size=bs,
+            block_stride_elems=block_stride_elems,
+        ),
+    )
 
 
 def _pointer_table(layers: Sequence[Any], device: torch.device) -> torch.Tensor:
@@ -684,6 +718,46 @@ def _build(
         )
         _assert_pointer_table_contract(spec)
         return spec
+    if layout in ("nh_cs_factory", "nh_cs_factory_padded"):
+        padded_layout = layout == "nh_cs_factory_padded"
+        nl, nb, bs, nh, hs = nl or 2, nb or 4, bs or 2, 8, 64
+        dtype = torch.float32
+        row_elems = nh * hs
+        block_stride = bs * row_elems + (8 if padded_layout else 0)
+        padded_pools: list[torch.Tensor] = []
+        pools: list[torch.Tensor] | None = padded_pools if padded_layout else None
+        factory_layers: list[torch.Tensor] = []
+        for layer_idx in range(nl):
+            if padded_layout:
+                pool = torch.full((nb, block_stride), -1.0, dtype=dtype, device=device)
+                layer = pool[:, : bs * row_elems].view(nb, bs, nh, hs)
+                padded_pools.append(pool)
+            else:
+                layer = torch.empty((nb, bs, nh, hs), dtype=dtype, device=device)
+            layer.copy_(_fill_arange((nb, bs, nh, hs), dtype, device, 1000 * layer_idx))
+            factory_layers.append(layer)
+        factory_desc = _factory_shape_desc(
+            factory_layers,
+            NH_CS_FMT,
+            nl=nl,
+            nb=nb,
+            bs=bs,
+            block_stride_elems=block_stride if padded_layout else None,
+        )
+        return dict(
+            fmt=NH_CS_FMT,
+            desc=factory_desc,
+            layers=factory_layers,
+            pools=pools,
+            table=_pointer_table(factory_layers, device),
+            obj_dtype=dtype,
+            obj_width=row_elems,
+            kv_leading=False,
+            packed=False,
+            bs=bs,
+            nl=nl,
+            pad_width=bs * row_elems if padded_layout else None,
+        )
     if layout in ("nh_cs", "nh_cs_fmt17", "nh_cs_padded"):
         padded_layout = layout == "nh_cs_padded" or padded
         nl = nl or 2
@@ -692,7 +766,7 @@ def _build(
             dtype = torch.float32
             pools, layers = [], []
             for i in range(nl):
-                pool = torch.full((nb, stride), 999.0, dtype=dtype, device=device)
+                pool = torch.full((nb, stride), -1.0, dtype=dtype, device=device)
                 view = pool[:, : bs * hs].view(nb, bs, 1, hs)
                 view.copy_(_fill_arange((nb, bs, 1, hs), dtype, device, 1000 * i))
                 pools.append(pool)
@@ -706,6 +780,8 @@ def _build(
                 hs=hs,
                 dtype=dtype,
                 block_stride_elems=stride,
+                plane_slot_bytes=(hs * 4,),
+                plane_block_stride_bytes=(stride * 4,),
             )
             return dict(
                 fmt=NH_CS_FMT,
@@ -851,6 +927,31 @@ def _roundtrip_cases() -> list[Any]:
         ("interleaved_attn_tp1", "npu", True, 0, 2, 1, [0, 2], "interleaved-attn-tp1"),
         ("kg0", "npu", False, 1, 2, 1, [1, 3], "kg0-npu-skip"),
         ("kg0", "npu", False, 0, 21, 2, list(range(64)), "kg0-npu-2chunk"),
+        # Format 13 is a single fused-K/V [NB, BS, NH, CS] plane.  Exercise
+        # both dense blocks and a dim-0-padded view with non-monotonic engine
+        # block IDs, so a tight-stride implementation cannot accidentally pass.
+        ("nh_cs", "npu", False, 0, 2, 1, [3, 1], "fmt13-tight"),
+        ("nh_cs_padded", "npu", False, 0, 2, 1, [3, 1], "fmt13-padded"),
+        (
+            "nh_cs_factory",
+            "npu",
+            False,
+            0,
+            2,
+            1,
+            [3, 1],
+            "fmt13-factory-tight-nh8",
+        ),
+        (
+            "nh_cs_factory_padded",
+            "npu",
+            False,
+            0,
+            2,
+            1,
+            [3, 1],
+            "fmt13-factory-padded-nh8",
+        ),
         ("nh_cs_fmt17", "npu", False, 0, 2, 1, [0], "nh_cs-fmt17"),
         ("kg0_indep", "npu", False, 0, 2, 1, [0], "kg0-indep-mini"),
         ("kg0_bs16", "npu", False, 0, 2, 1, [0], "kg0-bs16-chunk16"),
@@ -1004,12 +1105,12 @@ def test_native_matches_reference(
     if direction_d2h:
         assert torch.equal(obj_a.cpu(), obj_b.cpu())
         if a["pad_width"] is not None:
-            assert not torch.any(obj_a.cpu() == 999.0)
+            assert not torch.any(obj_a.cpu() == -1.0)
     else:
         _assert_engine_equal(a["layers"], b["layers"])
     if a["pools"] is not None and a["pad_width"] is not None:
         for pool in a["pools"]:
-            assert torch.all(pool[:, a["pad_width"] :] == 999.0)
+            assert torch.all(pool[:, a["pad_width"] :] == -1.0)
 
 
 @requires_npu
@@ -1055,6 +1156,86 @@ def test_fused_kv_rejects_one_pointer_per_plane() -> None:
             spec["bs"],
             spec["fmt"],
             0,
+        )
+
+
+@requires_npu
+def test_factory_plane_geometry_contract() -> None:
+    device = torch.device("npu:0")
+    fmt13 = _build("nh_cs_factory", device, nl=2, nb=4, bs=2)
+    desc13 = fmt13["desc"]
+    assert desc13.num_planes == 0
+    assert desc13.nh == 8
+    assert desc13.block_stride_elems == 0
+    assert tuple(desc13.plane_slot_bytes) == ()
+    assert tuple(desc13.plane_block_stride_bytes) == ()
+
+    padded13 = _build("nh_cs_factory_padded", device, nl=2, nb=4, bs=2)
+    padded_desc13 = padded13["desc"]
+    assert padded_desc13.num_planes == 0
+    assert padded_desc13.nh == 8
+    assert padded_desc13.block_stride_elems == padded13["layers"][0].stride(0)
+
+    for layout, expected_planes in (("sep_kv", 2), ("mla_bf16", 2)):
+        spec = _build(layout, device, nl=2, nb=4)
+        desc = _factory_shape_desc(
+            spec["layers"],
+            spec["fmt"],
+            nl=spec["nl"],
+            nb=4,
+            bs=spec["bs"],
+        )
+        assert desc.num_planes == expected_planes
+        assert len(desc.plane_slot_bytes) == expected_planes
+        assert len(desc.plane_block_stride_bytes) == expected_planes
+
+
+@requires_npu
+def test_format13_rejects_multiple_planes() -> None:
+    device = torch.device("npu:0")
+    spec = _build("nh_cs_factory", device, nl=2, nb=4, bs=2)
+    desc = spec["desc"]
+    payload = int(desc.nh) * int(desc.hs) * int(desc.element_size)
+    block_stride = int(desc.bs) * payload
+    attach_tuple_planes(desc, (payload, payload))
+    attach_tuple_block_strides(desc, (block_stride, block_stride))
+    obj = torch.zeros(
+        _obj_shape(spec, spec["bs"]), dtype=spec["obj_dtype"], device=device
+    )
+    ids = torch.tensor([0], dtype=torch.int64, device=device)
+
+    with pytest.raises(RuntimeError, match="format 13 requires exactly 1"):
+        _launch(
+            spec,
+            spec["table"],
+            [int(obj.data_ptr())],
+            ids,
+            device,
+            D2H,
+            spec["bs"],
+        )
+
+
+@requires_npu
+@pytest.mark.parametrize("layout", ["sep_kv", "nh_cs_fmt17"], ids=["fmt16", "fmt17"])
+def test_tuple_formats_reject_unfilled_plane_geometry(layout: str) -> None:
+    device = torch.device("npu:0")
+    spec = _build(layout, device, nl=2, nb=4)
+    spec["desc"].num_planes = 0
+    obj = torch.zeros(
+        _obj_shape(spec, spec["bs"]), dtype=spec["obj_dtype"], device=device
+    )
+    ids = torch.tensor([0], dtype=torch.int64, device=device)
+
+    with pytest.raises(RuntimeError, match="num_planes must be in"):
+        _launch(
+            spec,
+            spec["table"],
+            [int(obj.data_ptr())],
+            ids,
+            device,
+            D2H,
+            spec["bs"],
         )
 
 
