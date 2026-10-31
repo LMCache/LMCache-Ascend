@@ -11,7 +11,7 @@ from __future__ import annotations
 # Standard
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from typing import Any, TypedDict
+from typing import Any, Protocol, TypedDict, cast
 
 # Third Party
 import lmcache.lmcache_native as native
@@ -29,6 +29,13 @@ requires_npu = pytest.mark.skipif(
     not (hasattr(torch, "npu") and torch.npu.is_available()),
     reason="Ascend NPU required",
 )
+
+
+class _FactoryShapeDesc(Protocol):
+    num_planes: int
+    plane_slot_bytes: Sequence[int]
+    plane_block_stride_bytes: Sequence[int]
+
 
 KG0_FMT = native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS
 NH_CS_FMT = native.EngineKVFormat.NL_X_NB_BS_NH_CS
@@ -82,19 +89,22 @@ def _factory_shape_desc(
     nb: int,
     bs: int,
     block_stride_elems: int | None = None,
-) -> object:
+) -> _FactoryShapeDesc:
     """Build a descriptor through upstream's production factory."""
     # Third Party
     from lmcache.v1.gpu_connector.utils import make_page_buffer_shape_desc
 
-    return make_page_buffer_shape_desc(
-        kv_caches,
-        engine_kv_format,
-        layer_idx=0,
-        num_layers_in_group=nl,
-        num_blocks=nb,
-        block_size=bs,
-        block_stride_elems=block_stride_elems,
+    return cast(
+        _FactoryShapeDesc,
+        make_page_buffer_shape_desc(
+            kv_caches,
+            engine_kv_format,
+            layer_idx=0,
+            num_layers_in_group=nl,
+            num_blocks=nb,
+            block_size=bs,
+            block_stride_elems=block_stride_elems,
+        ),
     )
 
 
@@ -726,7 +736,7 @@ def _build(
                 layer = torch.empty((nb, bs, nh, hs), dtype=dtype, device=device)
             layer.copy_(_fill_arange((nb, bs, nh, hs), dtype, device, 1000 * layer_idx))
             factory_layers.append(layer)
-        desc = _factory_shape_desc(
+        factory_desc = _factory_shape_desc(
             factory_layers,
             NH_CS_FMT,
             nl=nl,
@@ -736,7 +746,7 @@ def _build(
         )
         return dict(
             fmt=NH_CS_FMT,
-            desc=desc,
+            desc=factory_desc,
             layers=factory_layers,
             pools=pools,
             table=_pointer_table(factory_layers, device),
