@@ -97,14 +97,6 @@ def _patch_logical_block_size():
     install_overrides()
 
 
-def _patch_make_page_buffer_shape_desc():
-    """Attach per-plane byte geometry to upstream's desc factory (fmt 16/17)."""
-    # First Party
-    from lmcache_ascend.v1.shape_desc import install_plane_geometry_fill
-
-    install_plane_geometry_fill()
-
-
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Must run before any patch: the activation imports core modules that
@@ -115,7 +107,5 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if _is_vllm_runtime():
         _patch_logical_block_size()
-
-    _patch_make_page_buffer_shape_desc()
 
     LMCACHE_ASCEND_PATCHED = True
