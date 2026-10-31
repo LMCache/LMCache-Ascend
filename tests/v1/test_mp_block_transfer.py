@@ -719,7 +719,7 @@ def _build(
         factory_layers: list[torch.Tensor] = []
         for layer_idx in range(nl):
             if padded_layout:
-                pool = torch.full((nb, block_stride), 999.0, dtype=dtype, device=device)
+                pool = torch.full((nb, block_stride), -1.0, dtype=dtype, device=device)
                 layer = pool[:, : bs * row_elems].view(nb, bs, nh, hs)
                 padded_pools.append(pool)
             else:
@@ -756,7 +756,7 @@ def _build(
             dtype = torch.float32
             pools, layers = [], []
             for i in range(nl):
-                pool = torch.full((nb, stride), 999.0, dtype=dtype, device=device)
+                pool = torch.full((nb, stride), -1.0, dtype=dtype, device=device)
                 view = pool[:, : bs * hs].view(nb, bs, 1, hs)
                 view.copy_(_fill_arange((nb, bs, 1, hs), dtype, device, 1000 * i))
                 pools.append(pool)
@@ -1095,12 +1095,12 @@ def test_native_matches_reference(
     if direction_d2h:
         assert torch.equal(obj_a.cpu(), obj_b.cpu())
         if a["pad_width"] is not None:
-            assert not torch.any(obj_a.cpu() == 999.0)
+            assert not torch.any(obj_a.cpu() == -1.0)
     else:
         _assert_engine_equal(a["layers"], b["layers"])
     if a["pools"] is not None and a["pad_width"] is not None:
         for pool in a["pools"]:
-            assert torch.all(pool[:, a["pad_width"] :] == 999.0)
+            assert torch.all(pool[:, a["pad_width"] :] == -1.0)
 
 
 @requires_npu
