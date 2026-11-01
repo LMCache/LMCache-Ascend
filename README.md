@@ -68,7 +68,7 @@ cd LMCache-Ascend
 pip install -v --no-build-isolation -e .
 ```
 
-> `third_party/hcomm` must match the container's CANN version — see [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) for the full installation guide (environment preparation, container startup, source installation).
+> `third_party/hcomm` must match the container's CANN version — see [the LMCache-driven guide](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) for the full installation guide (environment preparation, container startup, source installation).
 
 ### 2. Start the LMCache server
 
@@ -81,7 +81,7 @@ lmcache server \
 
 Wait for `LMCache INFO: LMCache zmq cache server is running on localhost:5555`.
 
-`--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) for the full deployment guide.
+`--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [the LMCache-driven guide](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) for the full deployment guide.
 
 ### 3. Start vLLM with the connector
 
@@ -103,11 +103,13 @@ vllm serve /path/to/Qwen3-32B \
 
 The server address defaults to `localhost:5555` on both sides; on NPU the transfer mode defaults to `lmcache_driven`, so no extra config is needed here. A successful start shows `LMCache INFO: Creating transfer context (device_type=npu, mode=lmcache_driven)` for every worker.
 
-For the `engine_driven` transfer mode (workers copy KV from a named SHM pool), see [docs/mp_mode/engine_driven.md](docs/mp_mode/engine_driven.md).
+For the `engine_driven` transfer mode (workers copy KV from a named SHM pool), see [the engine-driven guide](https://docs.lmcache.ai/platform/devices/npu/engine_driven.html).
 
 ## Documentation
 
-- [docs/mp_mode/README.md](docs/mp_mode/README.md) — MP mode overview.
-- [docs/mp_mode/lmcache_driven.md](docs/mp_mode/lmcache_driven.md) — `lmcache_driven` full deployment guide (environment preparation, container, installation, server, vLLM, verification).
-- [docs/mp_mode/engine_driven.md](docs/mp_mode/engine_driven.md) — `engine_driven` deployment guide (Qwen3 example).
-- [docs/mp_mode/qwen3_5.md](docs/mp_mode/qwen3_5.md) — hybrid Mamba models (for example Qwen3.5, Qwen3.6, and Qwen3.8): same flags as the LMCache recipe, and where Ascend differs.
+MP mode documentation is maintained in the upstream LMCache docs:
+
+- [MP mode on Ascend NPU](https://docs.lmcache.ai/platform/devices/npu/mp_mode.html) — transfer-mode matrix, supported models, and limitations.
+- [LMCache-driven mode](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) — full deployment guide (environment preparation, container, installation, server, vLLM, verification).
+- [Engine-driven mode](https://docs.lmcache.ai/platform/devices/npu/engine_driven.html) — deployment guide (Qwen3 example).
+- [Hybrid Mamba models](https://docs.lmcache.ai/platform/devices/npu/hybrid_mamba.html) — Qwen3.5 / Qwen3.6 / Qwen3.8 flags and Ascend differences.
