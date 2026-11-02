@@ -16,6 +16,7 @@ host layer enforces it and rejects violations with `TORCH_CHECK`.
 | Format | Enum | `separate_plane` | Work item | LMC layout |
 |---|---|---|---|---|
 | 2 | `NL_X_NB_TWO_BS_NH_HS` | `true` | (layer, plane, block) | same LMC layout as format 16. The pointer table is one base `data_ptr()` per layer; plane `p` is `base + plane_engine_base_offset_bytes[p]` |
+| 13 | `NL_X_NB_BS_NH_CS` | `false` | (layer, block) | `[L, T, NH*CS]`, one fused K/V plane |
 | 16 | `NL_X_TWO_X_NB_BS_NH_HS` | `true` | (layer, plane, block) | `[2, L, T, NH*HS]`, K slab then V slab |
 | 17 | `NL_X_NP_X_NB_BS_ONE_HS` | `false` | (layer, block), all planes moved by one core | `[L, T, sum(payload)]` packed byte rows |
 
@@ -29,8 +30,14 @@ cache lines with their row neighbours).
 Geometry (`prepare_group`, resolved once per group):
 
 - `nl, nb, bs, nh, hs > 0`; `element_size in {1, 2, 4}`
-- `kv_size == 2` for formats 2 and 16, `== 1` for format 17
-- `1 <= num_planes <= 4`; exactly `2` for formats 2 and 16; `nh == 1` for format 17
+- `kv_size == 2` for formats 2 and 16, `== 1` for formats 13 and 17
+- format 13 with `num_planes == 0` derives its single-plane geometry in
+  `prepare_group`: `payload_bytes = nh * hs * element_size`, and
+  `engine_block_stride_bytes = block_stride_elems * element_size` when an
+  explicit block stride is present, otherwise `bs * payload_bytes`; explicitly
+  supplied geometry is preserved
+- after geometry resolution, `1 <= num_planes <= 4`; exactly `1` for format
+  13, exactly `2` for formats 2 and 16; `nh == 1` for format 17
 - per plane: `payload_bytes > 0` and
   `AlignUp32(payload_bytes) <= ub_segment` (one aligned row of every plane
   fits one queue slot), where `ub_segment` is the host-queried UB budget
@@ -38,8 +45,10 @@ Geometry (`prepare_group`, resolved once per group):
 - per plane: `engine_block_stride_bytes >= bs * payload_bytes` (no block
   overlap) and `engine_block_stride_bytes % 32 == 0`
 - address-range probe `(nb - 1) * block_stride + bs * payload` fits int64
-- formats 2 and 16: `payload_bytes == nh * hs * element_size` per plane
-- format 2: `plane_engine_base_offset_bytes >= 0`, both planes share one block stride, `offset + bs * payload <= block_stride`, and the two plane windows do not overlap. Formats 16 and 17 require every offset to be 0
+- formats 2, 13 and 16: `payload_bytes == nh * hs * element_size` per plane
+- format 2: `plane_engine_base_offset_bytes >= 0`, both planes share one block
+  stride, `offset + bs * payload <= block_stride`, and the two plane windows do
+  not overlap. Formats 13, 16 and 17 require every offset to be 0
 - format 17: `sum(payload_bytes) == nh * hs * element_size`
   (the packed row width)
 - `bs * lmc_row_bytes % 32 == 0` (adjacent LMC pages do not share a 32B line)

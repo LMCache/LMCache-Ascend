@@ -16,9 +16,9 @@
 //   - Engine plane p: [NB, BS, NH, HS] with dense token rows, so the
 //     engine-side token step equals payload_bytes. Only the block axis may
 //     carry padding, expressed by engine_block_stride_bytes.
-//   - LMC side (format 17): one packed row per token of
-//     lmc_token_stride_bytes = sum(payload_bytes); plane p sits at column
-//     offset lmc_base_offset_bytes (prefix sum) inside the row.
+//   - LMC side (formats 13/17): one packed row per token. Format 13 has one
+//     fused plane; format 17 has lmc_token_stride_bytes = sum(payload_bytes)
+//     and plane p sits at its prefix-sum column offset inside the row.
 //   - Format 16: two independent slabs of nl * lmc_layer_stride_bytes;
 //     planes[1].lmc_base_offset_bytes == nl * lmc_layer_stride_bytes.
 

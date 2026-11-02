@@ -54,7 +54,8 @@ struct PageBufferShapeDesc {
   int block_stride_elems;
   // Ascend-only plane count. Formats 16/17 set it at registration.
   // prepare_group sets it to 2 for format 2. Unset 16/17 stays 0 and is
-  // rejected at group prepare.
+  // rejected at group prepare. For format 13, prepare_group derives 1 when
+  // unset.
   int32_t num_planes = 0;
   // Per-plane payload bytes per token slot (64-bit byte addressing). The
   // engine-side token step is derived from the payload (dense token rows).

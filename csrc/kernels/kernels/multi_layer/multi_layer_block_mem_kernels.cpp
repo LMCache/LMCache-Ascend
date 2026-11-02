@@ -56,15 +56,16 @@ public:
   }
 
   template <bool ToEngine> __aicore__ inline void Process() {
-    //   separate_plane_ true  -> format 16 (NL_X_TWO_X_NB_BS_NH_HS): K/V are
-    //            disjoint LMC slabs, work item = (layer, plane, block).
-    //            Format 2 (NL_X_NB_TWO_BS_NH_HS) uses the same work item when
-    //            one_pointer_per_layer_: each slab is the layer base plus the
-    //            plane's engine_base_offset_bytes.
-    //   separate_plane_ false -> format 17 (NL_X_NP_X_NB_BS_ONE_HS): packed
-    //            multi-plane LMC rows, work item = (layer, block); one core
-    //            moves every plane of the page so no two cores share a 32B
-    //            LMC line.
+    //   separate_plane_ true -> formats 2/16: disjoint LMC slabs,
+    //            work item = (layer, plane, block).
+    //            Format 16 has one engine pointer per physical plane.
+    //            Format 2 (NL_X_NB_TWO_BS_NH_HS) uses one pointer per layer;
+    //            each plane starts at the layer base plus
+    //            engine_base_offset_bytes.
+    //   separate_plane_ false -> format 13 (one fused plane) or format 17
+    //            (packed multi-plane rows), work item = (layer, block).
+    //            One core moves every plane of the page so no two cores
+    //            share a 32B LMC line.
     const int32_t plane_slots = separate_plane_ ? layout_.num_planes : 1;
     const int32_t active_blocks = blocks_per_obj_ - skip_blocks_;
     const int64_t work =
