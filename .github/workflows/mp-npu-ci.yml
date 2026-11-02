@@ -37,10 +37,6 @@ concurrency:
 jobs:
   test-910b3:
     name: Multiprocess unit tests on 910B3
-    # Fork PRs must not run on self-hosted NPUs; same-repo PRs need ci-hardware approval.
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, ARM64, 910b3]
     environment:
       name: ci-hardware
