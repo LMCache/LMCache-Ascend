@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import lru_cache
 import ctypes
+import errno
 import os
 import threading
 
@@ -160,6 +161,7 @@ class OpenEulerNDSLibrary:
         self._reaper_thread: threading.Thread | None = None
         self._reaper_stop = threading.Event()
         self._stream_callbacks = NpuStreamHostCallbackQueue()
+        self._multi_device = False
 
     @property
     def is_loaded(self) -> bool:
@@ -243,6 +245,32 @@ class OpenEulerNDSLibrary:
             ctypes.c_void_p,
         ]
         lib.nds_io_getevents.restype = ctypes.c_int
+        self._multi_device = hasattr(lib, "nds_register_mem_v2") and hasattr(
+            lib, "nds_io_submit_handle"
+        )
+        if self._multi_device:
+            lib.nds_register_mem_v2.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_uint64,
+                ctypes.c_uint16,
+                ctypes.c_uint16,
+                ctypes.c_int,
+                ctypes.POINTER(ctypes.c_uint64),
+            ]
+            lib.nds_register_mem_v2.restype = ctypes.c_int
+            lib.nds_unregister_mem_handle.argtypes = [ctypes.c_uint64]
+            lib.nds_unregister_mem_handle.restype = ctypes.c_int
+            lib.nds_io_submit_handle.argtypes = [
+                ctypes.POINTER(_NdsIoCtx),
+                ctypes.c_uint64,
+                ctypes.POINTER(_NdsIoCb),
+            ]
+            lib.nds_io_submit_handle.restype = ctypes.c_int
+
+    @property
+    def supports_multi_device(self) -> bool:
+        """True when this libnds can pin an HBM VA on an explicit NPU."""
+        return bool(getattr(self, "_multi_device", False))
 
     def capabilities(self) -> NDSCapabilities:
         if self._lib is None:
@@ -372,16 +400,47 @@ class OpenEulerNDSLibrary:
     def file_deregister(self, native_handle: int) -> None:
         del native_handle
 
-    def register_memory(self, addr: int, size: int) -> None:
+    def register_memory(self, addr: int, size: int, device_index: int = 0) -> int:
+        """Pin ``addr`` on ``device_index``. Returns the registration handle.
+
+        A library or kernel without the v2 ioctl can pin NPU 0 only. A
+        non-zero device then raises ``OSError`` with ``ENOTSUP``.
+        """
         self.load()
         assert self._lib is not None
+        if self.supports_multi_device:
+            handle = ctypes.c_uint64()
+            ret = self._lib.nds_register_mem_v2(
+                ctypes.c_void_p(addr),
+                ctypes.c_uint64(size),
+                ctypes.c_uint16(device_index),
+                ctypes.c_uint16(0),
+                0,
+                ctypes.byref(handle),
+            )
+            if ret < 0:
+                raise OSError(-ret, "nds_register_mem_v2", hex(addr))
+            return int(handle.value)
+        if device_index:
+            raise OSError(
+                errno.EOPNOTSUPP,
+                "openEuler NDS registration is NPU 0 only",
+                hex(addr),
+            )
         ret = self._lib.nds_register_mem(
             ctypes.c_void_p(addr), ctypes.c_uint64(size), 0
         )
         _posix_errno(ret, "nds_register_mem")
+        return 0
 
-    def unregister_memory(self, addr: int, size: int) -> None:
+    def unregister_memory(self, addr: int, size: int, handle: int = 0) -> None:
         if self._lib is None:
+            return
+        if handle and self.supports_multi_device:
+            ret = self._lib.nds_unregister_mem_handle(ctypes.c_uint64(handle))
+            if ret == -2:  # ENOENT if already gone
+                return
+            _posix_errno(ret, "nds_unregister_mem_handle")
             return
         ret = self._lib.nds_unregister_mem(
             ctypes.c_void_p(addr), ctypes.c_uint64(size), 0
@@ -397,8 +456,11 @@ class OpenEulerNDSLibrary:
         size: int,
         file_offset: int,
         ptr_offset: int,
+        mem_handle: int = 0,
     ) -> int:
-        return self._io(file_fd, ptr_base, size, file_offset, ptr_offset, False)
+        return self._io(
+            file_fd, ptr_base, size, file_offset, ptr_offset, False, mem_handle
+        )
 
     def write(
         self,
@@ -407,8 +469,11 @@ class OpenEulerNDSLibrary:
         size: int,
         file_offset: int,
         ptr_offset: int,
+        mem_handle: int = 0,
     ) -> int:
-        return self._io(file_fd, ptr_base, size, file_offset, ptr_offset, True)
+        return self._io(
+            file_fd, ptr_base, size, file_offset, ptr_offset, True, mem_handle
+        )
 
     def wait_callbacks(self) -> None:
         """Block until all stream-ordered host callbacks from this library finish."""
@@ -423,13 +488,19 @@ class OpenEulerNDSLibrary:
         ptr_offset: int,
         result: ctypes.c_int64,
         raw_stream: int,
+        mem_handle: int = 0,
     ) -> None:
         """Enqueue a stream-ordered read. The callback writes ``result``."""
 
         def host_work() -> None:
             try:
                 done = self.read(
-                    file_fd, ptr_base, size, file_offset, ptr_offset
+                    file_fd,
+                    ptr_base,
+                    size,
+                    file_offset,
+                    ptr_offset,
+                    mem_handle,
                 )
                 if done != size:
                     raise RuntimeError(
@@ -449,6 +520,7 @@ class OpenEulerNDSLibrary:
         result: ctypes.c_int64,
         raw_stream: int,
         on_complete: Callable[[], None] | None = None,
+        mem_handle: int = 0,
     ) -> None:
         """Enqueue one callback that writes every segment, then ``on_complete``."""
 
@@ -457,7 +529,12 @@ class OpenEulerNDSLibrary:
                 done_total = 0
                 for device_off, seg_len, ptr_off in segments:
                     done = self.write(
-                        file_fd, ptr_base, seg_len, device_off, ptr_off
+                        file_fd,
+                        ptr_base,
+                        seg_len,
+                        device_off,
+                        ptr_off,
+                        mem_handle,
                     )
                     if done != seg_len:
                         raise RuntimeError(
@@ -488,6 +565,7 @@ class OpenEulerNDSLibrary:
         file_offset: int,
         ptr_offset: int,
         is_write: bool,
+        mem_handle: int = 0,
     ) -> _PendingIO:
         """Enqueue one op via ``nds_io_submit`` and return its waitable handle.
 
@@ -522,7 +600,17 @@ class OpenEulerNDSLibrary:
         cb.reserved = (0, 0)
 
         with self._submit_lock:
-            ret = self._lib.nds_io_submit(self._io_ctx, 1, ctypes.byref(cb))
+            submit = (
+                self._lib.nds_io_submit_handle
+                if mem_handle and self.supports_multi_device
+                else self._lib.nds_io_submit
+            )
+            if mem_handle and self.supports_multi_device:
+                ret = submit(
+                    self._io_ctx, ctypes.c_uint64(mem_handle), ctypes.byref(cb)
+                )
+            else:
+                ret = submit(self._io_ctx, 1, ctypes.byref(cb))
         if ret != 1:
             with self._pending_lock:
                 self._pending.pop(user_data, None)
@@ -545,8 +633,17 @@ class OpenEulerNDSLibrary:
         file_offset: int,
         ptr_offset: int,
         is_write: bool,
+        mem_handle: int = 0,
     ) -> int:
-        pending = self._submit(file_fd, ptr_base, size, file_offset, ptr_offset, is_write)
+        pending = self._submit(
+            file_fd,
+            ptr_base,
+            size,
+            file_offset,
+            ptr_offset,
+            is_write,
+            mem_handle,
+        )
         return self._wait(pending, size)
 
 

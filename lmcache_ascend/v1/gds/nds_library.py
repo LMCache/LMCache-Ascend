@@ -326,12 +326,13 @@ class NDSLibrary:
 
         self._stream_callbacks.launch(raw_stream, host_work)
 
-    def register_memory(self, addr: int, size: int) -> None:
+    def register_memory(self, addr: int, size: int, device_index: int = 0) -> int:
         """No-op for the DataTurbo client. The openEuler adapter overrides this."""
-        del addr, size
+        del addr, size, device_index
+        return 0
 
-    def unregister_memory(self, addr: int, size: int) -> None:
-        del addr, size
+    def unregister_memory(self, addr: int, size: int, handle: int = 0) -> None:
+        del addr, size, handle
 
 
 @lru_cache(maxsize=1)
