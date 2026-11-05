@@ -147,14 +147,9 @@ class OpenEulerNDSLibrary:
         self._driver_open = False
         self._io_ctx: ctypes.POINTER(_NdsIoCtx) | None = None
 
-        # Tier A async-submission plumbing: nds_io_submit only enqueues (fast,
-        # safe to call concurrently guarded by a short-held lock); a single
-        # dedicated reaper thread is the sole caller of nds_io_getevents and
-        # demuxes completions by user_data to the waiting caller. This
-        # replaces one global submit+wait lock (which fully serialized every
-        # NDS I/O backend-wide) with per-call waits, so unrelated reads/writes
-        # from different streams/handles can be in flight concurrently.
-        self._submit_lock = threading.Lock()
+        # One reaper thread is the sole caller of nds_io_getevents and wakes
+        # each waiter by user_data. Submit itself is not locked: libnds and
+        # the kernel completion ring already accept concurrent submits.
         self._pending_lock = threading.Lock()
         self._pending: dict[int, _PendingIO] = {}
         self._next_user_data = 1
@@ -162,6 +157,9 @@ class OpenEulerNDSLibrary:
         self._reaper_stop = threading.Event()
         self._stream_callbacks = NpuStreamHostCallbackQueue()
         self._multi_device = False
+        # Publish the CDLL and its signatures before any host callback runs.
+        # Callbacks then call read/write without taking ``_lock``.
+        self.load()
 
     @property
     def is_loaded(self) -> bool:
@@ -491,6 +489,7 @@ class OpenEulerNDSLibrary:
         mem_handle: int = 0,
     ) -> None:
         """Enqueue a stream-ordered read. The callback writes ``result``."""
+        self.load()
 
         def host_work() -> None:
             try:
@@ -523,6 +522,7 @@ class OpenEulerNDSLibrary:
         mem_handle: int = 0,
     ) -> None:
         """Enqueue one callback that writes every segment, then ``on_complete``."""
+        self.load()
 
         def host_work() -> None:
             try:
@@ -569,13 +569,10 @@ class OpenEulerNDSLibrary:
     ) -> _PendingIO:
         """Enqueue one op via ``nds_io_submit`` and return its waitable handle.
 
-        Does not block on completion. ``nds_io_submit`` itself is held under
-        a short lock (unknown thread-safety of the native ring buffer for
-        concurrent submitters); the wait is not, so independent callers can
-        have I/O in flight at the same time instead of serializing behind
-        one submit+wait critical section.
+        Does not block on completion and does not take ``_lock``. ``load`` has
+        already published ``_lib``. Concurrent submits share the kernel
+        completion ring, which the driver locks itself.
         """
-        self.load()
         assert self._lib is not None and self._io_ctx is not None
         if size <= 0:
             raise ValueError("I/O size must be positive")
@@ -599,18 +596,17 @@ class OpenEulerNDSLibrary:
         cb.host_pid = 0
         cb.reserved = (0, 0)
 
-        with self._submit_lock:
-            submit = (
-                self._lib.nds_io_submit_handle
-                if mem_handle and self.supports_multi_device
-                else self._lib.nds_io_submit
+        submit = (
+            self._lib.nds_io_submit_handle
+            if mem_handle and self.supports_multi_device
+            else self._lib.nds_io_submit
+        )
+        if mem_handle and self.supports_multi_device:
+            ret = submit(
+                self._io_ctx, ctypes.c_uint64(mem_handle), ctypes.byref(cb)
             )
-            if mem_handle and self.supports_multi_device:
-                ret = submit(
-                    self._io_ctx, ctypes.c_uint64(mem_handle), ctypes.byref(cb)
-                )
-            else:
-                ret = submit(self._io_ctx, 1, ctypes.byref(cb))
+        else:
+            ret = submit(self._io_ctx, 1, ctypes.byref(cb))
         if ret != 1:
             with self._pending_lock:
                 self._pending.pop(user_data, None)

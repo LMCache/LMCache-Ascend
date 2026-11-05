@@ -21,7 +21,7 @@ def _clear_nds_singleton():
 
 def test_library_import_does_not_dlopen_nds(monkeypatch):
     monkeypatch.setenv("NDS_STACK", "dataturbo")
-    mod = importlib.import_module(MODULE)
+    mod = importlib.reload(importlib.import_module(MODULE))
     mod.get_nds_library.cache_clear()
     lib = mod.get_nds_library("/nonexistent/for/import/test.so")
     assert not lib.is_loaded
@@ -29,15 +29,24 @@ def test_library_import_does_not_dlopen_nds(monkeypatch):
 
 def test_get_nds_library_openeuler_stack(monkeypatch):
     monkeypatch.setenv("NDS_STACK", "openeuler")
-    mod = importlib.import_module(MODULE)
+    mod = importlib.reload(importlib.import_module(MODULE))
+    oe = importlib.import_module("lmcache_ascend.v1.gds.openeuler_nds_library")
     mod.get_nds_library.cache_clear()
-    lib = mod.get_nds_library()
-    assert type(lib).__name__ == "OpenEulerNDSLibrary"
+    oe.get_openeuler_nds_library.cache_clear()
+    try:
+        with patch(
+            "lmcache_ascend.v1.gds.openeuler_nds_library.OpenEulerNDSLibrary.load"
+        ):
+            lib = mod.get_nds_library()
+        assert type(lib).__name__ == "OpenEulerNDSLibrary"
+    finally:
+        mod.get_nds_library.cache_clear()
+        oe.get_openeuler_nds_library.cache_clear()
 
 
 def test_load_rejects_missing_required_symbol(tmp_path, monkeypatch):
     monkeypatch.setenv("NDS_STACK", "dataturbo")
-    mod = importlib.import_module(MODULE)
+    mod = importlib.reload(importlib.import_module(MODULE))
     mod.get_nds_library.cache_clear()
     fake = tmp_path / "libdpc_nds.so"
     fake.write_bytes(b"\x7fELF")

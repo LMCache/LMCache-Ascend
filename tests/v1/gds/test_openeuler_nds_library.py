@@ -19,7 +19,8 @@ from lmcache_ascend.v1.gds.openeuler_nds_library import OpenEulerNDSLibrary
 
 
 def _make_lib() -> OpenEulerNDSLibrary:
-    lib = OpenEulerNDSLibrary(library_path="/nonexistent")
+    with patch.object(OpenEulerNDSLibrary, "load", lambda self: None):
+        lib = OpenEulerNDSLibrary(library_path="/nonexistent")
     lib._lib = MagicMock()
     lib._io_ctx = MagicMock()
     lib._driver_open = True
