@@ -489,7 +489,6 @@ class OpenEulerNDSLibrary:
         mem_handle: int = 0,
     ) -> None:
         """Enqueue a stream-ordered read. The callback writes ``result``."""
-        self.load()
 
         def host_work() -> None:
             try:
@@ -522,7 +521,6 @@ class OpenEulerNDSLibrary:
         mem_handle: int = 0,
     ) -> None:
         """Enqueue one callback that writes every segment, then ``on_complete``."""
-        self.load()
 
         def host_work() -> None:
             try:
