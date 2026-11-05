@@ -5,12 +5,19 @@
 from __future__ import annotations
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import lru_cache
 import ctypes
 import os
 import stat
 import threading
+from typing import Any
+
+from lmcache_ascend.v1.gds.npu_host_callback import (
+    NpuStreamHostCallbackQueue,
+    exception_to_submission_result,
+)
 
 NDS_STACK = os.environ.get("NDS_STACK", "openeuler").strip().lower()
 
@@ -75,6 +82,7 @@ class NDSLibrary:
         self._NdsFileHandleDeregister = None
         self._NdsFileRead = None
         self._NdsFileWrite = None
+        self._stream_callbacks = NpuStreamHostCallbackQueue()
 
     @property
     def is_loaded(self) -> bool:
@@ -260,6 +268,63 @@ class NDSLibrary:
         if result < 0:
             raise RuntimeError(f"{self._write_symbol_name} failed with return code {result}")
         return int(result)
+
+    def wait_callbacks(self) -> None:
+        self._stream_callbacks.wait_callbacks()
+
+    def read_async(
+        self,
+        native_handle: Any,
+        ptr_base: int,
+        size: int,
+        file_offset: int,
+        ptr_offset: int,
+        result: ctypes.c_int64,
+        raw_stream: int,
+    ) -> None:
+        def host_work() -> None:
+            try:
+                done = self.read(
+                    native_handle, ptr_base, size, file_offset, ptr_offset
+                )
+                if done != size:
+                    raise RuntimeError(
+                        f"NDS read short I/O: got {done} bytes, expected {size}"
+                    )
+                result.value = size
+            except BaseException as exc:
+                result.value = exception_to_submission_result(exc)
+
+        self._stream_callbacks.launch(raw_stream, host_work)
+
+    def write_async(
+        self,
+        native_handle: Any,
+        ptr_base: int,
+        segments: list[tuple[int, int, int]],
+        result: ctypes.c_int64,
+        raw_stream: int,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
+        def host_work() -> None:
+            try:
+                done_total = 0
+                for device_off, seg_len, ptr_off in segments:
+                    done = self.write(
+                        native_handle, ptr_base, seg_len, device_off, ptr_off
+                    )
+                    if done != seg_len:
+                        raise RuntimeError(
+                            f"NDS write short I/O: got {done} bytes, expected {seg_len}"
+                        )
+                    done_total += seg_len
+                if on_complete is not None:
+                    on_complete()
+                result.value = done_total
+            except BaseException as exc:
+                result.value = exception_to_submission_result(exc)
+
+        self._stream_callbacks.launch(raw_stream, host_work)
 
     def register_memory(self, addr: int, size: int) -> None:
         """No-op for the DataTurbo client. The openEuler adapter overrides this."""

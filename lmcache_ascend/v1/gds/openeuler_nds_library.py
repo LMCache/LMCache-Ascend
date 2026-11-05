@@ -9,7 +9,7 @@ User API: ``nds_api.h``; device node ``/dev/p2p_device`` (``drivers/nds``).
 from __future__ import annotations
 
 # Standard
-from dataclasses import dataclass
+from collections.abc import Callable
 from functools import lru_cache
 import ctypes
 import os
@@ -17,6 +17,10 @@ import threading
 
 from lmcache.logging import init_logger
 from lmcache_ascend.v1.gds.nds_library import NDSCapabilities, _check_byte_count
+from lmcache_ascend.v1.gds.npu_host_callback import (
+    NpuStreamHostCallbackQueue,
+    exception_to_submission_result,
+)
 
 logger = init_logger(__name__)
 
@@ -155,6 +159,7 @@ class OpenEulerNDSLibrary:
         self._next_user_data = 1
         self._reaper_thread: threading.Thread | None = None
         self._reaper_stop = threading.Event()
+        self._stream_callbacks = NpuStreamHostCallbackQueue()
 
     @property
     def is_loaded(self) -> bool:
@@ -404,6 +409,68 @@ class OpenEulerNDSLibrary:
         ptr_offset: int,
     ) -> int:
         return self._io(file_fd, ptr_base, size, file_offset, ptr_offset, True)
+
+    def wait_callbacks(self) -> None:
+        """Block until all stream-ordered host callbacks from this library finish."""
+        self._stream_callbacks.wait_callbacks()
+
+    def read_async(
+        self,
+        file_fd: int,
+        ptr_base: int,
+        size: int,
+        file_offset: int,
+        ptr_offset: int,
+        result: ctypes.c_int64,
+        raw_stream: int,
+    ) -> None:
+        """Enqueue a stream-ordered read. The callback writes ``result``."""
+
+        def host_work() -> None:
+            try:
+                done = self.read(
+                    file_fd, ptr_base, size, file_offset, ptr_offset
+                )
+                if done != size:
+                    raise RuntimeError(
+                        f"NDS read short I/O: got {done} bytes, expected {size}"
+                    )
+                result.value = size
+            except BaseException as exc:
+                result.value = exception_to_submission_result(exc)
+
+        self._stream_callbacks.launch(raw_stream, host_work)
+
+    def write_async(
+        self,
+        file_fd: int,
+        ptr_base: int,
+        segments: list[tuple[int, int, int]],
+        result: ctypes.c_int64,
+        raw_stream: int,
+        on_complete: Callable[[], None] | None = None,
+    ) -> None:
+        """Enqueue one callback that writes every segment, then ``on_complete``."""
+
+        def host_work() -> None:
+            try:
+                done_total = 0
+                for device_off, seg_len, ptr_off in segments:
+                    done = self.write(
+                        file_fd, ptr_base, seg_len, device_off, ptr_off
+                    )
+                    if done != seg_len:
+                        raise RuntimeError(
+                            f"NDS write short I/O: got {done} bytes, expected {seg_len}"
+                        )
+                    done_total += seg_len
+                if on_complete is not None:
+                    on_complete()
+                result.value = done_total
+            except BaseException as exc:
+                result.value = exception_to_submission_result(exc)
+
+        self._stream_callbacks.launch(raw_stream, host_work)
 
     def _next_user_data_locked(self) -> int:
         """Allocate a user_data id; call with ``self._pending_lock`` held."""
