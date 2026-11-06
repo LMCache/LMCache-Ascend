@@ -9,6 +9,7 @@ or NPU is involved; ``_lib`` is a mock.
 # Standard
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 # Third Party
@@ -266,6 +267,31 @@ def test_read_async_maps_missing_context_to_negative_result():
     ):
         lib.read_async(3, 0x1000, 4096, 0, 0, result, 7)
     assert result.value < 0
+
+
+def test_write_async_reads_segment_fields():
+    lib = _make_lib()
+    ctx = MagicMock(name="ctx-7")
+    lib._stream_ctxs[7] = ctx
+    lib._io = MagicMock(return_value=4096)  # type: ignore[method-assign]
+    result = __import__("ctypes").c_int64(0)
+    completed: list[bool] = []
+    segment = SimpleNamespace(device_offset=0xA000, length=4096, buf_offset=128)
+    with patch(
+        "lmcache_ascend.v1.gds.npu_host_callback.launch_npu_stream_host_callback",
+        side_effect=_run_launch_immediately,
+    ):
+        lib.write_async(
+            9,
+            0x1000,
+            [segment],
+            result,
+            7,
+            on_complete=lambda: completed.append(True),
+        )
+    lib._io.assert_called_once_with(ctx, 9, 0x1000, 4096, 0xA000, 128, True)
+    assert result.value == 4096
+    assert completed == [True]
 
 
 def test_read_async_maps_io_failure_to_negative_result():

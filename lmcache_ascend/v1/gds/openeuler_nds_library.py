@@ -9,20 +9,30 @@ User API: ``nds_api.h``; device node ``/dev/p2p_device`` (``drivers/nds``).
 from __future__ import annotations
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Protocol
 import ctypes
 import os
 import threading
 
 from lmcache.logging import init_logger
+
 from lmcache_ascend.v1.gds.npu_host_callback import (
     NpuStreamHostCallbackQueue,
     exception_to_submission_result,
 )
 
 logger = init_logger(__name__)
+
+
+class _StoreSegment(Protocol):
+    """One block-device write submitted by ``write_async``."""
+
+    device_offset: int
+    length: int
+    buf_offset: int
 
 
 @dataclass(frozen=True)
@@ -413,7 +423,7 @@ class OpenEulerNDSLibrary:
         self,
         file_fd: int,
         ptr_base: int,
-        segments: list[tuple[int, int, int]],
+        segments: Sequence[_StoreSegment],
         result: ctypes.c_int64,
         raw_stream: int,
         on_complete: Callable[[], None] | None = None,
@@ -424,16 +434,22 @@ class OpenEulerNDSLibrary:
             try:
                 done_total = 0
                 ctx = self._stream_ctx(raw_stream)
-                for device_off, seg_len, ptr_off in segments:
+                for segment in segments:
                     done = self._io(
-                        ctx, file_fd, ptr_base, seg_len, device_off, ptr_off, True
+                        ctx,
+                        file_fd,
+                        ptr_base,
+                        segment.length,
+                        segment.device_offset,
+                        segment.buf_offset,
+                        True,
                     )
-                    if done != seg_len:
+                    if done != segment.length:
                         raise RuntimeError(
                             "NDS write short I/O: "
-                            f"got {done} bytes, expected {seg_len}"
+                            f"got {done} bytes, expected {segment.length}"
                         )
-                    done_total += seg_len
+                    done_total += segment.length
                 if on_complete is not None:
                     on_complete()
                 result.value = done_total
