@@ -10,19 +10,38 @@ from __future__ import annotations
 
 # Standard
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import lru_cache
 import ctypes
 import os
 import threading
 
 from lmcache.logging import init_logger
-from lmcache_ascend.v1.gds.nds_library import NDSCapabilities, _check_byte_count
 from lmcache_ascend.v1.gds.npu_host_callback import (
     NpuStreamHostCallbackQueue,
     exception_to_submission_result,
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class NDSCapabilities:
+    can_read: bool
+    can_write: bool
+    requires_buffer_registration: bool
+    supports_stream_ordering: bool
+    alignment_bytes: int
+    max_io_bytes: int
+    write_symbol: str | None = None
+
+
+def _check_byte_count(actual: int, expected: int, operation: str) -> None:
+    if actual != expected:
+        raise RuntimeError(
+            f"{operation} short I/O: got {actual} bytes, expected {expected}"
+        )
+
 
 DEFAULT_OPENEULER_NDS_LIBRARY_PATH = os.environ.get(
     "NDS_LIBRARY_PATH",
