@@ -269,6 +269,13 @@ class NDSLibrary:
             raise RuntimeError(f"{self._write_symbol_name} failed with return code {result}")
         return int(result)
 
+    def register_stream(self, raw_stream: int) -> None:
+        """DataTurbo has no per-stream ``io_ctx``. openEuler overrides this."""
+        del raw_stream
+
+    def deregister_stream(self, raw_stream: int) -> None:
+        del raw_stream
+
     def wait_callbacks(self) -> None:
         self._stream_callbacks.wait_callbacks()
 

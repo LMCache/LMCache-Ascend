@@ -35,17 +35,9 @@ NDS_IO_F_REGISTERED_MEM = 1 << 0
 NDS_API_VERSION = 1
 _ALIGNMENT = 512
 _MAX_IO_BYTES = 128 * 1024 * 1024
-
-# Reaper thread: how many completions one nds_io_getevents call drains, and
-# how long it blocks (via the timespec timeout) before re-checking the stop
-# flag. Measured against real hardware: a non-null timeout does NOT appear
-# to wake nds_io_getevents early on completion -- it sleeps out close to the
-# full window per call regardless (a 0.2s poll turned a ~0.1s store into
-# ~1.2s). Keep this small so that quantization is the dominant latency term
-# only down to single-digit milliseconds, not hundreds.
-_REAP_BATCH = 64
-_REAP_POLL_SECONDS = 0.001
-_USER_DATA_MAX = 0xFFFFFFFFFFFFFFFF
+# One callback blocks in getevents, so a stream never has more than one
+# submission outstanding. The depth still leaves room for a future batch.
+_IO_CTX_DEPTH = 64
 
 
 class _NdsInitParam(ctypes.Structure):
@@ -113,25 +105,9 @@ class _NdsIoCtx(ctypes.Structure):
     pass
 
 
-class _Timespec(ctypes.Structure):
-    """``struct timespec`` for the ``nds_io_getevents`` timeout argument."""
-
-    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
-
-
 def _posix_errno(ret: int, operation: str) -> None:
     if ret < 0:
         raise OSError(-ret, operation)
-
-
-class _PendingIO:
-    """One in-flight ``nds_io_submit`` awaiting its completion from the reaper."""
-
-    __slots__ = ("event", "res")
-
-    def __init__(self) -> None:
-        self.event = threading.Event()
-        self.res = 0
 
 
 class OpenEulerNDSLibrary:
@@ -144,16 +120,9 @@ class OpenEulerNDSLibrary:
         self._lib: ctypes.CDLL | None = None
         self._lock = threading.Lock()
         self._driver_open = False
-        self._io_ctx: ctypes.POINTER(_NdsIoCtx) | None = None
-
-        # One reaper thread is the sole caller of nds_io_getevents and wakes
-        # each waiter by user_data. Submit itself is not locked: libnds and
-        # the kernel completion ring already accept concurrent submits.
-        self._pending_lock = threading.Lock()
-        self._pending: dict[int, _PendingIO] = {}
-        self._next_user_data = 1
-        self._reaper_thread: threading.Thread | None = None
-        self._reaper_stop = threading.Event()
+        # Filled by register_stream and read by that stream's host callback.
+        # GDSContext serializes registration, so this map has no lock.
+        self._stream_ctxs: dict[int, ctypes.POINTER(_NdsIoCtx)] = {}
         self._stream_callbacks = NpuStreamHostCallbackQueue()
         # Publish the CDLL and its signatures before any host callback runs.
         # Callbacks then call read/write without taking ``_lock``.
@@ -272,91 +241,56 @@ class OpenEulerNDSLibrary:
             raise RuntimeError(
                 f"nds_init returned unexpected API version {param.version}"
             )
-        ctx = ctypes.POINTER(_NdsIoCtx)()
-        ctx_param = _NdsIoCtxParam(max_io_cnt=64, flags=0, reserved=0)
-        ret = self._lib.nds_io_new_ctx(ctypes.byref(ctx_param), ctypes.byref(ctx))
-        _posix_errno(ret, "nds_io_new_ctx")
-        self._io_ctx = ctx
         self._driver_open = True
-        self._start_reaper()
 
     def driver_close(self) -> None:
         if not self._driver_open or self._lib is None:
             self._driver_open = False
-            self._io_ctx = None
+            self._stream_ctxs.clear()
             return
-        # Stop and join the reaper before destroying the io_ctx it reads from.
-        self._stop_reaper()
-        if self._io_ctx is not None:
-            ret = self._lib.nds_io_destroy_ctx(self._io_ctx)
-            if ret < 0:
-                pass
-            self._io_ctx = None
+        contexts = list(self._stream_ctxs.values())
+        self._stream_ctxs.clear()
+        for ctx in contexts:
+            self._destroy_io_ctx(ctx)
         ret = self._lib.nds_exit()
         _posix_errno(ret, "nds_exit")
         self._driver_open = False
-        # Fail any submission that was in flight when the driver closed
-        # rather than leaving its waiter blocked forever.
-        with self._pending_lock:
-            stale = list(self._pending.values())
-            self._pending.clear()
-        for pending in stale:
-            pending.res = -5  # EIO
-            pending.event.set()
 
-    def _start_reaper(self) -> None:
-        self._reaper_stop.clear()
-        self._reaper_thread = threading.Thread(
-            target=self._reap_loop, name="nds-io-reaper", daemon=True
-        )
-        self._reaper_thread.start()
-
-    def _stop_reaper(self) -> None:
-        self._reaper_stop.set()
-        thread = self._reaper_thread
-        if thread is not None:
-            thread.join(timeout=5.0)
-            if thread.is_alive():
-                logger.warning("nds-io-reaper did not stop within 5s")
-        self._reaper_thread = None
-
-    def _reap_loop(self) -> None:
-        """Sole caller of ``nds_io_getevents``; demuxes by ``user_data``.
-
-        Runs with a short timeout so ``driver_close`` can stop it promptly;
-        a timeout with zero events is the normal, frequent case while idle.
-        """
-        assert self._lib is not None and self._io_ctx is not None
-        events = (_NdsIoEvent * _REAP_BATCH)()
-        timeout = _Timespec(
-            tv_sec=0, tv_nsec=int(_REAP_POLL_SECONDS * 1_000_000_000)
-        )
-        while not self._reaper_stop.is_set():
-            # min_nr=1 so the call actually blocks up to the timeout instead
-            # of returning immediately with zero events (min_nr=0 would spin
-            # this thread at 100% CPU).
-            ret = self._lib.nds_io_getevents(
-                self._io_ctx, 1, _REAP_BATCH, events, ctypes.byref(timeout)
-            )
-            if ret <= 0:
-                if ret < 0:
-                    logger.error("nds_io_getevents reaper error: %d", ret)
-                continue
-            for i in range(ret):
-                self._complete(events[i].user_data, events[i].res)
-
-    def _complete(self, user_data: int, res: int) -> None:
-        with self._pending_lock:
-            pending = self._pending.pop(user_data, None)
-        if pending is None:
-            logger.warning(
-                "nds-io-reaper: completion for unknown user_data=%d (res=%d)",
-                user_data,
-                res,
-            )
+    def register_stream(self, raw_stream: int) -> None:
+        """Create the ``io_ctx`` used by every callback on ``raw_stream``."""
+        if raw_stream in self._stream_ctxs:
             return
-        pending.res = res
-        pending.event.set()
+        if not self._driver_open or self._lib is None:
+            raise RuntimeError("NDS driver is not open")
+        self._stream_ctxs[raw_stream] = self._new_io_ctx()
+
+    def deregister_stream(self, raw_stream: int) -> None:
+        """Destroy the ``io_ctx`` for ``raw_stream``. A missing stream is a no-op."""
+        ctx = self._stream_ctxs.pop(raw_stream, None)
+        if ctx is not None:
+            self._destroy_io_ctx(ctx)
+
+    def _new_io_ctx(self) -> ctypes.POINTER(_NdsIoCtx):
+        assert self._lib is not None
+        ctx = ctypes.POINTER(_NdsIoCtx)()
+        ctx_param = _NdsIoCtxParam(max_io_cnt=_IO_CTX_DEPTH, flags=0, reserved=0)
+        ret = self._lib.nds_io_new_ctx(ctypes.byref(ctx_param), ctypes.byref(ctx))
+        _posix_errno(ret, "nds_io_new_ctx")
+        return ctx
+
+    def _destroy_io_ctx(self, ctx: ctypes.POINTER(_NdsIoCtx)) -> None:
+        assert self._lib is not None
+        ret = self._lib.nds_io_destroy_ctx(ctx)
+        if ret < 0:
+            logger.warning("nds_io_destroy_ctx failed: %d", ret)
+
+    def _stream_ctx(self, raw_stream: int) -> ctypes.POINTER(_NdsIoCtx):
+        try:
+            return self._stream_ctxs[raw_stream]
+        except KeyError:
+            raise RuntimeError(
+                f"NDS stream {raw_stream} has no io_ctx"
+            ) from None
 
     def file_register(self, fd: int) -> int:
         self.load()
@@ -401,7 +335,10 @@ class OpenEulerNDSLibrary:
         file_offset: int,
         ptr_offset: int,
     ) -> int:
-        return self._io(file_fd, ptr_base, size, file_offset, ptr_offset, False)
+        """Blocking read on a private ``io_ctx``. Probes use this path."""
+        return self._io_ephemeral(
+            file_fd, ptr_base, size, file_offset, ptr_offset, False
+        )
 
     def write(
         self,
@@ -411,7 +348,10 @@ class OpenEulerNDSLibrary:
         file_offset: int,
         ptr_offset: int,
     ) -> int:
-        return self._io(file_fd, ptr_base, size, file_offset, ptr_offset, True)
+        """Blocking write on a private ``io_ctx``. Probes use this path."""
+        return self._io_ephemeral(
+            file_fd, ptr_base, size, file_offset, ptr_offset, True
+        )
 
     def wait_callbacks(self) -> None:
         """Block until all stream-ordered host callbacks from this library finish."""
@@ -431,8 +371,14 @@ class OpenEulerNDSLibrary:
 
         def host_work() -> None:
             try:
-                done = self.read(
-                    file_fd, ptr_base, size, file_offset, ptr_offset
+                done = self._io(
+                    self._stream_ctx(raw_stream),
+                    file_fd,
+                    ptr_base,
+                    size,
+                    file_offset,
+                    ptr_offset,
+                    False,
                 )
                 if done != size:
                     raise RuntimeError(
@@ -458,13 +404,15 @@ class OpenEulerNDSLibrary:
         def host_work() -> None:
             try:
                 done_total = 0
+                ctx = self._stream_ctx(raw_stream)
                 for device_off, seg_len, ptr_off in segments:
-                    done = self.write(
-                        file_fd, ptr_base, seg_len, device_off, ptr_off
+                    done = self._io(
+                        ctx, file_fd, ptr_base, seg_len, device_off, ptr_off, True
                     )
                     if done != seg_len:
                         raise RuntimeError(
-                            f"NDS write short I/O: got {done} bytes, expected {seg_len}"
+                            "NDS write short I/O: "
+                            f"got {done} bytes, expected {seg_len}"
                         )
                     done_total += seg_len
                 if on_complete is not None:
@@ -475,68 +423,7 @@ class OpenEulerNDSLibrary:
 
         self._stream_callbacks.launch(raw_stream, host_work)
 
-    def _next_user_data_locked(self) -> int:
-        """Allocate a user_data id; call with ``self._pending_lock`` held."""
-        user_data = self._next_user_data
-        self._next_user_data = (
-            1 if user_data >= _USER_DATA_MAX else user_data + 1
-        )
-        return user_data
-
-    def _submit(
-        self,
-        file_fd: int,
-        ptr_base: int,
-        size: int,
-        file_offset: int,
-        ptr_offset: int,
-        is_write: bool,
-    ) -> _PendingIO:
-        """Enqueue one op via ``nds_io_submit`` and return its waitable handle.
-
-        Does not block on completion and does not take ``_lock``. ``load`` has
-        already published ``_lib``. Concurrent submits share the kernel
-        completion ring, which the driver locks itself.
-        """
-        assert self._lib is not None and self._io_ctx is not None
-        if size <= 0:
-            raise ValueError("I/O size must be positive")
-        if size > _MAX_IO_BYTES:
-            raise ValueError(f"I/O size {size} exceeds max {_MAX_IO_BYTES}")
-        buf_addr = ptr_base + ptr_offset
-        iov = _NdsIoVec(buf_addr=buf_addr, buf_len=size, reserved=0)
-        pending = _PendingIO()
-        with self._pending_lock:
-            user_data = self._next_user_data_locked()
-            self._pending[user_data] = pending
-        cb = _NdsIoCb()
-        cb.opcode = NDS_IO_OP_PWRITE if is_write else NDS_IO_OP_PREAD
-        cb.rw_flags = NDS_IO_F_REGISTERED_MEM
-        cb.obj.reserved = 0
-        cb.obj.u.fd = file_fd
-        cb.offset = file_offset
-        cb.user_data = user_data
-        cb.iov = ctypes.pointer(iov)
-        cb.iov_cnt = 1
-        cb.host_pid = 0
-        cb.reserved = (0, 0)
-
-        ret = self._lib.nds_io_submit(self._io_ctx, 1, ctypes.byref(cb))
-        if ret != 1:
-            with self._pending_lock:
-                self._pending.pop(user_data, None)
-            _posix_errno(ret if ret < 0 else -1, "nds_io_submit")
-        return pending
-
-    def _wait(self, pending: _PendingIO, size: int) -> int:
-        """Block until the reaper reports this submission's completion."""
-        pending.event.wait()
-        if pending.res != 0:
-            raise OSError(-pending.res, "nds_io completion")
-        _check_byte_count(size, size, "nds_io")
-        return size
-
-    def _io(
+    def _io_ephemeral(
         self,
         file_fd: int,
         ptr_base: int,
@@ -545,10 +432,61 @@ class OpenEulerNDSLibrary:
         ptr_offset: int,
         is_write: bool,
     ) -> int:
-        pending = self._submit(
-            file_fd, ptr_base, size, file_offset, ptr_offset, is_write
-        )
-        return self._wait(pending, size)
+        """Submit and reap on a context that lives only for this call."""
+        if not self._driver_open or self._lib is None:
+            raise RuntimeError("NDS driver is not open")
+        ctx = self._new_io_ctx()
+        try:
+            return self._io(
+                ctx, file_fd, ptr_base, size, file_offset, ptr_offset, is_write
+            )
+        finally:
+            self._destroy_io_ctx(ctx)
+
+    def _io(
+        self,
+        ctx: ctypes.POINTER(_NdsIoCtx),
+        file_fd: int,
+        ptr_base: int,
+        size: int,
+        file_offset: int,
+        ptr_offset: int,
+        is_write: bool,
+    ) -> int:
+        """Submit one op and block in ``nds_io_getevents`` on ``ctx``.
+
+        ``ctx`` belongs to one stream, and ACL runs that stream's callbacks
+        one at a time, so this call cannot observe another submission.
+        """
+        assert self._lib is not None
+        if size <= 0:
+            raise ValueError("I/O size must be positive")
+        if size > _MAX_IO_BYTES:
+            raise ValueError(f"I/O size {size} exceeds max {_MAX_IO_BYTES}")
+        iov = _NdsIoVec(buf_addr=ptr_base + ptr_offset, buf_len=size, reserved=0)
+        cb = _NdsIoCb()
+        cb.opcode = NDS_IO_OP_PWRITE if is_write else NDS_IO_OP_PREAD
+        cb.rw_flags = NDS_IO_F_REGISTERED_MEM
+        cb.obj.reserved = 0
+        cb.obj.u.fd = file_fd
+        cb.offset = file_offset
+        cb.user_data = 0
+        cb.iov = ctypes.pointer(iov)
+        cb.iov_cnt = 1
+        cb.host_pid = 0
+        cb.reserved = (0, 0)
+        ret = self._lib.nds_io_submit(ctx, 1, ctypes.byref(cb))
+        if ret != 1:
+            _posix_errno(ret if ret < 0 else -1, "nds_io_submit")
+        events = (_NdsIoEvent * 1)()
+        # NULL timeout waits until this context has a completion.
+        ret = self._lib.nds_io_getevents(ctx, 1, 1, events, None)
+        if ret != 1:
+            _posix_errno(ret if ret < 0 else -5, "nds_io_getevents")
+        if events[0].res != 0:
+            raise OSError(-int(events[0].res), "nds_io completion")
+        _check_byte_count(size, size, "nds_io")
+        return size
 
 
 @lru_cache(maxsize=1)
