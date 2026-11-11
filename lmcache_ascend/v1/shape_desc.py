@@ -79,9 +79,9 @@ def install_plane_geometry_fill() -> None:
     """
     # Third Party
     import lmcache.lmcache_native as lmcache_native
-    import lmcache.v1.gpu_connector.utils as gpu_connector_utils
+    import lmcache.v1.common.utils as common_utils
 
-    original = gpu_connector_utils.make_page_buffer_shape_desc
+    original = common_utils.make_page_buffer_shape_desc
     plane_tuple_fmts = (
         lmcache_native.EngineKVFormat.NL_X_NP_X_NB_BS_ONE_HS,
         lmcache_native.EngineKVFormat.NL_X_TWO_X_NB_BS_NH_HS,
@@ -117,4 +117,4 @@ def install_plane_geometry_fill() -> None:
             )
         return desc
 
-    gpu_connector_utils.make_page_buffer_shape_desc = make_page_buffer_shape_desc
+    common_utils.make_page_buffer_shape_desc = make_page_buffer_shape_desc
