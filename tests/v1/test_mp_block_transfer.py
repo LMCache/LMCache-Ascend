@@ -92,7 +92,7 @@ def _factory_shape_desc(
 ) -> _FactoryShapeDesc:
     """Build a descriptor through upstream's production factory."""
     # Third Party
-    from lmcache.v1.gpu_connector.utils import make_page_buffer_shape_desc
+    from lmcache.v1.common.utils import make_page_buffer_shape_desc
 
     return cast(
         _FactoryShapeDesc,

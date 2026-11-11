@@ -26,14 +26,17 @@ prepare_environment()
 
 # Third Party
 from lmcache.utils import EngineType  # noqa: E402
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
-from lmcache.v1.gpu_connector.utils import LayoutHints  # noqa: E402
-from lmcache.v1.multiprocess.custom_types import KVCache  # noqa: E402
-from lmcache.v1.multiprocess.modules import lmcache_driven_transfer  # noqa: E402
-from lmcache.v1.multiprocess.transfer_context.worker_transfer import (  # noqa: E402
+from lmcache.v1.client.worker_transfer import (  # noqa: E402
     LMCacheDrivenTransferContext,
     create_transfer_context,
 )
+from lmcache.v1.common.utils import LayoutHints  # noqa: E402
+from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.multiprocess.custom_types import (  # noqa: E402
+    IPCCacheServerKey,
+    KVCache,
+)
+from lmcache.v1.multiprocess.modules import lmcache_driven_transfer  # noqa: E402
 from lmcache.v1.platform.devices.npu.ipc_wrapper import NpuIPCWrapper  # noqa: E402
 import lmcache.lmcache_native as lmcache_native  # noqa: E402
 
@@ -289,13 +292,14 @@ def test_lmcache_driven_store_and_retrieve_roundtrip(
                 monkeypatch.setattr(
                     module, "get_and_touch_context_entry", lambda iid: entry
                 )
-                key = SimpleNamespace(
-                    request_id="e2e",
-                    cache_salt="",
+                key = IPCCacheServerKey.from_token_ids(
+                    model_name="mla-e2e",
+                    world_size=1,
                     worker_id=0,
                     token_ids=list(range(CHUNK)),
                     start=0,
                     end=CHUNK,
+                    request_id="e2e",
                 )
 
                 block_ids = [list(range(NB))]
