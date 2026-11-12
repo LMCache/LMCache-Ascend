@@ -18,6 +18,7 @@ from types import ModuleType, SimpleNamespace
 import torch
 
 order, scenario = sys.argv[1:]
+acl_mode = scenario in ("acl", "benchmark")
 events, buffers = [], {}
 version = ModuleType("lmcache_ascend._version")
 version.__version__ = "0.0.0"
@@ -96,7 +97,7 @@ original_init = l1_memory_manager.L1MemoryManager.__init__
 def inspect_allocator(self, config):
     original_init(self, config)
     pool = self._allocator
-    assert hasattr(pool, "ascend_host_allocation") == (scenario == "acl")
+    assert hasattr(pool, "ascend_host_allocation") == acl_mode
     ptr = pool.buffer.data_ptr()
     assert ptr in buffers
     self.close()
@@ -117,14 +118,26 @@ def run_http(**kwargs):
     )
 http_server.run_http_server = run_http
 try:
-    main(["server", "--no-l1-use-lazy", "--shm-name", "",
-          "--l1-size-gb", "0.000004", "--eviction-policy", "LRU",
-          "--disable-observability"])
+    if scenario == "benchmark":
+        import runpy
+        from lmcache.tools.transfer_channel_benchmark import benchmark
+        config_type = benchmark.L1MemoryManagerConfig
+        sys.argv = ["benchmark", "--role", "server", "--buffer-size", "1MB",
+                    "--page-size", "4KB", "--object-size", "4KB",
+                    "--num-objects", "1", "--num-source-objects", "1"]
+        runpy.run_module("lmcache_ascend.v1.mp_transfer_channel_benchmark",
+                         run_name="__main__")
+    else:
+        main(["server", "--no-l1-use-lazy", "--shm-name", "",
+              "--l1-size-gb", "0.000004", "--eviction-policy", "LRU",
+              "--disable-observability"])
 except ReachedAllocator:
     pass
 else:
     raise AssertionError("must reach L1 construction")
-if scenario == "acl":
+if scenario == "benchmark":
+    assert benchmark.L1MemoryManagerConfig is config_type
+if acl_mode:
     assert events == ["init", "acl_allocate", "sync", "acl_free"]
 else:
     assert events.count("default_allocate") == 1
@@ -139,6 +152,7 @@ print("activation checks passed")
     [
         ("lmcache_first", "acl"),
         ("ascend_first", "acl"),
+        ("ascend_first", "benchmark"),
         ("lmcache_first", "unset"),
         ("lmcache_first", "default"),
         ("lmcache_first", "invalid"),

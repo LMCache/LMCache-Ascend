@@ -30,7 +30,7 @@ def modules(monkeypatch):
         package = ModuleType(name)
         package.__path__ = [str(path)]
         monkeypatch.setitem(sys.modules, name, package)
-    for name in ("mp_host_memory",):
+    for name in ("mp_host_memory", "mp_transfer_channel_benchmark"):
         monkeypatch.delitem(sys.modules, "lmcache_ascend.v1." + name, raising=False)
 
     native = ModuleType("lmcache_ascend.c_ops")
@@ -54,7 +54,7 @@ def modules(monkeypatch):
     monkeypatch.delenv("LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR", raising=False)
     mp = importlib.import_module("lmcache_ascend.v1.mp_host_memory")
     yield SimpleNamespace(mp=mp, native=native, buffers=buffers, events=events)
-    for name in ("mp_host_memory",):
+    for name in ("mp_host_memory", "mp_transfer_channel_benchmark"):
         sys.modules.pop("lmcache_ascend.v1." + name, None)
 
 
@@ -62,6 +62,32 @@ def config(**kwargs):
     options = dict(size_in_bytes=4096, use_lazy=False, shm_name="", align_bytes=64)
     options.update(kwargs)
     return L1MemoryManagerConfig(**options)
+
+
+@pytest.mark.parametrize("selection", ["default", "aclrt_malloc_host"])
+def test_benchmark_entry_scopes_empty_shm_to_acl_run(modules, monkeypatch, selection):
+    # Third Party
+    from lmcache.tools.transfer_channel_benchmark import benchmark
+
+    monkeypatch.setenv("LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR", selection)
+    entry = importlib.import_module("lmcache_ascend.v1.mp_transfer_channel_benchmark")
+    config_type = benchmark.L1MemoryManagerConfig
+    # Inspect the real benchmark's configuration without allocating SHM or ACL memory.
+    monkeypatch.setattr(benchmark, "L1MemoryManager", lambda config: config)
+    monkeypatch.setattr(sys, "argv", ["benchmark", "--role", "client"])
+
+    def run_client(cfg):
+        config = benchmark._create_l1_manager(cfg, 1048576)
+        if selection == "aclrt_malloc_host":
+            assert config.shm_name == ""
+        else:
+            assert config.shm_name.startswith("lmcache_l1_pool_")
+        return selection == "aclrt_malloc_host"
+
+    monkeypatch.setattr(benchmark, "client_main", run_client)
+    assert entry.main() == (0 if selection == "aclrt_malloc_host" else 1)
+    assert benchmark.L1MemoryManagerConfig is config_type
+    assert config_type(size_in_bytes=1048576, use_lazy=False).shm_name
 
 
 def test_acl_tensor_aliases_original_allocation_and_keeps_free_function(
