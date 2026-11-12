@@ -7,6 +7,7 @@ from ._version import __version_tuple__ as __version_tuple__  # noqa: F401  # is
 
 # Standard
 from typing import Any
+import os
 import sys
 
 # NOTE: Must be manually edited per each version and
@@ -97,6 +98,22 @@ def _patch_logical_block_size():
     install_overrides()
 
 
+def _patch_mp_host_memory() -> None:
+    """Install opt-in MP memory wrappers during package activation."""
+    selection = os.environ.get("LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR", "default")
+    if selection == "default":
+        return
+    try:
+        # First Party
+        from lmcache_ascend.v1.mp_host_memory import install_mp_host_memory
+
+        install_mp_host_memory(selection)
+    except Exception as exc:
+        # LMCache catches Exception during native backend loading. An explicit
+        # ACL selection must stop startup if its import or installation fails.
+        raise SystemExit(f"Failed to install Ascend MP host memory: {exc}") from exc
+
+
 # Check if we've already patched to avoid redundant work
 if not LMCACHE_ASCEND_PATCHED:
     # Must run before any patch: the activation imports core modules that
@@ -107,5 +124,7 @@ if not LMCACHE_ASCEND_PATCHED:
 
     if _is_vllm_runtime():
         _patch_logical_block_size()
+
+    _patch_mp_host_memory()
 
     LMCACHE_ASCEND_PATCHED = True

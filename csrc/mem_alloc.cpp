@@ -9,6 +9,27 @@
 #include <string>
 #include <sys/mman.h>
 
+uintptr_t alloc_host_ptr(std::size_t size) {
+  if (size == 0) {
+    throw std::invalid_argument("alloc_host_ptr requires a nonzero size");
+  }
+  void *ptr = nullptr;
+  aclError err = aclrtMallocHost(&ptr, size);
+  if (err != ACL_SUCCESS) {
+    throw std::runtime_error("aclrtMallocHost failed: " + std::to_string(err) +
+                             " | size: " + std::to_string(size));
+  }
+  return reinterpret_cast<uintptr_t>(ptr);
+}
+
+void free_host_ptr(uintptr_t ptr) {
+  aclError err = aclrtFreeHost(reinterpret_cast<void *>(ptr));
+  if (err != ACL_SUCCESS) {
+    throw std::runtime_error("aclrtFreeHost failed: " + std::to_string(err) +
+                             " | ptr: " + std::to_string(ptr));
+  }
+}
+
 uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
   void *ptr = nullptr;
   // no flags
