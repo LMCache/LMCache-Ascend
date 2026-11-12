@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "cachegen_kernels.h"
+#include "cb_retrieve_plan.h"
 #include "completion_recorder.h"
 #include "dcmi_management.h"
 #include "event_recorder.h"
@@ -12,6 +13,8 @@
 #include "pos_kernels.h"
 #include <cstdint>
 #include <iostream>
+#include <limits>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <stdexcept>
@@ -289,6 +292,152 @@ PYBIND11_MODULE(c_ops, m) {
       // queue (getCurrentNPUStream().stream()), so the GIL can be released
       // for the whole enqueue.
       py::call_guard<py::gil_scoped_release>());
+
+  // Field-for-field ABI match with LMCache's CUDA CacheBlend planner. Only
+  // slot_mapping_* changes between requests; all other fields describe the
+  // registered paged cache and its temporary slots.
+  py::class_<CBGroupSpec>(m, "CBGroupSpec", py::module_local())
+      .def(
+          py::init(
+              [](uintptr_t paged_kv_ptrs, std::vector<int64_t> temp_buffer_ptrs,
+                 int num_layers, int slot_tokens, int hidden_elems,
+                 int element_size, int engine_kv_format, int page_buffer_size,
+                 int block_size, int head_size, uintptr_t slot_mapping_base,
+                 int64_t slot_mapping_capacity, uintptr_t cos_sin_cache,
+                 int rot_dim, int rope_num_kv_heads, int64_t rope_head_stride,
+                 int key_scalar_type, bool is_neox, int64_t rope_base_offset,
+                 int64_t block_stride_elems, int cache_scalar_type) {
+                return CBGroupSpec{
+                    paged_kv_ptrs,
+                    std::move(temp_buffer_ptrs),
+                    num_layers,
+                    slot_tokens,
+                    hidden_elems,
+                    element_size,
+                    static_cast<EngineKVFormat>(engine_kv_format),
+                    page_buffer_size,
+                    block_size,
+                    head_size,
+                    block_stride_elems,
+                    slot_mapping_base,
+                    slot_mapping_capacity,
+                    cos_sin_cache,
+                    rot_dim,
+                    rope_num_kv_heads,
+                    rope_head_stride,
+                    key_scalar_type,
+                    cache_scalar_type < 0 ? key_scalar_type : cache_scalar_type,
+                    is_neox,
+                    rope_base_offset};
+              }),
+          py::arg("paged_kv_ptrs"), py::arg("temp_buffer_ptrs"),
+          py::arg("num_layers"), py::arg("slot_tokens"),
+          py::arg("hidden_elems"), py::arg("element_size"),
+          py::arg("engine_kv_format"), py::arg("page_buffer_size"),
+          py::arg("block_size"), py::arg("head_size"),
+          py::arg("slot_mapping_base"), py::arg("slot_mapping_capacity"),
+          py::arg("cos_sin_cache"), py::arg("rot_dim"),
+          py::arg("rope_num_kv_heads"), py::arg("rope_head_stride"),
+          py::arg("key_scalar_type"), py::arg("is_neox"),
+          py::arg("rope_base_offset") = 0, py::arg("block_stride_elems") = 0,
+          py::arg("cache_scalar_type") = -1)
+      .def_readwrite("slot_mapping_base", &CBGroupSpec::slot_mapping_base)
+      .def_readwrite("slot_mapping_capacity",
+                     &CBGroupSpec::slot_mapping_capacity);
+
+  // Flat int64 tables avoid constructing several Python objects per chunk:
+  // staging/scatters/ropes have four columns and step_offsets contains the
+  // cumulative exclusive row end for those three tables at every step.
+  m.def(
+      "execute_cb_retrieve_plan_flat",
+      [](const torch::Device &device, size_t host_buffer_alignment,
+         const std::vector<CBGroupSpec> &group_specs,
+         py::array_t<int64_t, py::array::c_style | py::array::forcecast>
+             staging,
+         py::array_t<int64_t, py::array::c_style | py::array::forcecast> ropes,
+         py::array_t<int64_t, py::array::c_style | py::array::forcecast>
+             scatters,
+         py::array_t<int64_t, py::array::c_style | py::array::forcecast>
+             step_offsets) {
+        TORCH_CHECK(staging.ndim() == 2 && staging.shape(1) == 4,
+                    "staging table must be [n, 4]");
+        TORCH_CHECK(ropes.ndim() == 2 && ropes.shape(1) == 4,
+                    "ropes table must be [n, 4]");
+        TORCH_CHECK(scatters.ndim() == 2 && scatters.shape(1) == 4,
+                    "scatters table must be [n, 4]");
+        TORCH_CHECK(step_offsets.ndim() == 2 && step_offsets.shape(1) == 3,
+                    "step_offsets table must be [n_steps, 3]");
+
+        const int64_t *st = staging.data();
+        const int64_t *rp = ropes.data();
+        const int64_t *sc = scatters.data();
+        const int64_t *so = step_offsets.data();
+        const int64_t n_steps = step_offsets.shape(0);
+        const auto checked_int = [](int64_t value, const char *name) {
+          TORCH_CHECK(value >= std::numeric_limits<int>::min() &&
+                          value <= std::numeric_limits<int>::max(),
+                      name, " is outside the C++ int range: ", value);
+          return static_cast<int>(value);
+        };
+
+        std::vector<CBRetrieveStep> steps;
+        steps.reserve(n_steps);
+        int64_t s0 = 0;
+        int64_t r0 = 0;
+        int64_t c0 = 0;
+        for (int64_t i = 0; i < n_steps; ++i) {
+          const int64_t s1 = so[i * 3];
+          const int64_t r1 = so[i * 3 + 1];
+          const int64_t c1 = so[i * 3 + 2];
+          TORCH_CHECK(s1 >= s0 && s1 <= staging.shape(0) && r1 >= r0 &&
+                          r1 <= ropes.shape(0) && c1 >= c0 &&
+                          c1 <= scatters.shape(0),
+                      "step_offsets not monotone or out of range at step ", i);
+
+          CBRetrieveStep step;
+          step.staging.reserve(s1 - s0);
+          for (int64_t j = s0; j < s1; ++j) {
+            TORCH_CHECK(st[j * 4] > 0 && st[j * 4 + 1] > 0,
+                        "staging pointers must be positive at row ", j);
+            TORCH_CHECK(st[j * 4 + 2] > 0 && st[j * 4 + 3] >= 0,
+                        "staging nbytes/host_offset invalid at row ", j);
+            step.staging.push_back(
+                StagingCopy{static_cast<uintptr_t>(st[j * 4]),
+                            static_cast<uintptr_t>(st[j * 4 + 1]),
+                            static_cast<size_t>(st[j * 4 + 2]),
+                            static_cast<size_t>(st[j * 4 + 3])});
+          }
+          step.ropes.reserve(r1 - r0);
+          for (int64_t j = r0; j < r1; ++j) {
+            step.ropes.push_back(
+                CBRopeVar{checked_int(rp[j * 4], "rope group_idx"),
+                          checked_int(rp[j * 4 + 1], "rope slot_idx"),
+                          rp[j * 4 + 2], rp[j * 4 + 3]});
+          }
+          step.scatters.reserve(c1 - c0);
+          for (int64_t j = c0; j < c1; ++j) {
+            step.scatters.push_back(CBScatterVar{
+                checked_int(sc[j * 4], "scatter group_idx"),
+                checked_int(sc[j * 4 + 1], "scatter slot_idx"), sc[j * 4 + 2],
+                checked_int(sc[j * 4 + 3], "scatter n_tok")});
+          }
+          steps.push_back(std::move(step));
+          s0 = s1;
+          r0 = r1;
+          c0 = c1;
+        }
+        TORCH_CHECK(s0 == staging.shape(0) && r0 == ropes.shape(0) &&
+                        c0 == scatters.shape(0),
+                    "step_offsets must consume every plan table row");
+        {
+          py::gil_scoped_release release;
+          execute_cb_retrieve_plan(device, host_buffer_alignment, group_specs,
+                                   steps);
+        }
+      },
+      py::arg("device"), py::arg("host_buffer_alignment"),
+      py::arg("group_specs"), py::arg("staging"), py::arg("ropes"),
+      py::arg("scatters"), py::arg("step_offsets"));
   m.def("lmcache_memcpy_async", &lmcache_memcpy_async,
         py::call_guard<py::gil_scoped_release>());
 }
