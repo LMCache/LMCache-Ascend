@@ -37,3 +37,24 @@ In the table above, “hybrid KV cache management formats” means **MLA/DSA mul
 ## Relationship to the LMCache dev branch
 
 The MP architecture (the `lmcache server` CLI, the `LMCacheMPConnector`, and the transfer-mode layer) is developed on the LMCache `dev` branch — the main line — and the matching Ascend backends (NPU platform routing, block-transfer ops, hccl/hixl bindings) live in the LMCache-Ascend repository. Install both from the official repositories only — see the installation section of [lmcache_driven.md](lmcache_driven.md) for the exact procedure. The classic in-process connector (`LMCacheAscendConnectorV1Dynamic`) is a separate integration that uses its own LMCache release line; its installation must not be mixed with the MP-mode checkout in one Python environment.
+
+## Experimental Qwen3 selective blend controls
+
+`MPSelectiveBlendConnector` supports dense, unquantized Qwen3 with NHD KV,
+eager execution, synchronous scheduling, one sequence, and APC disabled.
+Its `kv_connector_extra_config` accepts:
+
+| Key | Default | Effect |
+| --- | --- | --- |
+| `lmcache.mp.blend_selection_metric` | `"k"` | Rank cached tokens by squared FP32 K deviation; `"v"` ranks by V deviation, matching the author's public selection metric. |
+| `lmcache.mp.blend_refresh_check_layer` | `false` | If true, keep all freshly projected KV at the check layer; later layers still update only selected positions. |
+
+These controls allow separate ablations of token selection and check-layer
+updates. They do not implement the paper's layerwise I/O pipeline or establish
+quality guarantees for Qwen3. Both preserve mandatory uncached positions and
+the scheduler-confirmed prefix.
+
+Document precomputation must avoid recursively blending earlier documents.
+With the accompanying LMCache connector support, pass request-level
+`kv_transfer_params={"lmcache.skip_load": true}` during precomputation to
+bypass cache lookup and compute fresh KV while retaining normal cache stores.

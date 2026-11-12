@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <acl/acl.h>
 #include <cstdint>
 #include <torch/extension.h>
 #include <torch/torch.h>
@@ -140,3 +141,23 @@ void lmcache_memcpy_async(uintptr_t dest, uintptr_t src, size_t nbytes,
                           TransferDirection direction,
                           size_t host_buffer_offset,
                           size_t host_buffer_alignments);
+
+// Same copy primitive for native plan executors that already resolved the
+// caller's current stream. Keeping every operation on this stream preserves
+// staging -> kernel ordering without another torch_npu queue hand-off.
+void lmcache_memcpy_async_on_stream(uintptr_t dest, uintptr_t src,
+                                    size_t nbytes, TransferDirection direction,
+                                    size_t host_buffer_offset,
+                                    size_t host_buffer_alignments,
+                                    aclrtStream stream);
+
+// Native token-level MP transfer, one launch for all layers. Unlike block
+// transfer this accepts arbitrary int64 slot mappings and partial chunks.
+// Uses the caller's resolved stream; it does not drain torch_npu or
+// synchronize.
+void multi_layer_token_kv_transfer_on_stream(
+    uintptr_t paged_kv_ptrs, uintptr_t lmc_buffer, uintptr_t slot_mapping,
+    int32_t num_tokens, TransferDirection direction, EngineKVFormat format,
+    int32_t num_layers, int32_t slot_tokens, int64_t hidden_elems,
+    int32_t element_size, int64_t page_buffer_size, int32_t block_size,
+    int64_t block_stride_elems, uint32_t aiv_num, aclrtStream stream);

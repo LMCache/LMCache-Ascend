@@ -19,7 +19,9 @@ public:
        uint64_t numTokensEachFrontCore, uint64_t numTokensEachTailCore,
        uint64_t loopTimeEachFrontCore, uint64_t loopTimeEachTailCore,
        uint64_t numTokensFrontCoreLastLoop, uint64_t numTokensTailCoreLastLoop,
-       TPipe* pipe);
+       TPipe* pipe, bool usePositionRange = false,
+       uint64_t oldPositionStart = 0, uint64_t newPositionStart = 0,
+       uint64_t positionSlots = 1);
 
   __aicore__ inline void Process();
   __aicore__ inline void Compute(uint64_t index, uint64_t loopN);
@@ -82,7 +84,9 @@ __aicore__ inline void FusedRopeFP16<T>::Init(
     uint64_t numTokensTailCoreEachLoop, uint64_t numTokensEachFrontCore,
     uint64_t numTokensEachTailCore, uint64_t loopTimeEachFrontCore,
     uint64_t loopTimeEachTailCore, uint64_t numTokensFrontCoreLastLoop,
-    uint64_t numTokensTailCoreLastLoop, TPipe* pipe) {
+    uint64_t numTokensTailCoreLastLoop, TPipe* pipe, bool usePositionRange,
+    uint64_t oldPositionStart, uint64_t newPositionStart,
+    uint64_t positionSlots) {
 
   this->InitData(coreNumUse, numTokens, numHeads, headSize, rotaryDim,
                  kLeadingDimension, isNeoxStyle, frontCore, tailCore,
@@ -90,6 +94,8 @@ __aicore__ inline void FusedRopeFP16<T>::Init(
                  numTokensEachFrontCore, numTokensEachTailCore,
                  loopTimeEachFrontCore, loopTimeEachTailCore,
                  numTokensFrontCoreLastLoop, numTokensTailCoreLastLoop);
+  this->SetPositionRange(usePositionRange, oldPositionStart, newPositionStart,
+                         positionSlots);
 
   headBlockLen = static_cast<uint16_t>(this->headSize / ELE_NUM_FP32);
   rotaryBlockLen = static_cast<uint16_t>(this->rotaryDim / ELE_NUM_FP32);
@@ -104,10 +110,12 @@ __aicore__ inline void FusedRopeFP16<T>::Init(
         (this->blockIdx_ - this->frontCore) * this->numTokensEachTailCore;
   }
 
-  oldPositionIdGM.SetGlobalBuffer((__gm__ uint64_t*)oldPositionId +
-                                  blockOffset);
-  newPositionIdGM.SetGlobalBuffer((__gm__ uint64_t*)newPositionId +
-                                  blockOffset);
+  if (!usePositionRange) {
+    oldPositionIdGM.SetGlobalBuffer((__gm__ uint64_t*)oldPositionId +
+                                    blockOffset);
+    newPositionIdGM.SetGlobalBuffer((__gm__ uint64_t*)newPositionId +
+                                    blockOffset);
+  }
   keyInGM.SetGlobalBuffer((__gm__ T*)keyIn +
                           blockOffset * this->kLeadingDimension);
   cosSinCacheGM.SetGlobalBuffer((__gm__ T*)cosSinCache);
@@ -181,7 +189,7 @@ __aicore__ inline void FusedRopeFP16<T>::ReverseRope(
   uint64_t localStartAddr = 0;
   for (uint32_t i = 0; i < loopN; ++i) {
     uint64_t offsetPos = this->numTokensEachLoopCurrentCore * index + i;
-    uint64_t pos = oldPositionIdGM.GetValue(offsetPos);
+    uint64_t pos = this->OldPosition(oldPositionIdGM, offsetPos, blockOffset);
     PipeBarrier<PIPE_ALL>();
     DataCopy(inQueueCosSinCacheBeforeCastLocal,
              cosSinCacheGM[pos * this->rotaryDim], {1, calBlockLenFP16, 0, 0});
@@ -208,7 +216,7 @@ __aicore__ inline void FusedRopeFP16<T>::ReverseRope(
   localStartAddr = 0;
   for (uint32_t i = 0; i < loopN; ++i) {
     uint64_t offsetPos = this->numTokensEachLoopCurrentCore * index + i;
-    uint64_t pos = oldPositionIdGM.GetValue(offsetPos);
+    uint64_t pos = this->OldPosition(oldPositionIdGM, offsetPos, blockOffset);
     PipeBarrier<PIPE_ALL>();
     DataCopy(inQueueCosSinCacheBeforeCastLocal,
              cosSinCacheGM[pos * this->rotaryDim + this->rotaryDim / 2],
@@ -265,7 +273,7 @@ __aicore__ inline void FusedRopeFP16<T>::Rope(
   uint64_t localStartAddr = 0;
   for (uint32_t i = 0; i < loopN; ++i) {
     uint64_t offsetPos = this->numTokensEachLoopCurrentCore * index + i;
-    uint64_t pos = newPositionIdGM.GetValue(offsetPos);
+    uint64_t pos = this->NewPosition(newPositionIdGM, offsetPos, blockOffset);
     PipeBarrier<PIPE_ALL>();
     DataCopy(inQueueCosSinCacheBeforeCastLocal,
              cosSinCacheGM[pos * this->rotaryDim], {1, calBlockLenFP16, 0, 0});
@@ -289,7 +297,7 @@ __aicore__ inline void FusedRopeFP16<T>::Rope(
   localStartAddr = 0;
   for (uint32_t i = 0; i < loopN; ++i) {
     uint64_t offsetPos = this->numTokensEachLoopCurrentCore * index + i;
-    uint64_t pos = newPositionIdGM.GetValue(offsetPos);
+    uint64_t pos = this->NewPosition(newPositionIdGM, offsetPos, blockOffset);
     PipeBarrier<PIPE_ALL>();
     DataCopy(inQueueCosSinCacheBeforeCastLocal,
              cosSinCacheGM[pos * this->rotaryDim + this->rotaryDim / 2],
