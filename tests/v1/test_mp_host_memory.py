@@ -155,6 +155,8 @@ def test_mixed_rollback_failure_preserves_construction_error(
 
     monkeypatch.setattr(mixed, "TensorMemoryAllocator", fail_pool)
     monkeypatch.setattr(modules.native, "free_host_ptr", fail_free)
+    # pytest 8 captures root logs only; LMCache loggers do not propagate.
+    monkeypatch.setattr(modules.mp.logger, "handlers", [caplog.handler])
     with pytest.raises(ValueError, match="pool failed"):
         modules.mp.create_acl_mixed_allocator(config(), "npu")
     assert "cleanup failed" in caplog.text
