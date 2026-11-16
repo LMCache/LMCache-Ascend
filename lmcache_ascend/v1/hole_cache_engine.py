@@ -7,8 +7,8 @@ from typing import Any, Generator, Optional, Union
 # Third Party
 from lmcache.logging import init_logger
 from lmcache.utils import CacheEngineKey
+from lmcache.v1.common.utils import assert_layerwise_gpu_connector
 from lmcache.v1.gpu_connector.gpu_connectors import GPUConnectorInterface
-from lmcache.v1.gpu_connector.utils import assert_layerwise_gpu_connector
 import torch
 
 logger = init_logger(__name__)

@@ -7,6 +7,7 @@ import threading
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
+from lmcache.v1.common.utils import LayoutHints
 from lmcache.v1.compute.blend.utils import LMCBlenderBuilder
 from lmcache.v1.gpu_connector.gpu_connectors import (
     SGLangGPUConnector,
@@ -15,7 +16,6 @@ from lmcache.v1.gpu_connector.gpu_connectors import (
     VLLMPagedMemGPUConnectorV2,
     VLLMPagedMemLayerwiseGPUConnector,
 )
-from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.memory_allocators.gpu_memory_allocator import GPUMemoryAllocator
 from lmcache.v1.memory_management import MemoryFormat, MemoryObj
 from lmcache.v1.metadata import LMCacheMetadata
