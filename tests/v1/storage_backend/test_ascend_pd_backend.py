@@ -822,7 +822,6 @@ class TestAscendPDBackend:
         }
         backend._peer_alloc_backoff_lock = threading.Lock()
         backend.tp_rank = 0
-        backend.proxy_side_channel = MagicMock()
         backend._ensure_peer_connection = MagicMock()
         backend._remote_allocate = MagicMock()
 
@@ -838,11 +837,11 @@ class TestAscendPDBackend:
             backend, [_make_key("k1")], mock_objs, transfer_spec
         )
 
-        # Should NOT have called _ensure_peer_connection or _remote_allocate
+        # Should NOT have called _ensure_peer_connection or
+        # _remote_allocate (and nothing else fires: no proxy gate
+        # exists under the router-orchestrated flow).
         backend._ensure_peer_connection.assert_not_called()
         backend._remote_allocate.assert_not_called()
-        # Should still send proxy notification for last prefill
-        backend.proxy_side_channel.send.assert_called_once()
 
     def test_handle_pull_done_releases_resources(self):
         """_handle_pull_done releases pinned MemObjs."""
