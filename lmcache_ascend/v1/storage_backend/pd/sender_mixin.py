@@ -16,12 +16,13 @@ from lmcache.logging import init_logger
 from lmcache.utils import TORCH_DTYPE_TO_STR_DTYPE, CacheEngineKey
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.rpc_utils import get_zmq_socket
-from lmcache.v1.storage_backend.pd_backend import AllocRequest, ProxyNotif
+from lmcache.v1.storage_backend.pd_backend import AllocRequest
 import msgspec
 import zmq
 
 # First Party
 from lmcache_ascend.v1.storage_backend.pd.messages import (
+    AscendAllocRequest,
     AscendAllocResponse,
     AscendPDMsg,
     PullDoneSignal,
@@ -258,27 +259,130 @@ class AscendPDSenderMixin:
         receiver_init_port: int,
         receiver_alloc_port: int,
     ) -> None:
-        """Override to call parent and handle any Ascend-specific setup."""
-        super()._ensure_peer_connection(
-            receiver_id=receiver_id,
-            receiver_host=receiver_host,
-            receiver_init_port=receiver_init_port,
-            receiver_alloc_port=receiver_alloc_port,
+        """Ascend-native peer setup, replacing the upstream implementation.
+
+        The upstream ``PDBackend._ensure_peer_connection`` drives the
+        nixl-based transfer stack and assumes nixl internals this backend
+        never initializes. The Ascend backend uses its own transfer
+        channel plus a ZMQ alloc side-channel, so this method performs
+        both per-peer, idempotently:
+
+        1. transfer-channel handshake: exchange engine names and the
+           buffer layout tables with the receiver rank (mooncake needs
+           the peer's engine name ``ip:rpc_port`` and the buffer bases
+           for every ``batch_transfer_sync``),
+        2. the alloc side-channel socket the push/pull paths use to
+           request remote page allocation.
+        """
+        if receiver_id in self.initialized_peers:
+            return
+        with self._peer_init_lock:
+            if receiver_id in self.initialized_peers:
+                return
+            self.transfer_channel.lazy_init_peer_connection(
+                local_id=self.local_id,
+                peer_id=receiver_id,
+                peer_init_url=f"{receiver_host}:{receiver_init_port}",
+            )
+            sock = get_zmq_socket(
+                self.zmq_context,
+                f"{receiver_host}:{receiver_alloc_port}",
+                "tcp",
+                zmq.REQ,
+                "connect",
+            )
+            # Bound the alloc RPC: a dead peer must surface as a
+            # timeout (teardown + alloc_failed backoff) instead of
+            # wedging the engine's save path forever.
+            timeout_ms = int(
+                getattr(self._config, "pd_alloc_rpc_timeout_ms", 10000)
+            )
+            sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
+            sock.setsockopt(zmq.SNDTIMEO, timeout_ms)
+            self.mem_alloc_sockets[receiver_id] = sock
+            self.initialized_peers.add(receiver_id)
+        logger.info(
+            "PD peer connection established: %s (channel handshake + "
+            "alloc socket)",
+            receiver_id,
         )
 
     def _remote_allocate(
         self, receiver_id: str, alloc_request: AllocRequest
     ) -> AscendAllocResponse:
         """Send an ``AllocRequest`` and decode the response as
-        ``AscendAllocResponse`` (with UUID-based buffer refs)."""
+        ``AscendAllocResponse`` (with UUID-based buffer refs).
+
+        A send/recv timeout answers ``alloc_failed`` so the caller's
+        failure path (release pinned objs + per-peer backoff) handles
+        the dead peer without an exception unwinding the save path.
+        """
         side_channel = self.mem_alloc_sockets[receiver_id]
-        side_channel.send(msgspec.msgpack.encode(alloc_request))
-        msg = side_channel.recv()
+        try:
+            side_channel.send(msgspec.msgpack.encode(alloc_request))
+            msg = side_channel.recv()
+        except zmq.Again:
+            logger.warning(
+                "Alloc RPC to %s timed out; reconnecting on the next "
+                "attempt and reporting alloc_failed",
+                receiver_id,
+            )
+            self._teardown_peer_connection(receiver_id)
+            return AscendAllocResponse(
+                already_sent_indexes=[],
+                remote_buffer_uuids=[],
+                remote_indexes=[],
+                alloc_failed=True,
+            )
         alloc_response = msgspec.msgpack.decode(msg, type=AscendPDMsg)
         assert isinstance(alloc_response, AscendAllocResponse), (
             f"Expected AscendAllocResponse, got {type(alloc_response)}"
         )
         return alloc_response
+
+    def _get_remote_alloc_request(
+        self,
+        keys: Sequence[CacheEngineKey],
+        mem_objs: List[MemoryObj],
+        transfer_spec: Any = None,
+    ) -> AllocRequest:
+        """Build the alloc request, extended with token context.
+
+        Same layout fields as upstream (fmt / shape / dtype /
+        last_chunk_toks from the memory objects). When the transfer
+        spec carries the prompt tokens (the MP+PD connector's send
+        instructions do), the request becomes an ``AscendAllocRequest``
+        so the receiver can dedup against its own L1: the full token
+        ids (server chunk hashes are rolling from token 0) plus the
+        absolute token position of the first key's chunk. The first
+        key always starts exactly at ``spec.start`` because shipment
+        boundaries are PD-chunk aligned.
+        """
+        fmt = mem_objs[0].meta.fmt
+        shape = mem_objs[0].meta.shape
+        dtype = TORCH_DTYPE_TO_STR_DTYPE[mem_objs[0].meta.dtype]
+        token_dim = fmt.token_dim()
+        last_chunk_toks = mem_objs[-1].meta.shape[token_dim]
+        str_keys = [key.to_string() for key in keys]
+
+        token_ids = getattr(transfer_spec, "token_ids", None)
+        if token_ids:
+            return AscendAllocRequest(
+                keys=str_keys,
+                fmt=fmt.value,
+                shape=list(shape),
+                dtype=dtype,
+                last_chunk_toks=last_chunk_toks,
+                token_ids=list(token_ids),
+                token_start=int(getattr(transfer_spec, "start", 0)),
+            )
+        return AllocRequest(
+            keys=str_keys,
+            fmt=fmt.value,
+            shape=list(shape),
+            dtype=dtype,
+            last_chunk_toks=last_chunk_toks,
+        )
 
     def batched_submit_put_task(
         self,
@@ -326,15 +430,28 @@ class AscendPDSenderMixin:
                 # would double-decrement the ref count, causing a
                 # premature free and PagedTensorMemoryAllocator
                 # double-free corruption.
-                if transfer_spec.is_last_prefill:
-                    notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                    self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
                 return
 
         if self.pull_mode:
             self._batched_submit_put_task_pull(keys, memory_objs, transfer_spec)
         else:
             self._batched_submit_put_task_push(keys, memory_objs, transfer_spec)
+
+    def _teardown_peer_connection(self, receiver_id: str) -> None:
+        """Drop a peer's REQ socket so the next send reconnects cleanly.
+
+        A REQ socket whose send/recv timed out is permanently
+        mid-cycle: every further send/recv would raise until the
+        socket is recreated. Rebuilding goes through
+        ``_ensure_peer_connection`` on the next transfer attempt.
+        """
+        sock = self.mem_alloc_sockets.pop(receiver_id, None)
+        if sock is not None:
+            try:
+                sock.close(linger=0)
+            except Exception:  # noqa: BLE001 - best-effort teardown
+                pass
+        self.initialized_peers.discard(receiver_id)
 
     def _batched_submit_put_task_push(
         self,
@@ -358,8 +475,13 @@ class AscendPDSenderMixin:
             receiver_alloc_port=receiver_alloc_port,
         )
 
-        # Remote allocation — returns UUID-based refs
-        alloc_request = self._get_remote_alloc_request(keys, memory_objs)
+        # Remote allocation — returns UUID-based refs. The request
+        # carries the prompt token ids + the absolute token position of
+        # the first chunk so the receiver can also dedup against its
+        # own L1 (server chunks are content-hashed from token 0).
+        alloc_request = self._get_remote_alloc_request(
+            keys, memory_objs, transfer_spec
+        )
         alloc_response = self._remote_allocate(receiver_id, alloc_request)
 
         if alloc_response.alloc_failed:
@@ -376,9 +498,6 @@ class AscendPDSenderMixin:
                 self._peer_alloc_backoff[receiver_id] = (
                     time.monotonic() + self._peer_alloc_backoff_ttl
                 )
-            if transfer_spec.is_last_prefill:
-                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
             return
 
         already_sent_indexes = set(alloc_response.already_sent_indexes)
@@ -418,9 +537,26 @@ class AscendPDSenderMixin:
                 "All memory objects already sent to remote peer. Skipping transfer."
             )
 
-        if transfer_spec.is_last_prefill:
-            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-            self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
+        # One-line transfer summary: what the decoder asked for vs what
+        # actually went over the wire after buffer/L1 dedup.
+        chunk_tokens = (
+            memory_objs[0].meta.shape[
+                memory_objs[0].meta.fmt.token_dim()
+            ]
+            if memory_objs
+            else 0
+        )
+        logger.info(
+            "PD XFER req=%s rank=%d total_chunks=%d sent_chunks=%d "
+            "skipped_chunks=%d approx_tokens=%d -> %s",
+            transfer_spec.req_id,
+            self.tp_rank,
+            len(memory_objs),
+            len(mem_objs_to_send),
+            len(memory_objs) - len(mem_objs_to_send),
+            len(mem_objs_to_send) * chunk_tokens,
+            receiver_id,
+        )
 
     def _batched_submit_put_task_pull(
         self,
@@ -484,6 +620,8 @@ class AscendPDSenderMixin:
             shape=list(shape),
             dtype=dtype,
             last_chunk_toks=last_chunk_toks,
+            token_ids=list(getattr(transfer_spec, "token_ids", None) or []),
+            token_start=int(getattr(transfer_spec, "start", 0)),
         )
 
         # Send PullReadyNotif and receive ack.
@@ -491,8 +629,24 @@ class AscendPDSenderMixin:
         # where the listener thread processes a PullDoneSignal (from the
         # receiver) before we have narrowed the entry to pinned_objs only.
         side_channel = self.mem_alloc_sockets[receiver_id]
-        side_channel.send(msgspec.msgpack.encode(pull_notif))
-        ack_bytes = side_channel.recv()
+        try:
+            side_channel.send(msgspec.msgpack.encode(pull_notif))
+            ack_bytes = side_channel.recv()
+        except zmq.Again:
+            # Dead/slow receiver: tear the REQ socket down for a clean
+            # reconnect and fail this batch like an alloc failure.
+            self._teardown_peer_connection(receiver_id)
+            logger.warning(
+                "Pull RPC to %s timed out; releasing %d pinned MemObjs",
+                receiver_id,
+                len(memory_objs),
+            )
+            release_memory_objects(memory_objs)
+            with self._peer_alloc_backoff_lock:
+                self._peer_alloc_backoff[receiver_id] = (
+                    time.monotonic() + self._peer_alloc_backoff_ttl
+                )
+            return
         ack = msgspec.msgpack.decode(ack_bytes, type=AscendPDMsg)
         assert isinstance(ack, PullReadyDoneAck), (
             f"Expected PullReadyDoneAck, got {type(ack)}"
@@ -512,9 +666,6 @@ class AscendPDSenderMixin:
                 self._peer_alloc_backoff[receiver_id] = (
                     time.monotonic() + self._peer_alloc_backoff_ttl
                 )
-            if transfer_spec.is_last_prefill:
-                notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-                self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
             return
 
         # Release already-sent objects, pin the rest
@@ -572,7 +723,3 @@ class AscendPDSenderMixin:
                 "Pull mode: all objects already sent for pull_id %s.",
                 pull_id,
             )
-
-        if transfer_spec.is_last_prefill:
-            notif_msg = ProxyNotif(req_id=transfer_spec.req_id)
-            self.proxy_side_channel.send(msgspec.msgpack.encode(notif_msg))
