@@ -125,6 +125,13 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         self._pd_received: dict[str, int] = {}
         self._pd_arrived_pending: list = []
         self._pd_removed_pending: list = []
+        # Requests this scheduler has ever given compute tokens to (the
+        # release signal of vLLM's WAITING_FOR_REMOTE_KVS can only be
+        # owed to requests that were never scheduled). Late PD
+        # landings for already-scheduled requests must not report
+        # finished_recving -- vLLM asserts the request is WAITING or
+        # FINISHED and dies otherwise.
+        self._pd_scheduled_reqs: set = set()
         self._pd_complete_logged: set[str] = set()
         self._pd_kv_caches: Optional[dict] = None
         # Step 6: producer-side save policy (both / pd_only / l1_only).
@@ -475,6 +482,14 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         signal for the same request (pure-PD cold start), and at most
         once per request. The store-through accounting flows through
         ``pd_loaded`` in every case, so nothing is lost.
+
+        A third shape exists that the worker cannot see: the request
+        was already scheduled (pending-wait timeout turned it into
+        self-recompute) and a LATE chunk lands afterwards -- its first
+        PD recving would target a RUNNING request. The scheduler-side
+        ``update_connector_output`` filters that by scheduling
+        knowledge; this method only suppresses what the worker can
+        observe.
         """
         if request_id in self._pd_recv_reported:
             return
@@ -592,6 +607,11 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         self, scheduler_output: "SchedulerOutput"
     ) -> "KVConnectorMetadata":
         metadata = super().build_connector_meta(scheduler_output)
+        for req_id, num in (
+            getattr(scheduler_output, "num_scheduled_tokens", None) or {}
+        ).items():
+            if num > 0:
+                self._pd_scheduled_reqs.add(req_id)
         kv_role = getattr(
             getattr(self._vllm_config, "kv_transfer_config", None),
             "kv_role",
@@ -610,6 +630,32 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         super().update_connector_output(connector_output)
+        raw_recving = getattr(connector_output, "finished_recving", None)
+        if raw_recving:
+            # vLLM processes this output right after this call
+            # (_update_from_kv_xfer_finished) and asserts every
+            # finished_recving request is WAITING_FOR_REMOTE_KVS or
+            # already FINISHED. A late PD landing can fire a request's
+            # FIRST recving after the request was already scheduled
+            # (pending-wait timeout -> self-recompute start -> the
+            # tail chunk arrives); upstream's release recving only
+            # ever targets never-scheduled requests, so filtering by
+            # our scheduling knowledge keeps every legitimate signal
+            # and drops the engine-killing ones.
+            keep = {
+                req_id
+                for req_id in raw_recving
+                if req_id not in self._pd_scheduled_reqs
+            }
+            if len(keep) != len(raw_recving):
+                dropped = sorted(set(raw_recving) - keep)
+                logger.info(
+                    "MP+PD: dropped late finished_recving for %d "
+                    "already-scheduled request(s): %s",
+                    len(dropped),
+                    dropped[:4],
+                )
+                connector_output.finished_recving = keep
         meta = getattr(connector_output, "kv_connector_worker_meta", None)
         if not isinstance(meta, MPPDWorkerMetadata):
             return
@@ -717,6 +763,7 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         self._pd_specs.pop(request.request_id, None)
         self._pd_load_issued.discard(request.request_id)
         self._pd_recv_reported.discard(request.request_id)
+        self._pd_scheduled_reqs.discard(request.request_id)
         self._pd_landed.pop(request.request_id, None)
         self._pd_pending_since.pop(request.request_id, None)
         return result
