@@ -124,6 +124,7 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         # build_connector_worker_meta call.
         self._pd_received: dict[str, int] = {}
         self._pd_arrived_pending: list = []
+        self._pd_removed_pending: list = []
         self._pd_complete_logged: set[str] = set()
         self._pd_kv_caches: Optional[dict] = None
         # Step 6: producer-side save policy (both / pd_only / l1_only).
@@ -383,6 +384,7 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         if engine is None or engine.pd_role != "receiver":
             return
         self._pd_arrived_pending.extend(engine.drain_arrived_keys())
+        self._pd_removed_pending.extend(engine.drain_removed_keys())
         metadata = self._get_connector_metadata()
         for req_meta in getattr(metadata, "requests", None) or []:
             req_id = req_meta.request_id
@@ -542,6 +544,7 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
             metadata is None
             and not self._pd_received
             and not self._pd_arrived_pending
+            and not self._pd_removed_pending
             and not self._pd_loaded_pending
         ):
             return None
@@ -556,9 +559,11 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
         )
         out.pd_received = self._pd_received
         out.pd_arrived_keys = self._pd_arrived_pending
+        out.pd_removed_keys = self._pd_removed_pending
         out.pd_loaded = self._pd_loaded_pending
         self._pd_received = {}
         self._pd_arrived_pending = []
+        self._pd_removed_pending = []
         self._pd_loaded_pending = {}
         return out
 
@@ -610,6 +615,13 @@ class LMCacheAscendMPPDConnectorV1Dynamic(LMCacheMPConnector):
             return
         if meta.pd_arrived_keys:
             self._pd_arrived.update(meta.pd_arrived_keys)
+        removed = getattr(meta, "pd_removed_keys", None) or []
+        if removed:
+            # Staging copies released after landing: retire them so
+            # arrival walks never trust a freed copy. Repeat content
+            # resolves through APC / L1; the alloc-time L1 oracle
+            # skips re-transferring stored chunks.
+            self._pd_arrived.difference_update(removed)
         for req_id, landed in (getattr(meta, "pd_loaded", None) or {}).items():
             if landed > self._pd_landed.get(req_id, 0):
                 self._pd_landed[req_id] = landed

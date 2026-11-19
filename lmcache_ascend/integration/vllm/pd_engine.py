@@ -125,11 +125,18 @@ class MPPDWorkerMetadata(LMCacheMPWorkerMetadata):
     the max per request: TP workers land the same instruction in
     parallel, and the smallest safe value across ranks is bounded by
     each rank's own ledger-driven instruction anyway.
+
+    ``pd_removed_keys``: string forms of chunk keys whose receiver-
+    buffer staging copies were released after landing. The scheduler
+    retires them from the arrival set so the union walk never trusts a
+    freed copy; repeat content resolves through APC / L1 instead (the
+    alloc-time L1 oracle skips re-transfers of stored chunks).
     """
 
     pd_received: dict[str, int] = field(default_factory=dict)
     pd_arrived_keys: list = field(default_factory=list)
     pd_loaded: dict[str, int] = field(default_factory=dict)
+    pd_removed_keys: list = field(default_factory=list)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
@@ -143,6 +150,9 @@ class MPPDWorkerMetadata(LMCacheMPWorkerMetadata):
         out.pd_received.update(getattr(other, "pd_received", {}))
         out.pd_arrived_keys = self.pd_arrived_keys + getattr(
             other, "pd_arrived_keys", []
+        )
+        out.pd_removed_keys = self.pd_removed_keys + getattr(
+            other, "pd_removed_keys", []
         )
         for src in (self.pd_loaded, getattr(other, "pd_loaded", {})):
             for req_id, end in src.items():
@@ -539,6 +549,7 @@ class PDEngine:
         )
         self.fmt = getattr(self.backend, "_fmt", None)
         self._reported_keys: set = set()
+        self._removed_pending: set = set()
         device = torch.device(
             f"npu:{parallel_cfg.rank % torch.npu.device_count()}"
         )
@@ -683,14 +694,25 @@ class PDEngine:
         """String forms of chunk keys newly present since the last call.
 
         Content-addressed, so the scheduler can map them onto waiting
-        requests without the worker knowing about those requests.
+        requests without the worker knowing about those requests. The
+        reported set tracks what is CURRENTLY live in the receive
+        buffer: chunks released after landing (see ``execute_pd_load``)
+        surface through ``drain_removed_keys`` so arrival walks never
+        trust a freed staging copy.
         """
         if self.backend is None:
             return []
         current = {_key_str(k) for k in self.backend.data.keys()}
         new = current - self._reported_keys
-        self._reported_keys |= new
+        self._removed_pending |= self._reported_keys - current
+        self._reported_keys = current
         return sorted(new)
+
+    def drain_removed_keys(self) -> list:
+        """String forms of chunk keys released since the last call."""
+        removed = sorted(self._removed_pending)
+        self._removed_pending = set()
+        return removed
 
     def execute_pd_load(self, instr: PDLoadInstruction, kvcaches: dict):
         """Copy arrived PD chunks in [instr.start, instr.end) from the
@@ -729,6 +751,7 @@ class PDEngine:
         objs: list = []
         copy_starts: list = []
         copy_ends: list = []
+        landed_keys: list = []
         failed_blocks: set = set()
         landed_end = instr.start
         for key, s, e in zip(keys, starts, ends, strict=False):
@@ -750,6 +773,7 @@ class PDEngine:
             if s == landed_end:
                 landed_end = e
             objs.append(obj)
+            landed_keys.append(key)
             copy_starts.append(s)
             copy_ends.append(e)
         if objs:
@@ -781,6 +805,16 @@ class PDEngine:
                 pass
             for obj in objs:
                 obj.ref_count_down()
+            # The staging copies of every chunk that landed are
+            # redundant now: the paged pool owns the KV, APC covers the
+            # landed range, and store-through persists it to L1 (whose
+            # alloc-time oracle then skips re-transfers). Freeing the
+            # pages keeps the receiver buffer a bounded staging area
+            # instead of a monotonically growing store; the removal is
+            # reported to the scheduler so arrival walks never trust a
+            # freed copy.
+            for key in landed_keys:
+                self.backend.release(key)
         logger.info(
             "PD LOAD req=%s landed=[%d,%d) landed_tokens=%d "
             "chunks_loaded=%d chunks_failed=%d",

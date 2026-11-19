@@ -33,7 +33,10 @@ from lmcache_ascend.v1.proxy_memory_obj import ProxyMemoryObj
 from lmcache_ascend.v1.rpc_utils import _find_free_port
 from lmcache_ascend.v1.storage_backend.pd.receiver_mixin import AscendPDReceiverMixin
 from lmcache_ascend.v1.storage_backend.pd.sender_mixin import AscendPDSenderMixin
-from lmcache_ascend.v1.storage_backend.utils import resolve_memory_format
+from lmcache_ascend.v1.storage_backend.utils import (
+    release_memory_objects,
+    resolve_memory_format,
+)
 from lmcache_ascend.v1.transfer_channel import CreateTransferChannel, get_correct_device
 
 logger = init_logger(__name__)
@@ -375,3 +378,24 @@ class AscendPDBackend(AscendPDSenderMixin, AscendPDReceiverMixin, PDBackend):
             else:
                 new_indexes.append(idx)
         return already_sent_indexes, already_sent_objs, new_indexes
+
+    def release(self, key: CacheEngineKey) -> bool:
+        """Drop one landed chunk's staging copy and free its page.
+
+        Push-mode transfers stay in ``data`` until they land in vLLM's
+        paged pool; after the landing the staging copy is redundant
+        (the landed blocks are APC-covered and store-through persists
+        them to the decoder's L1, whose alloc-time oracle then skips
+        re-transfers), so the page returns to the receiver pool.
+        Without this the receiver buffer fills monotonically under
+        load. Consumed proxies manage their own lifecycle through the
+        pull path and are left alone.
+
+        Returns True when a regular staging object was released.
+        """
+        with self.data_lock:
+            mem_obj = self.data.pop(key, None)
+        if mem_obj is None or isinstance(mem_obj, ProxyMemoryObj):
+            return False
+        release_memory_objects([mem_obj])
+        return True
