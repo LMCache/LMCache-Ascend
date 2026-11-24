@@ -53,6 +53,7 @@ vllm serve /data/models/DeepSeek-V4.1-Flash-1017-w8a8 \
   --block-size 32 --gpu-memory-utilization 0.9 \
   --enable-prefix-caching --max-num-batched-tokens 4096 --max-num-seqs 32 \
   --async-scheduling \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
   --quantization ascend --safetensors-load-strategy lazy \
   --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}' \
   --engram-config '{"cpu_offload": true, "embedding_across_dp": false, "dp_shared_memory": false}' \

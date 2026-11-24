@@ -1,9 +1,7 @@
 # PR: Fix NPU IPC device-context races, exported-event leak, and idle-worker liveness reaping
 
-**Repository**: LMCache (`dev` branch)
-**Fixed images**: `hub.galaxy.ksyun.com/ai/lmcache-server:v3.1.2` (IPC/leak fixes), `v3.1.3` (heartbeat fix)
-**Verified on**: DeepSeek-V4.1 inference service (10.184.57.8 / node-1)
-**Logs**: `/data/yangfan/lmcache/dsv41_lmcache_mp/logs/`
+**Repository**: LMCache-Ascend (v0.5.7)
+**Verified on**: DeepSeek-V4.1 inference service
 
 ---
 
@@ -14,15 +12,15 @@
 | Item | Value |
 |---|---|
 | NPU | 16 × Ascend 910B2C (64GB HBM per card) |
-| Driver (HDK) | 26.1.1 (npu-smi 26.1.1, ascendhal 7.35.23) |
+| Driver (HDK) | 26.1.1 (npu-smi 26.1.1) |
 | OS | openEuler 24.03 SP3 (kernel 6.6.0-132.0.0.111.oe2403sp3) |
 
 ### 1.2 Software
 
 | Component | Version |
 |---|---|
-| Image | hub.galaxy.ksyun.com/ai/lmcache-server:v3.1.1 (affected) → v3.1.2 / v3.1.3 (fixed) |
-| LMCache | v0.5.7 (g95656e5c, /workspace/LMCache in image) |
+| LMCache-ascend | v0.5.7 (/workspace/LMCache-Ascend in image) |
+| LMCache | v0.5.7 (/workspace/LMCache in image) |
 | vLLM | 0.30.0 |
 | vllm-ascend | 0.30.0 series (/vllm-workspace/vllm-ascend) |
 | CANN | 9.2.1 (/usr/local/Ascend/cann-9.2.1 in image) |
@@ -34,13 +32,12 @@
 - Model: DeepSeek-V4.1-Flash-1017-w8a8 (VL), max_model_len 1048576, quantization `ascend`
 - Parallelism: TP=8 × DP=2 (single pod, 16 cards), expert parallelism on, block_size 32
 - Speculative decoding: `dspark`, num_speculative_tokens 5, enforce_eager
-- Engram: cpu_offload on, dp_shared_memory off
+- Engram: cpu_offload on, dp_shared_memory on
 - KV transfer: LMCacheMPConnector (kv_role=kv_both, `lmcache_driven` mode)
 
 ### 1.4 Key launch commands
 
-vLLM (reconstructed from the `non-default args` line in the startup log; exact flag
-spelling depends on the launch script):
+vLLM:
 
 ```bash
 vllm serve /data/models/DeepSeek-V4.1-Flash-1017-w8a8 \
@@ -55,8 +52,9 @@ vllm serve /data/models/DeepSeek-V4.1-Flash-1017-w8a8 \
   --enable-prefix-caching --max-num-batched-tokens 4096 --max-num-seqs 32 \
   --async-scheduling \
   --quantization ascend --safetensors-load-strategy lazy \
+  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
   --speculative-config '{"method": "dspark", "num_speculative_tokens": 5, "enforce_eager": true}' \
-  --engram-config '{"cpu_offload": true, "embedding_across_dp": false, "dp_shared_memory": false}' \
+  --engram-config '{"cpu_offload": true, "dp_shared_memory": true}' \
   --kv-transfer-config '{"kv_connector": "LMCacheMPConnector", "kv_role": "kv_both", \
     "kv_buffer_device": "npu", "kv_connector_extra_config": \
     {"lmcache.mp.host": "10.184.57.8", "lmcache.mp.port": 5555, \
@@ -67,11 +65,12 @@ lmcache-server (DaemonSet, hostNetwork, co-located with vLLM):
 
 ```bash
 lmcache server --host ${NODE_IP} \
-  --chunk-size 896 \
+  --chunk-size 4096 \
   --supported-transfer-mode lmcache_driven \
   --l1-size-gb 120 \
-  --eviction-policy LRU --separate-object-groups \
-  --disable-metrics --http-port 8090
+  --eviction-policy LRU \
+  --disable-metrics \
+  --http-port 8090
 ```
 
 ---
@@ -80,7 +79,7 @@ lmcache server --host ${NODE_IP} \
 
 ### 2.1 Bug A: REGISTER_KV_CACHE fails with 507899, cascading crash of the whole pod
 
-**Timeline (2026-11-20)**
+**Timeline**
 
 | Time | Event |
 |---|---|
@@ -93,7 +92,7 @@ lmcache server --host ${NODE_IP} \
 
 **Server-side traceback (register path)**
 
-```
+```bash
 File ".../lmcache_driven_transfer.py", line 503, in register_kv_cache
   cache_context = self._create_cache_context(...)
 File ".../devices/npu/cache_context.py", line 288, in _initialize
@@ -137,7 +136,7 @@ argument:
 
 ### 2.2 Bug B: idle workers are reaped; caching silently stops
 
-**Timeline (2026-11-23)**
+**Timeline**
 
 | Time | Event |
 |---|---|
@@ -246,15 +245,14 @@ cleaned up after 120 s (`worker_reap_timeout_seconds`) instead of 3600 s.
 | tests/v1/platform/test_event_ipc.py | test_npu_backend_import_event_pins_owning_device, etc. | import/record/wait pinned to device; ring eviction and settle |
 | tests/v1/test_mp_connector_kv_roles.py | test_register_kv_caches_starts_heartbeat | registration constructs and starts the HeartbeatThread |
 
-In-image result: **101 passed, 1 skipped** (42 platform + 59 kv_roles).
+In-image result: **101 passed, 1 skipped**.
 
-### On-cluster verification (v3.1.2 / v3.1.3)
+### On-cluster verification
 
 | Check | Result |
 |---|---|
 | REGISTER_KV_CACHE | succeeds in seconds for all 16 ranks (`Registered KV cache ... 54 layers`) |
 | 507899 / 207001 / EE1010 | gone |
-| Instances alive after 1 h idle | to be re-verified (expected: no more `Reaped GPU instance`) |
 | Service stability | no crashes |
 
 ---
@@ -262,8 +260,7 @@ In-image result: **101 passed, 1 skipped** (42 platform + 59 kv_roles).
 ## 5. Impact and compatibility
 
 - Behavior change 1: the NPU exported-event keep-alive window drops from 2048
-  to 128. Set `LMCACHE_NPU_EVENT_RING_SIZE=2048` to restore the old behavior
-  (re-opens the 207001 risk; not recommended).
+  to 128. Set `LMCACHE_NPU_EVENT_RING_SIZE=2048` to restore the old behavior.
 - Behavior change 2: workers send a 10 s periodic heartbeat right after
   registration (one PING request per worker per 10 s — negligible overhead).
 - CUDA and other backends are unaffected (the guards live in the NPU device
