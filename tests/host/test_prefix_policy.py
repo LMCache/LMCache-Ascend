@@ -1,24 +1,43 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Host-only Build E tests; no vLLM, LMCache engine, torch, or NPU required."""
+"""Host-only Build E tests; no vLLM, LMCache engine, torch, or NPU required.
 
+These tests follow the repository host-test convention (see tests/host/README.md):
+the policy source is loaded by file path instead of importing the package, so
+``python -m unittest discover -s tests/host`` works on a bare checkout without
+the setuptools-scm generated ``lmcache_ascend/_version`` module.
+"""
+
+# Future
 from __future__ import annotations
 
+# Standard
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
+import importlib.util
 import os
+import sys
 import unittest
 
-from lmcache_ascend.integration.vllm.prefix_policy import (
-    ENV_LOG_DECISION,
-    ENV_MODE,
-    ENV_STATIC_H,
-    ENV_STATIC_H2,
-    PrefixPath,
-    PrefixPolicy,
-    PrefixPolicyError,
-    PrefixPolicyMode,
-    log_decision_enabled,
+ROOT = Path(__file__).resolve().parents[2]
+_SPEC = importlib.util.spec_from_file_location(
+    "prefix_policy_under_test",
+    ROOT / "lmcache_ascend" / "integration" / "vllm" / "prefix_policy.py",
 )
+_MOD = importlib.util.module_from_spec(_SPEC)
+sys.modules[_SPEC.name] = _MOD  # must be registered before exec: dataclass
+# decoration resolves names through sys.modules
+_SPEC.loader.exec_module(_MOD)
+
+ENV_LOG_DECISION = _MOD.ENV_LOG_DECISION
+ENV_MODE = _MOD.ENV_MODE
+ENV_STATIC_H = _MOD.ENV_STATIC_H
+ENV_STATIC_H2 = _MOD.ENV_STATIC_H2
+PrefixPath = _MOD.PrefixPath
+PrefixPolicy = _MOD.PrefixPolicy
+PrefixPolicyError = _MOD.PrefixPolicyError
+PrefixPolicyMode = _MOD.PrefixPolicyMode
+log_decision_enabled = _MOD.log_decision_enabled
 
 
 @dataclass
@@ -55,52 +74,40 @@ class PrefixPolicyTest(unittest.TestCase):
         policy = PrefixPolicy(PrefixPolicyMode.STATIC_H)
         self.assertEqual(policy.describe()["static_h_threshold"], 1024)
         self.assertEqual(
-            policy.decide(h_lookup=1024, full_prompt=1034,
-                          num_computed_tokens=0).path,
+            policy.decide(h_lookup=1024, full_prompt=1034, num_computed_tokens=0).path,
             PrefixPath.LOAD,
         )
         self.assertEqual(
-            policy.decide(h_lookup=1025, full_prompt=1035,
-                          num_computed_tokens=0).path,
+            policy.decide(h_lookup=1025, full_prompt=1035, num_computed_tokens=0).path,
             PrefixPath.RECOMPUTE,
         )
 
     def test_static_h_env_override_validated_and_frozen(self) -> None:
-        policy = PrefixPolicy.from_env(
-            {ENV_MODE: "STATIC_H", ENV_STATIC_H: "512"}
-        )
+        policy = PrefixPolicy.from_env({ENV_MODE: "STATIC_H", ENV_STATIC_H: "512"})
         self.assertEqual(policy.mode, PrefixPolicyMode.STATIC_H)
         self.assertEqual(policy.describe()["static_h_threshold"], 512)
         self.assertEqual(
-            policy.decide(h_lookup=512, full_prompt=522,
-                          num_computed_tokens=0).path,
+            policy.decide(h_lookup=512, full_prompt=522, num_computed_tokens=0).path,
             PrefixPath.LOAD,
         )
         self.assertEqual(
-            policy.decide(h_lookup=513, full_prompt=523,
-                          num_computed_tokens=0).path,
+            policy.decide(h_lookup=513, full_prompt=523, num_computed_tokens=0).path,
             PrefixPath.RECOMPUTE,
         )
 
     def test_static_h_env_invalid_values_rejected(self) -> None:
         for bad in ("0", "-5", "abc", "1.5", "12.0", "2.5"):
             with self.subTest(value=bad), self.assertRaises(PrefixPolicyError):
-                PrefixPolicy.from_env(
-                    {ENV_MODE: "STATIC_H", ENV_STATIC_H: bad}
-                )
+                PrefixPolicy.from_env({ENV_MODE: "STATIC_H", ENV_STATIC_H: bad})
 
     def test_static_h_env_blank_uses_default(self) -> None:
-        policy = PrefixPolicy.from_env(
-            {ENV_MODE: "STATIC_H", ENV_STATIC_H: "   "}
-        )
+        policy = PrefixPolicy.from_env({ENV_MODE: "STATIC_H", ENV_STATIC_H: "   "})
         self.assertEqual(policy.describe()["static_h_threshold"], 1024)
 
     def test_static_h_env_ignored_in_other_modes(self) -> None:
         off = PrefixPolicy.from_env({ENV_MODE: "OFF", ENV_STATIC_H: "1"})
         self.assertFalse(off.enabled)
-        rec = PrefixPolicy.from_env(
-            {ENV_MODE: "FORCED_RECOMPUTE", ENV_STATIC_H: "1"}
-        )
+        rec = PrefixPolicy.from_env({ENV_MODE: "FORCED_RECOMPUTE", ENV_STATIC_H: "1"})
         self.assertEqual(rec.mode, PrefixPolicyMode.FORCED_RECOMPUTE)
 
     def test_recompute_returns_zero_and_preserves_lookup_h(self) -> None:
@@ -215,13 +222,13 @@ class WindowPolicyTest(unittest.TestCase):
         p = self._policy()
         cases = [
             # (H, expected path, expected reason fragment)
-            (self.T1, PrefixPath.LOAD, "H<=1024"),            # H == tau1 -> LOAD
+            (self.T1, PrefixPath.LOAD, "H<=1024"),  # H == tau1 -> LOAD
             (self.T1 + 256, PrefixPath.RECOMPUTE, "1024<H<23296"),
             (self.T2 - 256, PrefixPath.RECOMPUTE, "1024<H<23296"),
-            (self.T2, PrefixPath.LOAD, "H>=23296"),           # H == tau2 -> LOAD
+            (self.T2, PrefixPath.LOAD, "H>=23296"),  # H == tau2 -> LOAD
             (self.T2 + 256, PrefixPath.LOAD, "H>=23296"),
-            (256, PrefixPath.LOAD, "H<=1024"),                # H < tau1
-            (30000, PrefixPath.LOAD, "H>=23296"),             # H > tau2
+            (256, PrefixPath.LOAD, "H<=1024"),  # H < tau1
+            (30000, PrefixPath.LOAD, "H>=23296"),  # H > tau2
         ]
         for h, path, tag in cases:
             d = p.decide(h_lookup=h, full_prompt=h + 10, num_computed_tokens=0)
@@ -230,11 +237,17 @@ class WindowPolicyTest(unittest.TestCase):
 
     def test_reject_h2_le_h1(self) -> None:
         with self.assertRaisesRegex(PrefixPolicyError, "must be >"):
-            PrefixPolicy(PrefixPolicyMode.STATIC_H,
-                         static_h_threshold=1024, static_h_threshold2=1024)
+            PrefixPolicy(
+                PrefixPolicyMode.STATIC_H,
+                static_h_threshold=1024,
+                static_h_threshold2=1024,
+            )
         with self.assertRaisesRegex(PrefixPolicyError, "must be >"):
-            PrefixPolicy(PrefixPolicyMode.STATIC_H,
-                         static_h_threshold=1024, static_h_threshold2=512)
+            PrefixPolicy(
+                PrefixPolicyMode.STATIC_H,
+                static_h_threshold=1024,
+                static_h_threshold2=512,
+            )
 
     def test_reject_bad_h2_values(self) -> None:
         with self.assertRaises(PrefixPolicyError):
@@ -245,7 +258,8 @@ class WindowPolicyTest(unittest.TestCase):
             PrefixPolicy.from_env({ENV_MODE: "STATIC_H", ENV_STATIC_H2: "-5"})
         with self.assertRaises(PrefixPolicyError):
             PrefixPolicy.from_env(
-                {ENV_MODE: "STATIC_H", ENV_STATIC_H: "2048", ENV_STATIC_H2: "1024"})
+                {ENV_MODE: "STATIC_H", ENV_STATIC_H: "2048", ENV_STATIC_H2: "1024"}
+            )
 
     def test_legacy_single_threshold_when_h2_unset(self) -> None:
         # direct construction with threshold2=None -> legacy rule
@@ -253,33 +267,36 @@ class WindowPolicyTest(unittest.TestCase):
         self.assertIsNone(p.static_h_threshold2)
         self.assertEqual(
             p.decide(h_lookup=1024, full_prompt=1034, num_computed_tokens=0).path,
-            PrefixPath.LOAD)
+            PrefixPath.LOAD,
+        )
         self.assertEqual(
             p.decide(h_lookup=1280, full_prompt=1290, num_computed_tokens=0).path,
-            PrefixPath.RECOMPUTE)
+            PrefixPath.RECOMPUTE,
+        )
         # from_env without STATIC_H2 -> legacy single threshold
         pe = PrefixPolicy.from_env({ENV_MODE: "STATIC_H"})
         self.assertIsNone(pe.static_h_threshold2)
 
     def test_from_env_dual_threshold(self) -> None:
         pe = PrefixPolicy.from_env(
-            {ENV_MODE: "STATIC_H",
-             ENV_STATIC_H: "1024",
-             ENV_STATIC_H2: "23296"})
+            {ENV_MODE: "STATIC_H", ENV_STATIC_H: "1024", ENV_STATIC_H2: "23296"}
+        )
         self.assertEqual(pe.static_h_threshold, 1024)
         self.assertEqual(pe.static_h_threshold2, 23296)
-        self.assertEqual(pe.decide(
-            h_lookup=23552, full_prompt=23562, num_computed_tokens=0).path,
-            PrefixPath.LOAD)
+        self.assertEqual(
+            pe.decide(h_lookup=23552, full_prompt=23562, num_computed_tokens=0).path,
+            PrefixPath.LOAD,
+        )
 
     def test_describe_dual_threshold(self) -> None:
         desc = self._policy().describe()
         self.assertEqual(desc["static_h_threshold"], 1024)
         self.assertEqual(desc["static_h_threshold2"], 23296)
         # legacy describe has no threshold2 key
-        self.assertNotIn("static_h_threshold2",
-                         PrefixPolicy(PrefixPolicyMode.STATIC_H,
-                                      static_h_threshold=1024).describe())
+        self.assertNotIn(
+            "static_h_threshold2",
+            PrefixPolicy(PrefixPolicyMode.STATIC_H, static_h_threshold=1024).describe(),
+        )
 
 
 class DecisionLogSwitchTest(unittest.TestCase):

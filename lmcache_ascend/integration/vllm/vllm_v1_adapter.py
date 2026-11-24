@@ -3,7 +3,6 @@
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
 import json
-import os
 import sys
 
 # Third Party
@@ -144,9 +143,7 @@ class LMCacheAscendConnectorV1Impl(
         )
         if self._log_decision:
             planned_prefill = (
-                full_prompt
-                - num_computed_tokens
-                - application.returned_external_tokens
+                full_prompt - num_computed_tokens - application.returned_external_tokens
             )
             event = {
                 "event": "lmcache_prefix_policy_decision",
