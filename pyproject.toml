@@ -129,7 +129,7 @@ follow_imports = "silent"
 
 # In-process mode is maintained on the dsv4_support_045 branch; main only
 # maintains MP mode. Keep the legacy in-process modules out of mypy tightening
-# so this config only gates the MP surface (ops.py, shape_desc.py,
+# so this config only gates the MP surface (ops.py,
 # logical_block_size.py, and their tests).
 [[tool.mypy.overrides]]
 module = [
