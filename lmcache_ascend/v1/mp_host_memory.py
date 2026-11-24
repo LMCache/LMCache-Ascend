@@ -14,9 +14,11 @@ import sys
 import threading
 
 # Third Party
-from lmcache.logging import init_logger
 import lmcache
 import torch
+
+# First Party
+from lmcache_ascend._logging import init_logger
 
 if TYPE_CHECKING:
     # Third Party

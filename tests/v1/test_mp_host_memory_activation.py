@@ -86,10 +86,11 @@ else:
     assert "lmcache.v1.multiprocess.server" in sys.modules
 
 from lmcache.cli.main import main
-from lmcache.v1.multiprocess import http_server, server, object_group_transfer
+from lmcache.v1.multiprocess import http_server, server
+from lmcache.v1.multiprocess.object_group_transfer import direct_copy, staged
 from lmcache.v1.distributed.memory_manager import l1_memory_manager
-assert object_group_transfer._HAS_NATIVE_OBJECT_GROUP_TRANSFER
-assert not object_group_transfer._HAS_BATCH_MEMCPY_ASYNC
+assert staged.native_plan_available()
+assert not direct_copy.batch_memcpy_available()
 class ReachedAllocator(BaseException):
     pass
 
