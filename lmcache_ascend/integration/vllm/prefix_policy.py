@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import os
 from typing import Any, Mapping, Optional
+import os
 
 
 ENV_MODE = "LMCACHE_PREFIX_POLICY_MODE"

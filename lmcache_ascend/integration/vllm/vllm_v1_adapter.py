@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+from time import perf_counter
+from typing import TYPE_CHECKING, Any, Optional
 import json
 import os
 import sys
-from time import perf_counter
-from typing import TYPE_CHECKING, Any, Optional
 
 # Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
