@@ -13,7 +13,7 @@ from __future__ import annotations
 # Standard
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 import importlib.util
 import os
 import sys
@@ -211,7 +211,7 @@ class WindowPolicyTest(unittest.TestCase):
     T1 = 1024
     T2 = 23296
 
-    def _policy(self, t1: int = T1, t2: Optional[int] = T2) -> PrefixPolicy:
+    def _policy(self, t1: int = T1, t2: Optional[int] = T2) -> Any:  # PrefixPolicy
         return PrefixPolicy(
             PrefixPolicyMode.STATIC_H,
             static_h_threshold=t1,
