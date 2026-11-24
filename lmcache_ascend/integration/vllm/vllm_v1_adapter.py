@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
+import json
+import os
+import sys
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Optional
-import sys
 
 # Third Party
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorMetadata
@@ -25,6 +27,11 @@ from lmcache_ascend.integration.vllm.multi_group_vllm_adapter import (
 from lmcache_ascend.integration.vllm.multi_spec_flatten import (
     build_flat_kv_caches,
     has_multiple_scheduler_groups,
+)
+from lmcache_ascend.integration.vllm.prefix_policy import (
+    PrefixPolicy,
+    PrefixPolicyError,
+    log_decision_enabled,
 )
 from lmcache_ascend.integration.vllm.skip_state_groups import (
     apply_skip_policy_from_env_to_flattened,
@@ -63,6 +70,10 @@ class LMCacheAscendConnectorV1Impl(
         kv_cache_config: Optional[Any] = None,
     ):
         logger.debug("Initializing LMCacheAscendConnectorV1Impl")
+        # Parse and validate before engine construction. OFF performs no config I/O.
+        self._prefix_policy = PrefixPolicy.from_env()
+        self._log_decision = log_decision_enabled()
+        logger.debug("per-request decision logging enabled: %s", self._log_decision)
         super().__init__(vllm_config, role, parent, kv_cache_config=kv_cache_config)
         if self._num_kv_groups > 1:
             assert self._discard_partial_chunks, (
@@ -77,11 +88,85 @@ class LMCacheAscendConnectorV1Impl(
         self._finished_state_loads: set[str] = set()
         logger.debug("store_async: %s", self.store_async)
         self._init_gdn_receive()
+        if self._prefix_policy.enabled:
+            if getattr(self, "_gdn_restore_enabled", False):
+                raise PrefixPolicyError("Build E active modes do not support GDN")
+            if self._num_kv_groups != 1:
+                raise PrefixPolicyError(
+                    "Build E active modes require exactly one KV group"
+                )
+            if getattr(self, "_state_primary_kv_group_idx", None) is not None:
+                raise PrefixPolicyError(
+                    "Build E active modes do not support hybrid state paths"
+                )
+            if getattr(self.config, "min_retrieve_tokens", 0):
+                raise PrefixPolicyError(
+                    "Build E active modes require min_retrieve_tokens=0 so that "
+                    "FORCED_LOAD cannot be confused with native retrieve suppression"
+                )
+            if getattr(self.config, "enable_async_loading", False):
+                raise PrefixPolicyError(
+                    "Build E active modes require synchronous LMCache lookup"
+                )
+            logger.info(
+                "LMCACHE_PREFIX_POLICY_CONFIG %s",
+                json.dumps(self._prefix_policy.describe(), sort_keys=True),
+            )
 
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         if getattr(self, "_gdn_restore_enabled", False):
             return self._gdn_lookup(request, num_computed_tokens)
-        return super().get_num_new_matched_tokens(request, num_computed_tokens)
+        if not self._prefix_policy.enabled:
+            return super().get_num_new_matched_tokens(request, num_computed_tokens)
+
+        native_matched = super().get_num_new_matched_tokens(
+            request, num_computed_tokens
+        )
+        load_spec = self.load_specs.get(request.request_id)
+        if load_spec is None:
+            if native_matched:
+                raise PrefixPolicyError(
+                    "native lookup returned external tokens without a LoadSpec"
+                )
+            h_lookup = 0
+        else:
+            h_lookup = load_spec.lmcache_cached_tokens
+        full_prompt = request.num_tokens
+        decision = self._prefix_policy.decide(
+            h_lookup=h_lookup,
+            full_prompt=full_prompt,
+            num_computed_tokens=num_computed_tokens,
+        )
+        application = self._prefix_policy.apply(
+            native_matched_tokens=native_matched,
+            load_spec=load_spec,
+            decision=decision,
+        )
+        if self._log_decision:
+            planned_prefill = (
+                full_prompt
+                - num_computed_tokens
+                - application.returned_external_tokens
+            )
+            event = {
+                "event": "lmcache_prefix_policy_decision",
+                "request_id": request.request_id,
+                "mode": self._prefix_policy.mode.value,
+                "h_lookup_tokens": h_lookup,
+                "suffix_tokens": full_prompt - h_lookup,
+                "full_prompt_tokens": full_prompt,
+                "local_computed_tokens": num_computed_tokens,
+                "native_external_tokens": native_matched,
+                "returned_external_tokens": application.returned_external_tokens,
+                "planned_remaining_prefill_tokens": planned_prefill,
+                "policy_applied": application.policy_applied,
+                **decision.log_fields(),
+            }
+            logger.info(
+                "LMCACHE_PREFIX_POLICY_DECISION %s",
+                json.dumps(event, sort_keys=True),
+            )
+        return application.returned_external_tokens
 
     def update_state_after_alloc(self, request, num_external_tokens, blocks=None):
         if getattr(
