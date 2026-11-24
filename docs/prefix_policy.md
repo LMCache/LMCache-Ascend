@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # Build E：scheduler 侧前缀加载／重算策略
 
 ## 适用范围
