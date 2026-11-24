@@ -1,0 +1,43 @@
+diff --git a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+index dd16c7c3..d3e81270 100644
+--- a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
++++ b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+@@ -402,8 +402,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
+         """
+         if not entries:
+             return
++        released_devices = []
+         for entry in entries:
+-            entry.cache_context.close()
++            released_devices.append(entry.cache_context.device)
++            # close() releases device-side resources (imported IPC storages,
++            # streams) owned by the entry's device; run it with that device
++            # current so the driver reclaims them instead of acting on the
++            # calling thread's stale context.
++            with torch_dev.device(entry.cache_context.device):
++                entry.cache_context.close()
+             self._ctx.layout_desc_registry.unregister(
+                 entry.model_name, entry.world_size
+             )
+@@ -411,11 +418,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
+         entries.clear()
+         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
+         # tensor reference is gone (LMCache#4014), hence the clear() above.
+-        torch_dev.empty_cache()
+-        ipc_collect = getattr(torch_dev, "ipc_collect", None)
+-        if ipc_collect is not None:
+-            # Backends without IPC collection omit this optional operation.
+-            ipc_collect()
++        # empty_cache() only frees the calling thread's current device, and one
++        # batch can release entries from several devices (module close), so
++        # reclaim once per released device.
++        for device in set(released_devices):
++            with torch_dev.device(device):
++                torch_dev.empty_cache()
++                ipc_collect = getattr(torch_dev, "ipc_collect", None)
++                if ipc_collect is not None:
++                    # Backends without IPC collection omit this optional operation.
++                    ipc_collect()
+ 
+     def report_status(self) -> dict:
+         """Return GPU transfer module status information.

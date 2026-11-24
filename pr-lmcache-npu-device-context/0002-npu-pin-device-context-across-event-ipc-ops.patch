@@ -1,0 +1,124 @@
+diff --git a/lmcache/v1/platform/devices/npu/event_ipc.py b/lmcache/v1/platform/devices/npu/event_ipc.py
+--- a/lmcache/v1/platform/devices/npu/event_ipc.py
++++ b/lmcache/v1/platform/devices/npu/event_ipc.py
+@@ -114,7 +114,13 @@
+             return super().export_event(event, device)
+ 
+     def import_event(self, handle: bytes, device: object) -> object:
+-        """Import a serialized event handle, diagnosing failures.
++        """Import a serialized event handle under ``device``'s context.
++
++        CANN derives the imported event from the calling thread's current
++        device context (``aclIpcOpenEventHandle``), not from the ``device``
++        argument alone, so a handler thread serving several devices must pin
++        the owning device before opening the handle — the same guard
++        :meth:`export_event` applies on the way out.
+ 
+         Args:
+             handle: Serialized event handle from another process.
+@@ -128,7 +134,8 @@
+                 the handle summary and target device for triage.
+         """
+         try:
+-            return super().import_event(handle, device)
++            with self._event_module.device(device):  # type: ignore[attr-defined]
++                return super().import_event(handle, device)
+         except Exception as exc:
+             logger.warning(
+                 "NPU event import failed: device=%s %s error=%s",
+@@ -137,3 +144,33 @@
+                 exc,
+             )
+             raise
++
++    def record_event(self, event: object, stream: object) -> None:
++        """Record ``event`` on ``stream`` under the stream's device context.
++
++        torch_npu creates the underlying driver event lazily at record time
++        (``AclrtCreateEventWithFlag``), bound to the calling thread's current
++        device context. Recording under a stale context allocates the event
++        in the wrong device's event pool — it is then never reclaimed by the
++        owning device (error 207001) and the record itself can be rejected
++        (EE1010, "stream does not belong to the current context").
++
++        Args:
++            event: Backend-native event to record.
++            stream: Stream that should record the event.
++        """
++        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
++            super().record_event(event, stream)
++
++    def wait_event(self, event: object, stream: object) -> None:
++        """Make ``stream`` wait for ``event`` under the stream's device context.
++
++        The stream-side wait is queued against the stream's device context,
++        so the same pinning as :meth:`record_event` applies.
++
++        Args:
++            event: Backend-native event to wait on.
++            stream: Stream that should wait for the event.
++        """
++        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
++            super().wait_event(event, stream)
+diff --git a/tests/v1/platform/test_event_ipc.py b/tests/v1/platform/test_event_ipc.py
+--- a/tests/v1/platform/test_event_ipc.py
++++ b/tests/v1/platform/test_event_ipc.py
+@@ -316,6 +316,58 @@
+     assert backend._exported_events[0] is second
+ 
+ 
++class _RecordingDeviceModule:
++    """Fake event module recording every device context the backend enters."""
++
++    Event = _FakeEvent
++
++    def __init__(self) -> None:
++        self.entered: list[object] = []
++
++    def device(self, device):
++        entered = self.entered
++
++        @contextlib.contextmanager
++        def _ctx():
++            entered.append(device)
++            yield
++
++        return _ctx()
++
++
++class _FakeStream:
++    """Minimal stream stub exposing the ``device`` property."""
++
++    def __init__(self, device: object) -> None:
++        self.device = device
++
++
++def test_npu_backend_import_event_pins_owning_device():
++    """CANN derives the imported event from the calling thread's current
++    device context, so the import must run with the owning device pinned."""
++    module = _RecordingDeviceModule()
++    backend = NpuEventIPCBackend(event_module=module)
++    device = _Device("npu")
++    event = backend.import_event(b"handle", device)
++    assert module.entered == [device]
++    assert ("from_ipc_handle", device, b"handle") in event.calls
++
++
++def test_npu_backend_record_and_wait_pin_stream_device():
++    """Record/wait create and queue work against the stream's device, which
++    must be current to avoid allocating events in a stale context's pool."""
++    module = _RecordingDeviceModule()
++    backend = NpuEventIPCBackend(event_module=module)
++    device = _Device("npu")
++    stream = _FakeStream(device)
++    event = _FakeEvent()
++    backend.record_event(event, stream)
++    backend.wait_event(event, stream)
++    assert module.entered == [device, device]
++    assert ("record", stream) in event.calls
++    assert ("wait", stream) in event.calls
++
++
+ def test_default_backend_keeps_historical_ring_size():
+     """The default backend keeps the historical 2048-event window."""
+     backend = DefaultEventIPCBackend(

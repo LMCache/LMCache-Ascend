@@ -1,0 +1,57 @@
+diff --git a/lmcache/integration/vllm/vllm_multi_process_adapter.py b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+index 1b1937e1..e105a304 100644
+--- a/lmcache/integration/vllm/vllm_multi_process_adapter.py
++++ b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+@@ -1550,6 +1550,10 @@ class LMCacheMPWorkerAdapter:
+             layout_hints if layout_hints is not None else vllm_layout_hints()
+         )
+         self._send_register_kv_caches_request(kv_caches)
++        # Start the heartbeat on registration: a worker that goes idle before
++        # its first store/retrieve would otherwise send no PING and be reaped
++        # after the registration grace period.
++        self._ensure_heartbeat_started()
+ 
+     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
+         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+@@ -1605,7 +1609,8 @@ class LMCacheMPWorkerAdapter:
+             ) from None
+ 
+     def _ensure_heartbeat_started(self) -> None:
+-        """Lazily start the heartbeat on first store, retrieve, or event poll.
++        """Start the heartbeat on registration and lazily on first store,
++        retrieve, or event poll.
+ 
+         The heartbeat starts healthy (the event was set at construction). A
+         live worker pings every interval, refreshing its server-side
+diff --git a/tests/v1/test_mp_connector_kv_roles.py b/tests/v1/test_mp_connector_kv_roles.py
+index 6690d4a6..11e49e9c 100644
+--- a/tests/v1/test_mp_connector_kv_roles.py
++++ b/tests/v1/test_mp_connector_kv_roles.py
+@@ -241,6 +241,27 @@ def connectors(
+         scheduler.shutdown()
+ 
+ 
++def test_register_kv_caches_starts_heartbeat(mock_io: SimpleNamespace) -> None:
++    """Registration must start the heartbeat immediately.
++
++    A worker whose heartbeat only starts on its first store/retrieve sends no
++    PING while idle, so the server reaps its registration after the
++    registration grace period (observed: 16 idle ranks reaped after 1h).
++    """
++    config = _config(
++        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
++    )
++    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
++    heartbeat_cls = adapter_mod.HeartbeatThread
++    assert not heartbeat_cls.called
++    try:
++        worker.register_kv_caches(mock_io.kv_caches)
++        assert heartbeat_cls.called
++        assert heartbeat_cls.return_value.start.called
++    finally:
++        worker.shutdown()
++
++
+ @pytest.mark.parametrize("save_decode_cache", [None, False, True])
+ @pytest.mark.parametrize("lazy", [False, True])
+ def test_decode_store_policy_through_scheduler(

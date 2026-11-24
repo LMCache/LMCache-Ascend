@@ -1,0 +1,148 @@
+diff --git a/lmcache/v1/platform/devices/npu/ipc_wrapper.py b/lmcache/v1/platform/devices/npu/ipc_wrapper.py
+index d86b5ad3..b5c2ea01 100644
+--- a/lmcache/v1/platform/devices/npu/ipc_wrapper.py
++++ b/lmcache/v1/platform/devices/npu/ipc_wrapper.py
+@@ -20,7 +20,9 @@ the registered per-layer structure directly.
+ from __future__ import annotations
+ 
+ # Standard
++import contextlib
+ from collections.abc import Sequence
++from contextlib import AbstractContextManager
+ from typing import Any, ClassVar
+ 
+ # Third Party
+@@ -42,6 +44,24 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+ PlaneRecord = tuple[Any, torch.dtype, tuple[int, ...], tuple[int, ...], int]
+ 
+ 
++def _npu_device_ctx(device_index: Any) -> AbstractContextManager:
++    """Switch the calling thread's device context for the NPU backend.
++
++    torch_npu opens a shared storage's IPC event handle under the
++    calling thread's *current* device context, not the ``device_index``
++    argument passed to ``_new_shared_npu``. A server thread that just
++    served another device therefore opens the handle under a stale
++    context and ``aclIpcOpenEventHandle`` fails with error 107017
++    (invalid handle). Callers must wrap every handle-open in this guard,
++    mirroring the ``torch.cuda.device`` guard in ``RawCudaIPCWrapper``.
++    Falls back to a no-op when ``torch.npu`` is unavailable (CPU tests).
++    """
++    npu_module = getattr(torch, "npu", None)
++    if npu_module is not None and hasattr(npu_module, "device"):
++        return npu_module.device(device_index)
++    return contextlib.nullcontext()
++
++
+ class NpuIPCWrapper(DeviceIPCWrapper):
+     """Plane-aggregating IPC wrapper for Ascend NPU KV tensors.
+ 
+@@ -166,6 +186,10 @@ class NpuIPCWrapper(DeviceIPCWrapper):
+         Note:
+             ``torch.npu`` must be initialized before this function is
+             called (guarded by ``torch_dev.init()`` at the call sites).
++            Each handle is opened under the owning device's context
++            (see :func:`_npu_device_ctx`); without that guard a server
++            thread serving several devices interleavely opens handles
++            under a stale device context (error 107017, invalid handle).
+ 
+         Returns:
+             The bare tensor, or the tuple of the layer's plane tensors in
+@@ -174,11 +198,14 @@ class NpuIPCWrapper(DeviceIPCWrapper):
+         device_index = self._get_device_index_from_uuid(self.device_uuid)
+         tensors: list[torch.Tensor] = []
+         for handle, dtype, shape, stride, storage_offset in self._plane_records:
+-            storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
+-                device_index, *handle[1:]
+-            )
+-            t = torch.empty((), device=device_index, dtype=dtype)
+-            t.set_(storage, storage_offset, shape, stride)
++            # Open the handle under the owning device's context; see
++            # :func:`_npu_device_ctx` for why this is load-bearing.
++            with _npu_device_ctx(device_index):
++                storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
++                    device_index, *handle[1:]
++                )
++                t = torch.empty((), device=device_index, dtype=dtype)
++                t.set_(storage, storage_offset, shape, stride)
+             tensors.append(t)
+         if self._bare:
+             return tensors[0]
+diff --git a/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py b/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
+index 0bb21442..30c4f65c 100644
+--- a/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
++++ b/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
+@@ -7,6 +7,7 @@ spawn round-trip test gated on real Ascend hardware.
+ """
+ 
+ # Standard
++import contextlib
+ import multiprocessing as mp
+ 
+ # Third Party
+@@ -185,6 +186,21 @@ def test_to_tensor_restores_registration_form(
+ ) -> None:
+     """``to_tensor`` restores the registered form: bare stays bare, a
+     1-tuple stays a 1-tuple."""
++
++    class _FakeNpu:
++        """Stand-in for ``torch.npu`` accepting the CPU fake index.
++
++        The CPU-based fixture resolves ``device_index`` to ``"cpu"``; a real
++        torch_npu rejects that, so the device guard must be neutralized the
++        same way :func:`test_to_tensor_switches_device_context_per_handle`
++        does.
++        """
++
++        @staticmethod
++        def device(device_index: object) -> object:
++            return contextlib.nullcontext()
++
++    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
+     _patch_cpu_share(monkeypatch)
+     tensor = torch.zeros(2, 3)
+ 
+@@ -199,6 +215,43 @@ def test_to_tensor_restores_registration_form(
+     assert tuple(out_tupled[0].shape) == (2, 3)
+ 
+ 
++def test_to_tensor_switches_device_context_per_handle(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Every handle must be opened under the wrapper's own device context.
++
++    Regression guard for 107017 (invalid handle): a server thread that
++    just served another device used to open the event handle under the
++    stale device context because ``_new_shared_npu`` resolves the device
++    from the thread's current context, not its ``device_index`` argument.
++    """
++    entered: list[object] = []
++
++    class _FakeNpu:
++        """Stand-in for ``torch.npu`` recording context switches."""
++
++        @staticmethod
++        def device(device_index: object) -> object:
++            class _Ctx:
++                def __enter__(self) -> object:
++                    entered.append(device_index)
++                    return device_index
++
++                def __exit__(self, *args: object) -> bool:
++                    return False
++
++            return _Ctx()
++
++    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
++    _patch_cpu_share(monkeypatch)
++
++    wrapper = NpuIPCWrapper.wrap((torch.zeros(2, 3), torch.zeros(2, 3)))
++    wrapper.to_tensor()
++
++    device_index = wrapper._get_device_index_from_uuid(wrapper.device_uuid)
++    assert entered == [device_index, device_index]
++
++
+ def test_equality_distinguishes_registration_form() -> None:
+     """Identical records restoring different forms must not compare equal."""
+     bare = _handbuilt_wrapper((_record(1),), bare=True)

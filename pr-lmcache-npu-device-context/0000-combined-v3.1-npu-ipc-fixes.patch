@@ -1,0 +1,587 @@
+diff --git a/lmcache/integration/vllm/vllm_multi_process_adapter.py b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+index 1b1937e1..e105a304 100644
+--- a/lmcache/integration/vllm/vllm_multi_process_adapter.py
++++ b/lmcache/integration/vllm/vllm_multi_process_adapter.py
+@@ -1550,6 +1550,10 @@ class LMCacheMPWorkerAdapter:
+             layout_hints if layout_hints is not None else vllm_layout_hints()
+         )
+         self._send_register_kv_caches_request(kv_caches)
++        # Start the heartbeat on registration: a worker that goes idle before
++        # its first store/retrieve would otherwise send no PING and be reaped
++        # after the registration grace period.
++        self._ensure_heartbeat_started()
+ 
+     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
+         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+@@ -1605,7 +1609,8 @@ class LMCacheMPWorkerAdapter:
+             ) from None
+ 
+     def _ensure_heartbeat_started(self) -> None:
+-        """Lazily start the heartbeat on first store, retrieve, or event poll.
++        """Start the heartbeat on registration and lazily on first store,
++        retrieve, or event poll.
+ 
+         The heartbeat starts healthy (the event was set at construction). A
+         live worker pings every interval, refreshing its server-side
+diff --git a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+index dd16c7c3..d3e81270 100644
+--- a/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
++++ b/lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py
+@@ -402,8 +402,15 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
+         """
+         if not entries:
+             return
++        released_devices = []
+         for entry in entries:
+-            entry.cache_context.close()
++            released_devices.append(entry.cache_context.device)
++            # close() releases device-side resources (imported IPC storages,
++            # streams) owned by the entry's device; run it with that device
++            # current so the driver reclaims them instead of acting on the
++            # calling thread's stale context.
++            with torch_dev.device(entry.cache_context.device):
++                entry.cache_context.close()
+             self._ctx.layout_desc_registry.unregister(
+                 entry.model_name, entry.world_size
+             )
+@@ -411,11 +418,16 @@ class LMCacheDrivenTransferModule(DiscoverableModule, InstanceLivenessTarget):
+         entries.clear()
+         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
+         # tensor reference is gone (LMCache#4014), hence the clear() above.
+-        torch_dev.empty_cache()
+-        ipc_collect = getattr(torch_dev, "ipc_collect", None)
+-        if ipc_collect is not None:
+-            # Backends without IPC collection omit this optional operation.
+-            ipc_collect()
++        # empty_cache() only frees the calling thread's current device, and one
++        # batch can release entries from several devices (module close), so
++        # reclaim once per released device.
++        for device in set(released_devices):
++            with torch_dev.device(device):
++                torch_dev.empty_cache()
++                ipc_collect = getattr(torch_dev, "ipc_collect", None)
++                if ipc_collect is not None:
++                    # Backends without IPC collection omit this optional operation.
++                    ipc_collect()
+ 
+     def report_status(self) -> dict:
+         """Return GPU transfer module status information.
+diff --git a/lmcache/v1/platform/base/event_ipc.py b/lmcache/v1/platform/base/event_ipc.py
+index 4021fbec..9c87378f 100644
+--- a/lmcache/v1/platform/base/event_ipc.py
++++ b/lmcache/v1/platform/base/event_ipc.py
+@@ -186,10 +186,18 @@ class DefaultEventIPCBackend(EventIPCBackend):
+         self,
+         event_module: object | None = None,
+         device_type: str | None = None,
++        exported_event_ring_size: int | None = None,
+     ) -> None:
+         self._event_module = event_module if event_module is not None else torch_dev
+         self.device_type = device_type if device_type is not None else torch_device_type
+-        self._exported_events: deque[object] = deque(maxlen=_EXPORTED_EVENT_RING_SIZE)
++        # Backends whose driver events are scarce (e.g. Ascend NPU) shrink the
++        # liveness window; the default keeps the historical CUDA ring size.
++        self._exported_event_ring_size = (
++            exported_event_ring_size
++            if exported_event_ring_size is not None
++            else _EXPORTED_EVENT_RING_SIZE
++        )
++        self._exported_events: deque[object] = deque()
+ 
+     def check_event_support(self, device: object) -> None:
+         """Raise ``RuntimeError`` if interprocess events are unsupported.
+@@ -234,7 +242,7 @@ class DefaultEventIPCBackend(EventIPCBackend):
+             The IPC handle bytes for ``event``.
+         """
+         handle = event.ipc_handle()  # type: ignore[attr-defined]
+-        self._exported_events.append(event)
++        self._retain_exported_event(event)
+         return handle
+ 
+     def import_event(self, handle: bytes, device: object) -> object:
+@@ -259,6 +267,28 @@ class DefaultEventIPCBackend(EventIPCBackend):
+         """Block the host until ``event`` completes."""
+         event.synchronize()  # type: ignore[attr-defined]
+ 
++    def _on_event_evicted(self, event: object) -> None:
++        """Release an event aging out of the exported-event liveness window.
++
++        The base backend only drops the reference (matching the historical
++        unbounded-window behavior). Backends whose driver events are scarce
++        (e.g. Ascend NPU) override this to settle the event before release.
++
++        Args:
++            event: The evicted backend-native event.
++        """
++        return None
++
++    def _retain_exported_event(self, event: object) -> None:
++        """Pin ``event`` for as long as the exported-event window allows.
++
++        Args:
++            event: Backend-native event whose IPC handle was just exported.
++        """
++        while len(self._exported_events) >= self._exported_event_ring_size:
++            self._on_event_evicted(self._exported_events.popleft())
++        self._exported_events.append(event)
++
+ 
+ def get_event_ipc_backend(device: object) -> EventIPCBackend:
+     """Return the event IPC backend for ``device``'s device type.
+diff --git a/lmcache/v1/platform/devices/npu/event_ipc.py b/lmcache/v1/platform/devices/npu/event_ipc.py
+index 0aa14c42..194a0df2 100644
+--- a/lmcache/v1/platform/devices/npu/event_ipc.py
++++ b/lmcache/v1/platform/devices/npu/event_ipc.py
+@@ -5,6 +5,7 @@
+ from __future__ import annotations
+ 
+ # Standard
++import os
+ from typing import Any
+ 
+ # First Party
+@@ -38,22 +39,61 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
+     torch_npu implements the CUDA-style event ABI (``interprocess=True``,
+     ``ipc_handle``, ``from_ipc_handle``), so the default adapter applies
+     directly; ``check_event_support`` fails closed on builds lacking it.
++
++    CANN device event resources (notify slots backing each ``aclrtCreateEvent``)
++    are far scarcer than CUDA's, so the exported-event liveness window shrinks
++    from the historical 2048 to a small ring; aged-out events are settled via
++    ``synchronize()`` before their last reference is dropped, so
++    ``aclrtDestroyEvent`` reclaims them deterministically. Without this, a
++    long-serving MP worker accumulates live driver events until event
++    creation fails with error 207001 ("driver error: out of memory").
+     """
+ 
+-    def __init__(self, event_module: Any | None = None) -> None:
++    _DEFAULT_RING_SIZE = 128
++    _RING_SIZE_ENV = "LMCACHE_NPU_EVENT_RING_SIZE"
++
++    def __init__(
++        self,
++        event_module: Any | None = None,
++        exported_event_ring_size: int | None = None,
++    ) -> None:
+         """Create an NPU event IPC backend.
+ 
+         Args:
+             event_module: Optional torch.npu-like module. Defaults to the
+                 installed torch_npu; injectable for tests.
++            exported_event_ring_size: Liveness-window size for exported
++                events. Defaults to the ``LMCACHE_NPU_EVENT_RING_SIZE``
++                environment variable or 128.
+         """
++        if exported_event_ring_size is None:
++            raw = os.environ.get(self._RING_SIZE_ENV)
++            exported_event_ring_size = (
++                int(raw) if raw is not None else self._DEFAULT_RING_SIZE
++            )
+         super().__init__(
+             event_module=(
+                 event_module if event_module is not None else _torch_npu_module()
+             ),
+             device_type="npu",
++            exported_event_ring_size=exported_event_ring_size,
+         )
+ 
++    def _on_event_evicted(self, event: Any) -> None:
++        """Settle an event before its last reference is dropped.
++
++        Args:
++            event: The evicted backend-native event.
++        """
++        try:
++            event.synchronize()
++        except Exception:
++            logger.warning(
++                "NPU exported-event reclaim: synchronize failed; "
++                "dropping reference anyway.",
++                exc_info=True,
++            )
++
+     def export_event(self, event: object, device: object) -> bytes:
+         """Serialize an event for another process.
+ 
+@@ -74,7 +114,13 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
+             return super().export_event(event, device)
+ 
+     def import_event(self, handle: bytes, device: object) -> object:
+-        """Import a serialized event handle, diagnosing failures.
++        """Import a serialized event handle under ``device``'s context.
++
++        CANN derives the imported event from the calling thread's current
++        device context (``aclIpcOpenEventHandle``), not from the ``device``
++        argument alone, so a handler thread serving several devices must pin
++        the owning device before opening the handle — the same guard
++        :meth:`export_event` applies on the way out.
+ 
+         Args:
+             handle: Serialized event handle from another process.
+@@ -88,7 +134,8 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
+                 the handle summary and target device for triage.
+         """
+         try:
+-            return super().import_event(handle, device)
++            with self._event_module.device(device):  # type: ignore[attr-defined]
++                return super().import_event(handle, device)
+         except Exception as exc:
+             logger.warning(
+                 "NPU event import failed: device=%s %s error=%s",
+@@ -97,3 +144,33 @@ class NpuEventIPCBackend(DefaultEventIPCBackend):
+                 exc,
+             )
+             raise
++
++    def record_event(self, event: object, stream: object) -> None:
++        """Record ``event`` on ``stream`` under the stream's device context.
++
++        torch_npu creates the underlying driver event lazily at record time
++        (``AclrtCreateEventWithFlag``), bound to the calling thread's current
++        device context. Recording under a stale context allocates the event
++        in the wrong device's event pool — it is then never reclaimed by the
++        owning device (error 207001) and the record itself can be rejected
++        (EE1010, "stream does not belong to the current context").
++
++        Args:
++            event: Backend-native event to record.
++            stream: Stream that should record the event.
++        """
++        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
++            super().record_event(event, stream)
++
++    def wait_event(self, event: object, stream: object) -> None:
++        """Make ``stream`` wait for ``event`` under the stream's device context.
++
++        The stream-side wait is queued against the stream's device context,
++        so the same pinning as :meth:`record_event` applies.
++
++        Args:
++            event: Backend-native event to wait on.
++            stream: Stream that should wait for the event.
++        """
++        with self._event_module.device(stream.device):  # type: ignore[attr-defined]
++            super().wait_event(event, stream)
+diff --git a/lmcache/v1/platform/devices/npu/ipc_wrapper.py b/lmcache/v1/platform/devices/npu/ipc_wrapper.py
+index d86b5ad3..b5c2ea01 100644
+--- a/lmcache/v1/platform/devices/npu/ipc_wrapper.py
++++ b/lmcache/v1/platform/devices/npu/ipc_wrapper.py
+@@ -20,7 +20,9 @@ the registered per-layer structure directly.
+ from __future__ import annotations
+ 
+ # Standard
++import contextlib
+ from collections.abc import Sequence
++from contextlib import AbstractContextManager
+ from typing import Any, ClassVar
+ 
+ # Third Party
+@@ -42,6 +44,24 @@ from lmcache.v1.platform.base.ipc_wrapper import DeviceIPCWrapper
+ PlaneRecord = tuple[Any, torch.dtype, tuple[int, ...], tuple[int, ...], int]
+ 
+ 
++def _npu_device_ctx(device_index: Any) -> AbstractContextManager:
++    """Switch the calling thread's device context for the NPU backend.
++
++    torch_npu opens a shared storage's IPC event handle under the
++    calling thread's *current* device context, not the ``device_index``
++    argument passed to ``_new_shared_npu``. A server thread that just
++    served another device therefore opens the handle under a stale
++    context and ``aclIpcOpenEventHandle`` fails with error 107017
++    (invalid handle). Callers must wrap every handle-open in this guard,
++    mirroring the ``torch.cuda.device`` guard in ``RawCudaIPCWrapper``.
++    Falls back to a no-op when ``torch.npu`` is unavailable (CPU tests).
++    """
++    npu_module = getattr(torch, "npu", None)
++    if npu_module is not None and hasattr(npu_module, "device"):
++        return npu_module.device(device_index)
++    return contextlib.nullcontext()
++
++
+ class NpuIPCWrapper(DeviceIPCWrapper):
+     """Plane-aggregating IPC wrapper for Ascend NPU KV tensors.
+ 
+@@ -166,6 +186,10 @@ class NpuIPCWrapper(DeviceIPCWrapper):
+         Note:
+             ``torch.npu`` must be initialized before this function is
+             called (guarded by ``torch_dev.init()`` at the call sites).
++            Each handle is opened under the owning device's context
++            (see :func:`_npu_device_ctx`); without that guard a server
++            thread serving several devices interleavely opens handles
++            under a stale device context (error 107017, invalid handle).
+ 
+         Returns:
+             The bare tensor, or the tuple of the layer's plane tensors in
+@@ -174,11 +198,14 @@ class NpuIPCWrapper(DeviceIPCWrapper):
+         device_index = self._get_device_index_from_uuid(self.device_uuid)
+         tensors: list[torch.Tensor] = []
+         for handle, dtype, shape, stride, storage_offset in self._plane_records:
+-            storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
+-                device_index, *handle[1:]
+-            )
+-            t = torch.empty((), device=device_index, dtype=dtype)
+-            t.set_(storage, storage_offset, shape, stride)
++            # Open the handle under the owning device's context; see
++            # :func:`_npu_device_ctx` for why this is load-bearing.
++            with _npu_device_ctx(device_index):
++                storage = torch.UntypedStorage._new_shared_npu(  # type: ignore[attr-defined]  # noqa: SLF001
++                    device_index, *handle[1:]
++                )
++                t = torch.empty((), device=device_index, dtype=dtype)
++                t.set_(storage, storage_offset, shape, stride)
+             tensors.append(t)
+         if self._bare:
+             return tensors[0]
+diff --git a/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py b/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
+index 0bb21442..30c4f65c 100644
+--- a/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
++++ b/tests/v1/platform/devices/npu/test_npu_ipc_wrapper.py
+@@ -7,6 +7,7 @@ spawn round-trip test gated on real Ascend hardware.
+ """
+ 
+ # Standard
++import contextlib
+ import multiprocessing as mp
+ 
+ # Third Party
+@@ -185,6 +186,21 @@ def test_to_tensor_restores_registration_form(
+ ) -> None:
+     """``to_tensor`` restores the registered form: bare stays bare, a
+     1-tuple stays a 1-tuple."""
++
++    class _FakeNpu:
++        """Stand-in for ``torch.npu`` accepting the CPU fake index.
++
++        The CPU-based fixture resolves ``device_index`` to ``"cpu"``; a real
++        torch_npu rejects that, so the device guard must be neutralized the
++        same way :func:`test_to_tensor_switches_device_context_per_handle`
++        does.
++        """
++
++        @staticmethod
++        def device(device_index: object) -> object:
++            return contextlib.nullcontext()
++
++    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
+     _patch_cpu_share(monkeypatch)
+     tensor = torch.zeros(2, 3)
+ 
+@@ -199,6 +215,43 @@ def test_to_tensor_restores_registration_form(
+     assert tuple(out_tupled[0].shape) == (2, 3)
+ 
+ 
++def test_to_tensor_switches_device_context_per_handle(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Every handle must be opened under the wrapper's own device context.
++
++    Regression guard for 107017 (invalid handle): a server thread that
++    just served another device used to open the event handle under the
++    stale device context because ``_new_shared_npu`` resolves the device
++    from the thread's current context, not its ``device_index`` argument.
++    """
++    entered: list[object] = []
++
++    class _FakeNpu:
++        """Stand-in for ``torch.npu`` recording context switches."""
++
++        @staticmethod
++        def device(device_index: object) -> object:
++            class _Ctx:
++                def __enter__(self) -> object:
++                    entered.append(device_index)
++                    return device_index
++
++                def __exit__(self, *args: object) -> bool:
++                    return False
++
++            return _Ctx()
++
++    monkeypatch.setattr(torch, "npu", _FakeNpu, raising=False)
++    _patch_cpu_share(monkeypatch)
++
++    wrapper = NpuIPCWrapper.wrap((torch.zeros(2, 3), torch.zeros(2, 3)))
++    wrapper.to_tensor()
++
++    device_index = wrapper._get_device_index_from_uuid(wrapper.device_uuid)
++    assert entered == [device_index, device_index]
++
++
+ def test_equality_distinguishes_registration_form() -> None:
+     """Identical records restoring different forms must not compare equal."""
+     bare = _handbuilt_wrapper((_record(1),), bare=True)
+diff --git a/tests/v1/platform/test_event_ipc.py b/tests/v1/platform/test_event_ipc.py
+index 8bad8a31..e1cf49b9 100644
+--- a/tests/v1/platform/test_event_ipc.py
++++ b/tests/v1/platform/test_event_ipc.py
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # Standard
++import contextlib
+ import gc
+ import inspect
+ import weakref
+@@ -17,6 +18,7 @@ from lmcache.v1.platform.base.event_ipc import (
+     get_event_ipc_backend,
+ )
+ from lmcache.v1.platform.devices.cpu import CpuDeviceSpec
++from lmcache.v1.platform.devices.npu.event_ipc import NpuEventIPCBackend
+ from lmcache.v1.platform.devices.cuda import CudaDeviceSpec
+ from lmcache.v1.platform.devices.cuda.timeline_semaphore_event_ipc import (
+     TimelineSemaphoreEventIPCBackend,
+@@ -257,6 +259,123 @@ def test_cpu_device_spec_exposes_cached_default_event_backend() -> None:
+     assert spec.event_ipc_backend is spec.event_ipc_backend
+ 
+ 
++def test_npu_backend_evicts_oldest_and_settles_it():
++    """NPU driver events are scarce: the oldest exported event must be
++    settled before its last reference is dropped."""
++
++    class _NpuFakeEventModule:
++        Event = _FakeEvent
++
++        @staticmethod
++        def device(_device):
++            return contextlib.nullcontext()
++
++    backend = NpuEventIPCBackend(
++        event_module=_NpuFakeEventModule(), exported_event_ring_size=3
++    )
++    events = []
++    for _ in range(5):
++        ev = backend.create_event(_Device("npu"))
++        backend.export_event(ev, _Device("npu"))
++        events.append(ev)
++
++    assert len(backend._exported_events) == 3
++    assert all(("synchronize",) in ev.calls for ev in events[:2])
++    assert ("synchronize",) not in events[2].calls
++
++
++def test_npu_backend_ring_size_defaults_from_env(monkeypatch: pytest.MonkeyPatch):
++    monkeypatch.setenv("LMCACHE_NPU_EVENT_RING_SIZE", "7")
++    backend = NpuEventIPCBackend(event_module=_FakeEventModule())
++    assert backend._exported_event_ring_size == 7
++
++
++def test_npu_backend_settle_failure_does_not_block_export():
++    """A failing settle must not block the export path."""
++
++    class _BrokenSettleEvent(_FakeEvent):
++        def synchronize(self) -> None:
++            raise RuntimeError("device gone")
++
++    class _BrokenSettleNpuModule:
++        Event = _BrokenSettleEvent
++
++        @staticmethod
++        def device(_device):
++            return contextlib.nullcontext()
++
++    backend = NpuEventIPCBackend(
++        event_module=_BrokenSettleNpuModule(), exported_event_ring_size=1
++    )
++    first = backend.create_event(_Device("npu"))
++    backend.export_event(first, _Device("npu"))
++    second = backend.create_event(_Device("npu"))
++    backend.export_event(second, _Device("npu"))
++
++    assert len(backend._exported_events) == 1
++    assert backend._exported_events[0] is second
++
++
++class _RecordingDeviceModule:
++    """Fake event module recording every device context the backend enters."""
++
++    Event = _FakeEvent
++
++    def __init__(self) -> None:
++        self.entered: list[object] = []
++
++    def device(self, device):
++        entered = self.entered
++
++        @contextlib.contextmanager
++        def _ctx():
++            entered.append(device)
++            yield
++
++        return _ctx()
++
++
++class _FakeStream:
++    """Minimal stream stub exposing the ``device`` property."""
++
++    def __init__(self, device: object) -> None:
++        self.device = device
++
++
++def test_npu_backend_import_event_pins_owning_device():
++    """CANN derives the imported event from the calling thread's current
++    device context, so the import must run with the owning device pinned."""
++    module = _RecordingDeviceModule()
++    backend = NpuEventIPCBackend(event_module=module)
++    device = _Device("npu")
++    event = backend.import_event(b"handle", device)
++    assert module.entered == [device]
++    assert ("from_ipc_handle", device, b"handle") in event.calls
++
++
++def test_npu_backend_record_and_wait_pin_stream_device():
++    """Record/wait create and queue work against the stream's device, which
++    must be current to avoid allocating events in a stale context's pool."""
++    module = _RecordingDeviceModule()
++    backend = NpuEventIPCBackend(event_module=module)
++    device = _Device("npu")
++    stream = _FakeStream(device)
++    event = _FakeEvent()
++    backend.record_event(event, stream)
++    backend.wait_event(event, stream)
++    assert module.entered == [device, device]
++    assert ("record", stream) in event.calls
++    assert ("wait", stream) in event.calls
++
++
++def test_default_backend_keeps_historical_ring_size():
++    """The default backend keeps the historical 2048-event window."""
++    backend = DefaultEventIPCBackend(
++        event_module=_FakeEventModule(), device_type="fake"
++    )
++    assert backend._exported_event_ring_size == _EXPORTED_EVENT_RING_SIZE
++
++
+ @pytest.fixture
+ def restore_isolated_ipc():
+     """Restore the process-global isolated-IPC switch after the test."""
+diff --git a/tests/v1/test_mp_connector_kv_roles.py b/tests/v1/test_mp_connector_kv_roles.py
+index 6690d4a6..11e49e9c 100644
+--- a/tests/v1/test_mp_connector_kv_roles.py
++++ b/tests/v1/test_mp_connector_kv_roles.py
+@@ -241,6 +241,27 @@ def connectors(
+         scheduler.shutdown()
+ 
+ 
++def test_register_kv_caches_starts_heartbeat(mock_io: SimpleNamespace) -> None:
++    """Registration must start the heartbeat immediately.
++
++    A worker whose heartbeat only starts on its first store/retrieve sends no
++    PING while idle, so the server reaps its registration after the
++    registration grace period (observed: 16 idle ranks reaped after 1h).
++    """
++    config = _config(
++        KVTransferConfig(kv_connector="LMCacheMPConnector", kv_role="kv_both")
++    )
++    worker = LMCacheMPConnector(config, KVConnectorRole.WORKER)
++    heartbeat_cls = adapter_mod.HeartbeatThread
++    assert not heartbeat_cls.called
++    try:
++        worker.register_kv_caches(mock_io.kv_caches)
++        assert heartbeat_cls.called
++        assert heartbeat_cls.return_value.start.called
++    finally:
++        worker.shutdown()
++
++
+ @pytest.mark.parametrize("save_decode_cache", [None, False, True])
+ @pytest.mark.parametrize("lazy", [False, True])
+ def test_decode_store_policy_through_scheduler(
