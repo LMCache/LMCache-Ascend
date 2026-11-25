@@ -21,6 +21,32 @@ public:
            uint64_t loopTimeEachTailCore, uint64_t numTokensFrontCoreLastLoop,
            uint64_t numTokensTailCoreLastLoop);
 
+  __aicore__ inline void SetPositionRange(bool enabled, uint64_t oldStart,
+                                          uint64_t newStart, uint64_t slots) {
+    usePositionRange = enabled;
+    oldPositionStart = oldStart;
+    newPositionStart = newStart;
+    positionSlots = slots;
+  }
+
+  __aicore__ inline uint64_t OldPosition(GlobalTensor<uint64_t>& positions,
+                                         uint64_t localOffset,
+                                         uint64_t blockOffset) const {
+    if (usePositionRange) {
+      return oldPositionStart + (blockOffset + localOffset) % positionSlots;
+    }
+    return positions.GetValue(localOffset);
+  }
+
+  __aicore__ inline uint64_t NewPosition(GlobalTensor<uint64_t>& positions,
+                                         uint64_t localOffset,
+                                         uint64_t blockOffset) const {
+    if (usePositionRange) {
+      return newPositionStart + (blockOffset + localOffset) % positionSlots;
+    }
+    return positions.GetValue(localOffset);
+  }
+
 protected:
   uint32_t blockIdx_;
   uint64_t coreNumUse;
@@ -37,6 +63,10 @@ protected:
   uint64_t loopTimeCurrentCore{0};
   uint64_t numTokensEachLoopCurrentCore{0};
   uint64_t numTokensLastLoopCurrentCore{0};
+  bool usePositionRange{false};
+  uint64_t oldPositionStart{0};
+  uint64_t newPositionStart{0};
+  uint64_t positionSlots{1};
 };
 
 template <typename T>

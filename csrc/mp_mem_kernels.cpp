@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// C++ host layer for the block-level MP-mode KV transfer (mirrors upstream
-// LMCache csrc/mp_mem_kernels.cu).
+// C++ host layer for block-level and token-level MP-mode KV transfers.
+// The block executor mirrors upstream
+// LMCache csrc/mp_mem_kernels.cu.
 //
 // Design contract:
 //   - prepare_group resolves a PageBufferShapeDesc + EngineKVFormat into the
@@ -19,6 +20,7 @@
 #include "mp_mem_kernels.h"
 
 #include "kernels/multi_layer/multi_layer_block_mem_kernels.h"
+#include "kernels/multi_layer/multi_layer_token_mem_kernels.h"
 #include "utils.h"
 
 #include <acl/acl.h>
@@ -729,4 +731,87 @@ void execute_object_group_transfer(
       do_staging(batch_steps[step_idx].staging);
     }
   }
+}
+
+namespace {
+
+kvcache_ops::TokenKVTransferLayout
+prepare_token_transfer_layout(EngineKVFormat format, int32_t num_layers,
+                              int32_t slot_tokens, int64_t hidden_elems,
+                              int32_t element_size, int64_t page_buffer_size,
+                              int32_t block_size, int64_t block_stride_elems) {
+  // The device address calculation implements only these two K/V layouts.
+  const bool fmt2 = format == EngineKVFormat::NL_X_NB_TWO_BS_NH_HS;
+  TORCH_CHECK(fmt2 || format == EngineKVFormat::NL_X_TWO_X_NB_BS_NH_HS,
+              "token KV transfer supports formats 2 and 16, got ",
+              static_cast<int>(format));
+  TORCH_CHECK(num_layers > 0 && slot_tokens > 0 && hidden_elems > 0 &&
+                  page_buffer_size > 0 && block_size > 0,
+              "token KV transfer dimensions must be positive");
+  TORCH_CHECK(element_size == 1 || element_size == 2 || element_size == 4,
+              "token KV transfer element_size must be 1, 2 or 4");
+  TORCH_CHECK(block_stride_elems >= 0,
+              "token KV transfer block stride must be non-negative");
+  const int64_t row_bytes =
+      checked_mul(hidden_elems, element_size, "token transfer row bytes");
+  // Independent token work items must not share a 32-byte GM write granule.
+  // Each work item stages a whole row in UB; there is no segmentation path.
+  TORCH_CHECK(row_bytes % 32 == 0 &&
+                  row_bytes <= kvcache_ops::kTokenTransferUbBytes,
+              "token transfer row bytes must be a multiple of 32 and at most ",
+              kvcache_ops::kTokenTransferUbBytes, ", got ", row_bytes);
+  const int64_t plane_span =
+      checked_mul(block_size, row_bytes, "token transfer plane span");
+  const int64_t tight_stride =
+      checked_mul(fmt2 ? 2 : 1, plane_span, "token transfer tight stride");
+  const int64_t stride = block_stride_elems > 0
+                             ? checked_mul(block_stride_elems, element_size,
+                                           "token transfer stride")
+                             : tight_stride;
+  // A block must cover all its planes and preserve row alignment in the next
+  // block. Only the block axis may be padded; rows within a plane are dense.
+  TORCH_CHECK(stride >= tight_stride && stride % 32 == 0,
+              "token KV transfer block stride is too small or unaligned");
+  const int64_t last_block = (page_buffer_size - 1) / block_size;
+  checked_add(checked_mul(last_block, stride, "token transfer engine span"),
+              tight_stride, "token transfer engine span");
+  checked_mul(checked_mul(2, num_layers, "token transfer planes"),
+              checked_mul(slot_tokens, row_bytes, "token transfer layer bytes"),
+              "token transfer buffer bytes");
+  checked_mul(checked_mul(2, num_layers, "token transfer planes"), slot_tokens,
+              "token transfer maximum work");
+  return {num_layers, slot_tokens, block_size, page_buffer_size,
+          row_bytes,  stride,      fmt2};
+}
+
+} // namespace
+
+void multi_layer_token_kv_transfer_on_stream(
+    uintptr_t paged_kv_ptrs, uintptr_t lmc_buffer, uintptr_t slot_mapping,
+    int32_t num_tokens, TransferDirection direction, EngineKVFormat format,
+    int32_t num_layers, int32_t slot_tokens, int64_t hidden_elems,
+    int32_t element_size, int64_t page_buffer_size, int32_t block_size,
+    int64_t block_stride_elems, uint32_t aiv_num, aclrtStream stream) {
+  // Resolve and check the token kernel geometry at its launch entry.
+  const auto layout = prepare_token_transfer_layout(
+      format, num_layers, slot_tokens, hidden_elems, element_size,
+      page_buffer_size, block_size, block_stride_elems);
+  TORCH_CHECK(num_tokens >= 0 && num_tokens <= layout.slot_tokens,
+              "token transfer count exceeds source capacity");
+  TORCH_CHECK(direction == TransferDirection::H2D ||
+                  direction == TransferDirection::D2H,
+              "invalid token transfer direction");
+  if (num_tokens == 0) {
+    return;
+  }
+  TORCH_CHECK(paged_kv_ptrs && lmc_buffer && slot_mapping && stream && aiv_num,
+              "token transfer requires non-null pointers/stream and AIV cores");
+  const int64_t work = static_cast<int64_t>(layout.num_layers) * 2 * num_tokens;
+  const uint32_t block_dim =
+      static_cast<uint32_t>(std::min<int64_t>(aiv_num, work));
+  kvcache_ops::multi_layer_token_kv_transfer_kernel(
+      block_dim, stream, reinterpret_cast<uint8_t *>(paged_kv_ptrs),
+      reinterpret_cast<uint8_t *>(lmc_buffer),
+      reinterpret_cast<uint8_t *>(slot_mapping), num_tokens, layout,
+      direction == TransferDirection::D2H);
 }
