@@ -87,6 +87,16 @@ def TokenDatabase_process_tokens(
             if idx > 0:
                 start_idx += self.sep_len
                 end_idx += self.sep_len
+            # NOTE: upstream SegmentTokenDatabase.process_tokens does not skip
+            # empty split chunks. _fast_split_by_subtensor can yield empty ranges
+            # for leading/trailing/consecutive separators (e.g. prompts ending
+            # with the special-token separator). Downstream batched_allocate then
+            # crashes with ZeroDivisionError when num_tokens == 0 produces a
+            # zero-sized aligned_size. Filter here defensively. Also worth
+            # reporting upstream — see PROGRESS_2026-05-29.md PR-review items.
+            if token_chunk_len == 0 or end_idx <= start_idx:
+                start_idx = end_idx
+                continue
             if start_idx >= num_falses:
                 if make_key:
                     yield (

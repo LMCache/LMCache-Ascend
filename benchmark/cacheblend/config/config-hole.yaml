@@ -1,0 +1,34 @@
+model_path: "/data/weights/qwen3-8B/"
+data_path: "/home/tianx/sosp26/lmcache-ascend-cpl/data/musique/musique_s.json"
+recompute_ratio: 0.5
+device: 'npu'
+method: 'cacheblend'
+hole_mode: 'hole'
+hole_id: -1 # single-hole fallback: 0-based native doc index chosen as the hole; -1 means middle native doc
+hole_pos: -1 # single-hole fallback: 0-based final inflated prompt position where the hole doc is placed
+hole_ids: [] # multi-hole native doc indices; when set, overrides hole_id/hole_pos
+hole_positions: [] # multi-hole final inflated prompt positions; same length as hole_ids
+pooling: ''
+prelayer: ''
+only_s: []
+until: null
+sep: '# #'
+chunk_size: 256
+tp_size: 1
+cap_ndocs: -1
+cap_doc_chars: -1
+golem_prefix: 0
+golem_temperature: 1
+batch_size: 1
+max_num_req: null # when set (>0), cap requests per llm.generate call and engine max_num_seqs
+phase1_submit_mode: all_at_once # one_by_one | all_at_once
+phase2_submit_mode: all_at_once # one_by_one | all_at_once
+phase2_repeats: 2 # run Phase-2 multiple times (pass1 fills holes, pass2+ should be pure reuse)
+inflate: 1 # repeat document block in query prompt: prefix + [docs+sep] * inflate + query
+nosink: false # when true, prefill each doc as: sysprompt + sep + doc + sep
+barrier: 1
+sleep: 5000
+npu: 0
+hydra:
+  run:
+    dir: ${oc.env:MY_HYDRA_OUTPUT_DIR, ./outputs}/${now:%Y-%m-%d-%H-%M-%S--%f}

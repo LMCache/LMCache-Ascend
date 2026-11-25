@@ -4,9 +4,9 @@
 1. Patch vLLM-Ascend worker for LMCache model tracking.
 
 This script:
-  - locates vllm_ascend.worker.worker_v1 via import
+  - locates vllm_ascend.worker.worker via import
   - applies the LMCache model registration + KV transfer init changes to load_model
-  - comments out ensure_kv_transfer_initialized in _init_worker_distributed_environment
+  - comments out ensure_kv_transfer_initialized in initialize_from_config
   - creates a backup of the original file
 
 2. Patch vLLM-Ascend for Rotary Embedding
@@ -46,7 +46,7 @@ class CacheBlendPatcher(BasePatcher):
             tasks = [
                 {
                     "name": "Worker Model Tracking Patch",
-                    "module": "vllm_ascend.worker.worker_v1",
+                    "module": "vllm_ascend.worker.worker",
                     "func": cls._patch_worker_file,
                     "required_versions": cls.VERSION_SERIES,
                 },
@@ -74,8 +74,8 @@ class CacheBlendPatcher(BasePatcher):
         realigns the KV cache connector setup to ensure metadata is
         available for CacheBlend queries.
 
-        --- a/vllm_ascend/worker/worker_v1.py
-        +++ b/vllm_ascend/worker/worker_v1.py
+        --- a/vllm_ascend/worker/worker.py
+        +++ b/vllm_ascend/worker/worker.py
         @@ -17,6 +17,8 @@
         +from lmcache.integration.vllm.utils import ENGINE_NAME
         +from lmcache.v1.compute.models.utils import VLLMModelTracker
@@ -90,16 +90,19 @@ class CacheBlendPatcher(BasePatcher):
         +        ensure_kv_transfer_initialized(self.vllm_config)
         +
         @@ -391,7 +396,7 @@ class NPUWorker(WorkerBase):
-            def _init_worker_distributed_environment():
+            def initialize_from_config():
                 ...
-                init_ascend_model_parallel(self.parallel_config)
-        -        ensure_kv_transfer_initialized(self.vllm_config)
-        +        # ensure_kv_transfer_initialized(self.vllm_config)
+                ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        -        ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        +        # ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         """
         _IMPORTS_TO_ADD = [
             "from lmcache.integration.vllm.utils import ENGINE_NAME\n",
             "from lmcache.v1.compute.models.utils import VLLMModelTracker\n",
         ]
+        _EARLY_KV_INIT_CALL = (
+            "ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)"
+        )
 
         content = path.read_text(encoding="utf-8")
         lines = content.splitlines(keepends=True)
@@ -116,53 +119,64 @@ class CacheBlendPatcher(BasePatcher):
             changed = True
             logger.debug("Injected LMCache imports.")
 
-        # Phase 2: Comment out distributed KV initialization
-        block_dist = cls._find_function_block(
-            lines, "_init_worker_distributed_environment"
-        )
-        if block_dist:
-            for i in range(block_dist[0], block_dist[1]):
-                line_stripped = lines[i].lstrip()
-                if "ensure_kv_transfer_initialized(" in lines[
-                    i
-                ] and not line_stripped.startswith("#"):
-                    target = "ensure_kv_transfer_initialized("
-                    lines[i] = lines[i].replace(target, f"# {target}")
-                    changed = True
-                    logger.debug(
-                        f"Commented out ensure_kv_transfer_initialized at {i + 1}"
-                    )
-        else:
-            logger.warning(
-                "Could not find _init_worker_distributed_environment. "
-                "Skipping this sub-patch."
+        # Phase 2: Comment out early KV initialization in initialize_from_config
+        block_init = cls._find_function_block(lines, "initialize_from_config")
+        if not block_init:
+            raise RuntimeError(
+                "Critical: Could not find 'initialize_from_config' in worker."
+            )
+
+        early_init_found = False
+        commented_early_init_found = False
+        for i in range(block_init[0], block_init[1]):
+            line = lines[i]
+            line_stripped = line.lstrip()
+            if _EARLY_KV_INIT_CALL in line and not line_stripped.startswith("#"):
+                lines[i] = line.replace(
+                    _EARLY_KV_INIT_CALL,
+                    f"# {_EARLY_KV_INIT_CALL}",
+                    1,
+                )
+                changed = True
+                early_init_found = True
+                logger.debug(
+                    "Commented out ensure_kv_transfer_initialized at %d", i + 1
+                )
+                break
+            if f"# {_EARLY_KV_INIT_CALL}" in line:
+                commented_early_init_found = True
+
+        if not early_init_found and not commented_early_init_found:
+            raise RuntimeError(
+                "Critical: Could not find the exact early "
+                "'ensure_kv_transfer_initialized(self.vllm_config, "
+                "kv_cache_config)' call inside initialize_from_config."
             )
 
         # Phase 3: Add model registration in load_model
         if not any("VLLMModelTracker.register_model" in line for line in lines):
             block_load = cls._find_function_block(lines, "load_model")
-            if block_load:
-                last_idx = block_load[1] - 1
-                while last_idx > block_load[0] and not lines[last_idx].strip():
-                    last_idx -= 1
+            if not block_load:
+                raise RuntimeError("Critical: Could not find 'load_model' in worker.")
 
-                # Logic: Find indentation of the function body
-                indent = "        "  # Default for vLLM class methods
-                reg_msg = (
-                    "VLLMModelTracker.register_model(ENGINE_NAME, "
-                    "self.model_runner.model)"
-                )
-                snippet = [
-                    "\n",
-                    f"{indent}{reg_msg}\n",
-                    f"{indent}ensure_kv_transfer_initialized(self.vllm_config)\n",
-                ]
-                for i, s in enumerate(snippet):
-                    lines.insert(last_idx + 1 + i, s)
-                changed = True
-                logger.debug(f"Injected VLLMModelTracker at line {last_idx + 2}")
-            else:
-                logger.error("Critical: Could not find 'load_model' in worker.")
+            last_idx = block_load[1] - 1
+            while last_idx > block_load[0] and not lines[last_idx].strip():
+                last_idx -= 1
+
+            # Logic: Find indentation of the function body
+            indent = "        "  # Default for vLLM class methods
+            reg_msg = (
+                "VLLMModelTracker.register_model(ENGINE_NAME, self.model_runner.model)"
+            )
+            snippet = [
+                "\n",
+                f"{indent}{reg_msg}\n",
+                f"{indent}ensure_kv_transfer_initialized(self.vllm_config)\n",
+            ]
+            for i, s in enumerate(snippet):
+                lines.insert(last_idx + 1 + i, s)
+            changed = True
+            logger.debug(f"Injected VLLMModelTracker at line {last_idx + 2}")
 
         if changed:
             cls._backup_file(path)

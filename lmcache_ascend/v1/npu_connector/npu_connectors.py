@@ -378,6 +378,22 @@ class VLLMBufferLayerwiseNPUConnector(VLLMBufferLayerwiseGPUConnector):
         self.use_mla = bool(kwargs.get("use_mla", False))
         self.fused_rotary_emb: Any = None
 
+    def initialize_kvcaches_ptr(self, **kwargs) -> None:
+        """Normalize layer entries back to tuples for the NPU pybind kernels.
+
+        Upstream ``attempt_permute_to_contiguous_view`` recurses non-tensor
+        nodes into plain lists, and vllm-ascend registers separate-KV models
+        (e.g. Qwen3) as per-layer ``tuple(k_cache, v_cache)``; after the
+        upstream normalization those layers become lists, which the
+        ``single_layer_kv_transfer`` pybind only accepts as tuples.
+        """
+        super().initialize_kvcaches_ptr(**kwargs)
+        if self.kvcaches is not None:
+            self.kvcaches = [
+                tuple(layer) if isinstance(layer, list) else layer
+                for layer in self.kvcaches
+            ]
+
     def _lazy_initialize_buffer(self, kv_caches):
         """
         Lazily initialize the GPU buffer allocator if it is not initialized yet.

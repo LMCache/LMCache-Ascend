@@ -1,5 +1,7 @@
 # Benchmarking LLM Performance: RAG Use Case
 
+Compatibility note: This feature has been developed and tested against `vllm-ascend v0.18.0`.
+
 ## Some ad-hoc changes needed in vLLM-Ascend for CacheBlend Integration
 These temporary (ad-hoc) modifications are necessary for the cacheblend feature, based on instructions found here:https://github.com/LMCache/LMCache/blob/dev/examples/blend_kv_v1/README.md
 
@@ -16,9 +18,9 @@ python /LMCache-Ascend/lmcache_ascend/integration/patch/apply_patch.py
 #### Option 2: Manual Modification
 If you prefer to update the code manually, please modify the following file:
 
-**File Path**: `vllm-ascend/vllm-ascend/worker/worker_v1.py`
+**File Path**: `vllm-ascend/vllm-ascend/worker/worker.py`
 
-- In `vllm-ascend/vllm-ascend/worker/worker_v1.py`, comment out `ensure_kv_transfer_initialized(vllm_config)` in function `def _init_worker_distributed_environment`.
+- In `vllm-ascend/vllm-ascend/worker/worker.py`, comment out `ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)` in function `def initialize_from_config`.
 - In the same file, add 
 ```
 from lmcache.v1.compute.models.utils import VLLMModelTracker

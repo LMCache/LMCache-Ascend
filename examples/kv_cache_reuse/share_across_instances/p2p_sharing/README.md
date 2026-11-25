@@ -134,7 +134,7 @@ extra_config:
 
 Only the first rank owns and retrieves from the storage backend in this mode.
 Eager CPU pull provides materialized CPU KV objects that the first rank can load
-and broadcast to the remaining ranks. 
+and broadcast to the remaining ranks.
 
 ### Size `os_staging_bytes`
 
