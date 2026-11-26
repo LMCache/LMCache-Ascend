@@ -79,7 +79,7 @@ lmcache server \
     --eviction-policy LRU
 ```
 
-Wait for `LMCache INFO: LMCache zmq cache server is running on localhost:5555`.
+Wait for `LMCache INFO: LMCache grpc cache server is running on localhost:5555`.
 
 `--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [the LMCache-driven guide](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) for the full deployment guide.
 
