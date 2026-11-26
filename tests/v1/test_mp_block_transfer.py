@@ -1303,6 +1303,63 @@ def test_object_group_plan_matches_direct_launches(direction_d2h: bool) -> None:
 
 
 @requires_npu
+@pytest.mark.parametrize(
+    "layout", ["sep_kv", "mla_bf16", "nh_cs_factory"], ids=["fmt16", "fmt17", "fmt13"]
+)
+@pytest.mark.parametrize("direction_d2h", [True, False], ids=["d2h", "h2d"])
+def test_plan_accepts_factory_built_descriptor(
+    layout: str, direction_d2h: bool
+) -> None:
+    """Regression for #369: upstream's factory returns lmcache_native's
+    descriptor, and c_ops' copy of the struct used to read past it."""
+    device = torch.device("npu:0")
+    direct = _build(layout, device, nl=2, nb=4)
+    planned = _build(layout, device, nl=2, nb=4)
+    planned["desc"] = _factory_shape_desc(
+        planned["layers"],
+        planned["fmt"],
+        nl=planned["nl"],
+        nb=_engine_nb(planned["layers"]),
+        bs=planned["bs"],
+    )
+    direction = D2H if direction_d2h else H2D
+    ids = torch.tensor([0], dtype=torch.int64, device=device)
+    chunk = direct["bs"]
+    if direction_d2h:
+        golden = torch.zeros(
+            _obj_shape(direct, chunk), dtype=direct["obj_dtype"], device=device
+        )
+        planned_obj = golden.clone()
+    else:
+        src = _fill_src_object(direct, device)
+        golden, planned_obj = src.clone(), src.clone()
+        _zero_engine(direct["layers"])
+        _zero_engine(planned["layers"])
+    _launch(
+        direct, direct["table"], [int(golden.data_ptr())], ids, device, direction, chunk
+    )
+
+    kspec = lmc_ops.KernelGroupSpec(
+        planned["table"].data_ptr(),
+        [int(planned_obj.data_ptr())],
+        planned["desc"],
+        chunk,
+        int(planned["fmt"]),
+        ids.data_ptr(),
+        ids.numel(),
+    )
+    step = lmc_ops.BatchStep([], [lmc_ops.LaunchVar(0, 0, 1, 1, 0)])
+    lmc_ops.execute_object_group_transfer(
+        int(direction), device, 1 << 26, [kspec], [step]
+    )
+    torch.npu.synchronize()
+    if direction_d2h:
+        assert torch.equal(planned_obj.cpu(), golden.cpu())
+    else:
+        _assert_engine_equal(direct["layers"], planned["layers"])
+
+
+@requires_npu
 @pytest.mark.parametrize("affinity", [False, True], ids=["main", "affinity"])
 @pytest.mark.parametrize("num_objects", [1, 2], ids=["1obj", "2obj"])
 def test_plan_staging_d2h_matches_direct(affinity: bool, num_objects: int) -> None:

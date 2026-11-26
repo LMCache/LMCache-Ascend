@@ -133,6 +133,11 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
             : checked_mul(sd.bs, scalar_row, "format 13 block stride bytes");
   }
 
+  // Bytes from each layer's base data_ptr() to plane p. Only format 2 has a
+  // non-zero offset; every other format's pointer table already has one
+  // entry per plane. Derived here because the descriptor carries no offsets.
+  int64_t plane_base_offsets[kvcache_ops::kMaxPlanes] = {0, 0, 0, 0};
+
   // Format 2 is one [NB, 2, BS, NH, HS] tensor. The scalar descriptor
   // fixes both plane addresses, so fill them here.
   if (fmt2) {
@@ -154,8 +159,7 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
     sd.plane_slot_bytes[0] = sd.plane_slot_bytes[1] = row;
     sd.plane_block_stride_bytes[0] = sd.plane_block_stride_bytes[1] =
         block_bytes;
-    sd.plane_engine_base_offset_bytes[0] = 0;
-    sd.plane_engine_base_offset_bytes[1] = half;
+    plane_base_offsets[1] = half;
   }
 
   // Formats 16/17 must carry explicit plane geometry filled at registration;
@@ -219,9 +223,7 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
     TORCH_CHECK(scalar_row >= payload && scalar_row - payload <= kCopyGmGapMax,
                 "plane ", p, " LMC row gap (", scalar_row - payload,
                 ") exceeds the DataCopyPad GM gap range");
-    const int64_t base_offset = sd.plane_engine_base_offset_bytes[p];
-    TORCH_CHECK(base_offset >= 0, "plane ", p,
-                " engine base offset must be non-negative, got ", base_offset);
+    const int64_t base_offset = plane_base_offsets[p];
     if (fmt2) {
       const int64_t reach =
           checked_add(base_offset, span, "format 2 plane reach");
@@ -231,33 +233,11 @@ PreparedGroup prepare_group(const PageBufferShapeDesc &shape_desc,
       // The probe above starts at offset 0. Format 2 also reaches base_offset.
       checked_add(checked_mul(sd.nb - 1, block_stride, "plane address range"),
                   reach, "plane address range");
-    } else {
-      TORCH_CHECK(base_offset == 0, "plane ", p,
-                  " engine base offset is only valid for format 2, got ",
-                  base_offset);
     }
     group.layout.planes[p] =
         kvcache_ops::PlaneLayout{payload, block_stride, fmt17 ? prefix : 0};
     group.layout.planes[p].engine_base_offset_bytes = base_offset;
     prefix = checked_add(prefix, payload, "LMC row prefix sum");
-  }
-  if (fmt2) {
-    TORCH_CHECK(sd.plane_block_stride_bytes[0] ==
-                    sd.plane_block_stride_bytes[1],
-                "format 2 planes must share one block stride, got ",
-                sd.plane_block_stride_bytes[0], " and ",
-                sd.plane_block_stride_bytes[1]);
-    const int64_t o0 = sd.plane_engine_base_offset_bytes[0];
-    const int64_t o1 = sd.plane_engine_base_offset_bytes[1];
-    const int64_t span0 =
-        checked_mul(sd.bs, sd.plane_slot_bytes[0], "format 2 plane 0 span");
-    const int64_t span1 =
-        checked_mul(sd.bs, sd.plane_slot_bytes[1], "format 2 plane 1 span");
-    const int64_t first = o0 <= o1 ? o0 : o1;
-    const int64_t first_span = o0 <= o1 ? span0 : span1;
-    const int64_t second = o0 <= o1 ? o1 : o0;
-    TORCH_CHECK(second >= checked_add(first, first_span, "format 2 plane gap"),
-                "format 2 K/V planes overlap: offsets ", o0, " and ", o1);
   }
   if (fmt17) {
     TORCH_CHECK(prefix == scalar_row, "sum of plane payloads (", prefix,

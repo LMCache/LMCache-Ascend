@@ -43,6 +43,11 @@ enum class EngineKVFormat : int {
 // PageBufferShapeDesc in LMCache csrc/kv_transfer_plan_types.h.
 // block_stride_elems honours engine-side dim-0 padding when > 0, else
 // falls back to the tight bs * nh * hs stride.
+//
+// Must stay byte-identical to upstream's struct, trailing fields included:
+// upstream's make_page_buffer_shape_desc hands this module its own
+// lmcache_native instance (pybind11 accepts it by C++ type name), and the
+// by-value copy at the module boundary would read past a smaller object.
 struct PageBufferShapeDesc {
   int kv_size;
   int nl;
@@ -62,9 +67,6 @@ struct PageBufferShapeDesc {
   int64_t plane_slot_bytes[4] = {0, 0, 0, 0};
   // Per-plane per-block dim-0 step in bytes (stride(0) * itemsize).
   int64_t plane_block_stride_bytes[4] = {0, 0, 0, 0};
-  // Format 2 only: bytes from each layer's base data_ptr() to plane p.
-  // Zero for formats whose pointer table already has one entry per plane.
-  int64_t plane_engine_base_offset_bytes[4] = {0, 0, 0, 0};
 
   template <typename ScalarType> inline size_t scalars_per_head() const {
     return hs * element_size / sizeof(ScalarType);
