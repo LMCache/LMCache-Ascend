@@ -3,17 +3,14 @@
 
 # Standard
 from functools import partial
-import os
 import sys
 
 
 def main() -> int:
-    """Run the upstream CLI, disabling benchmark SHM only for ACL Host memory.
+    """Run the upstream CLI with an empty SHM name.
 
-    Set LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR before starting this entry point.
-    Ascend package activation installs the memory wrappers before this module
-    runs. The upstream benchmark has no SHM option, so temporarily override its
-    config constructor reference without changing the shared configuration class.
+    The upstream benchmark has no SHM option, so temporarily override its config
+    constructor reference without changing the shared configuration class.
     Arguments, transfers, verification, cleanup and exit codes remain upstream's.
     Calls must be sequential; the constructor reference is restored on every exit.
 
@@ -24,16 +21,13 @@ def main() -> int:
         Exception: Upstream errors propagate after restoring the constructor.
     """
     # Third Party
+    from lmcache.tools.transfer_channel_benchmark import benchmark
     from lmcache.tools.transfer_channel_benchmark.__main__ import main as benchmark_main
 
-    if os.environ.get("LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR") != "aclrt_malloc_host":
-        return benchmark_main()
-
-    # Third Party
-    from lmcache.tools.transfer_channel_benchmark import benchmark
-
     config_type = benchmark.L1MemoryManagerConfig
-    benchmark.L1MemoryManagerConfig = partial(config_type, shm_name="")  # type: ignore[misc, assignment]
+    benchmark.L1MemoryManagerConfig = partial(  # type: ignore[misc, assignment]
+        config_type, shm_name=""
+    )
     try:
         return benchmark_main()
     finally:

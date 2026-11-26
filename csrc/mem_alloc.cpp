@@ -1,7 +1,6 @@
 #include "mem_alloc.h"
 #include "managed_mem.h"
 #include <acl/acl.h>
-#include <cstdlib> // for std::getenv
 #include <cstring> // for strerror
 #include <errno.h>
 #include <numaif.h>
@@ -9,9 +8,9 @@
 #include <string>
 #include <sys/mman.h>
 
-uintptr_t alloc_host_ptr(std::size_t size) {
+uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int /*flags*/) {
   if (size == 0) {
-    throw std::invalid_argument("alloc_host_ptr requires a nonzero size");
+    throw std::invalid_argument("alloc_pinned_ptr requires a nonzero size");
   }
   void *ptr = nullptr;
   aclError err = aclrtMallocHost(&ptr, size);
@@ -22,45 +21,11 @@ uintptr_t alloc_host_ptr(std::size_t size) {
   return reinterpret_cast<uintptr_t>(ptr);
 }
 
-void free_host_ptr(uintptr_t ptr) {
+void free_pinned_ptr(uintptr_t ptr) {
   aclError err = aclrtFreeHost(reinterpret_cast<void *>(ptr));
   if (err != ACL_SUCCESS) {
     throw std::runtime_error("aclrtFreeHost failed: " + std::to_string(err) +
                              " | ptr: " + std::to_string(ptr));
-  }
-}
-
-uintptr_t alloc_pinned_ptr(std::size_t size, unsigned int flags) {
-  void *ptr = nullptr;
-  // no flags
-  aclError err = aclrtMallocHost(&ptr, size);
-  if (err != ACL_SUCCESS) {
-    throw std::runtime_error("aclrtMallocHost failed: " + std::to_string(err));
-  }
-
-  const char *socVersion = aclrtGetSocName();
-
-  // nullptr means that the chip version failed to be obtained. We cannot be
-  // sure about the version of the device. Unless we are sure that we deal with
-  // a 310 device, we try to register.
-  if (socVersion == nullptr ||
-      std::string(socVersion).find("310") == std::string::npos) {
-    // not 310p
-    auto devPtr = register_ptr(ptr, size);
-    if (devPtr == nullptr) {
-      free_pinned_ptr(reinterpret_cast<uintptr_t>(ptr));
-      throw std::runtime_error("register ptr failed");
-    }
-  }
-
-  return reinterpret_cast<uintptr_t>(ptr);
-}
-
-void free_pinned_ptr(uintptr_t ptr) {
-  unregister_ptr(reinterpret_cast<void *>(ptr));
-  aclError err = aclrtFreeHost(reinterpret_cast<void *>(ptr));
-  if (err != ACL_SUCCESS) {
-    throw std::runtime_error("aclrtFreeHost failed: " + std::to_string(err));
   }
 }
 

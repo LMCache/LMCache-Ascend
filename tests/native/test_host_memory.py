@@ -59,24 +59,22 @@ int aclrtGetLastError(aclrtLastErrLevel) { return 0; }
 void *register_ptr(void *ptr, size_t) { ++registrations; return ptr; }
 int unregister_ptr(void *) { ++unregistrations; return 0; }
 int main() {
-  try { alloc_host_ptr(0); assert(false); }
-  catch (const std::invalid_argument &) {}
-  assert(allocations == 0);
-  uintptr_t ptr = alloc_host_ptr(64);
+  uintptr_t ptr = alloc_pinned_ptr(64, 0);
   assert(ptr != 0);
+  assert(registrations == 0);
   reinterpret_cast<unsigned char *>(ptr)[63] = 19;
   assert(reinterpret_cast<unsigned char *>(ptr)[63] == 19);
   free_error = 73;
-  try { free_host_ptr(ptr); assert(false); }
+  try { free_pinned_ptr(ptr); assert(false); }
   catch (const std::runtime_error &e) {
     std::string msg(e.what());
     assert(msg.find("aclrtFreeHost") != std::string::npos);
     assert(msg.find("73") != std::string::npos);
     assert(msg.find(std::to_string(ptr)) != std::string::npos);
   }
-  free_error = 0; free_host_ptr(ptr);
+  free_error = 0; free_pinned_ptr(ptr);
   alloc_error = 91;
-  try { alloc_host_ptr(127); assert(false); }
+  try { alloc_pinned_ptr(127, 0); assert(false); }
   catch (const std::runtime_error &e) {
     std::string msg(e.what());
     assert(msg.find("aclrtMallocHost") != std::string::npos);
@@ -84,9 +82,10 @@ int main() {
     assert(msg.find("127") != std::string::npos);
   }
   assert(registrations == 0 && unregistrations == 0);
-  alloc_error = 0;
-  ptr = alloc_pinned_ptr(64, 0); free_pinned_ptr(ptr);
-  assert(registrations == 1 && unregistrations == 1);
+  int previous_allocations = allocations;
+  try { alloc_pinned_ptr(0, 0); assert(false); }
+  catch (const std::invalid_argument &) {}
+  assert(allocations == previous_allocations);
 }
 """
     )
