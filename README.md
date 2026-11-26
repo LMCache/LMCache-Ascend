@@ -60,6 +60,7 @@ The minimal deployment is three steps: install the two packages, start the `lmca
 ```bash
 git clone https://github.com/LMCache/LMCache.git
 cd LMCache
+pip install -r requirements/build.txt   # grpcio-tools generates the gRPC bindings
 pip install -v --no-build-isolation -e .
 cd ..
 
