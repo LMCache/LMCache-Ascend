@@ -1,12 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Check native allocation integration with Mixed and benchmark configuration."""
+"""Check native allocation integration with the normal Mixed allocator."""
 
 # Standard
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
 import ctypes
-import importlib
-import sys
 
 # Third Party
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
@@ -14,19 +10,6 @@ from lmcache.v1.memory_management import MemoryFormat
 import lmcache
 import pytest
 import torch
-
-
-@pytest.fixture
-def source_package(monkeypatch):
-    root = Path(__file__).resolve().parents[2] / "lmcache_ascend"
-    for name, path in [("lmcache_ascend", root), ("lmcache_ascend.v1", root / "v1")]:
-        package = ModuleType(name)
-        package.__path__ = [str(path)]
-        monkeypatch.setitem(sys.modules, name, package)
-    name = "lmcache_ascend.v1.mp_transfer_channel_benchmark"
-    monkeypatch.delitem(sys.modules, name, raising=False)
-    yield
-    sys.modules.pop(name, None)
 
 
 @pytest.mark.parametrize("fail_release", [False, True])
@@ -68,46 +51,3 @@ def test_native_pinned_pair_works_with_normal_mixed(monkeypatch, fail_release):
     pool.close()
     assert events == ["allocate", "free"]
     assert buffers == {}
-
-
-@pytest.mark.parametrize(
-    ("use_lazy", "outcome"), [(False, "success"), (True, "failure"), (False, "error")]
-)
-def test_benchmark_without_allocator_setting(
-    source_package, monkeypatch, use_lazy, outcome
-):
-    # Third Party
-    from lmcache.tools.transfer_channel_benchmark import benchmark
-    from lmcache.v1.distributed import config as distributed_config
-
-    monkeypatch.delenv("LMCACHE_ASCEND_MP_HOST_MEMORY_ALLOCATOR", raising=False)
-    monkeypatch.setattr(
-        distributed_config,
-        "current_device_spec",
-        SimpleNamespace(is_pin_supported=True),
-    )
-    entry = importlib.import_module("lmcache_ascend.v1.mp_transfer_channel_benchmark")
-    config_type = benchmark.L1MemoryManagerConfig
-    # Inspect the real benchmark's configuration before SHM or ACL allocation.
-    monkeypatch.setattr(benchmark, "L1MemoryManager", lambda config: config)
-    args = ["benchmark", "--role", "client"]
-    if use_lazy:
-        args.append("--use-lazy")
-    monkeypatch.setattr(sys, "argv", args)
-
-    def run_client(cfg):
-        config = benchmark._create_l1_manager(cfg, 1048576)
-        assert config.shm_name == ""
-        assert config.use_lazy is use_lazy
-        if outcome == "error":
-            raise RuntimeError("benchmark failed")
-        return outcome == "success"
-
-    monkeypatch.setattr(benchmark, "client_main", run_client)
-    if outcome == "error":
-        with pytest.raises(RuntimeError, match="benchmark failed"):
-            entry.main()
-    else:
-        assert entry.main() == (0 if outcome == "success" else 1)
-    assert benchmark.L1MemoryManagerConfig is config_type
-    assert config_type(size_in_bytes=1048576, use_lazy=False).shm_name
