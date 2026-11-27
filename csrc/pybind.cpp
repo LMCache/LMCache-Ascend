@@ -169,10 +169,12 @@ PYBIND11_MODULE(c_ops, m) {
   // Match upstream lmcache_native / CUDA pybind: tests and connectors use
   // GPUKVFormat as an alias of EngineKVFormat.
   m.attr("GPUKVFormat") = m.attr("EngineKVFormat");
-  // Factory constructs this class via device_ops.PageBufferShapeDesc()
-  // after NpuDeviceOps.bind_native. Kernels take it by value (same as CUDA
-  // + lmcache_native). dynamic_attr keeps torch dtype for the Python
-  // torch_ops fallback.
+  // Upstream's make_page_buffer_shape_desc builds lmcache_native's descriptor
+  // and hands it to the kernels' by-value parameters; pybind11 accepts it by
+  // C++ type name, so this struct must stay byte-identical to upstream's
+  // (see mp_mem_kernels.h). Kernels take it by value, same as CUDA +
+  // lmcache_native. dynamic_attr keeps torch dtype for the Python torch_ops
+  // fallback.
   py::class_<PageBufferShapeDesc>(m, "PageBufferShapeDesc", py::module_local(),
                                   py::dynamic_attr())
       .def(py::init<>())

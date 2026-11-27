@@ -15,7 +15,7 @@ host layer enforces it and rejects violations with `TORCH_CHECK`.
 
 | Format | Enum | `separate_plane` | Work item | LMC layout |
 |---|---|---|---|---|
-| 2 | `NL_X_NB_TWO_BS_NH_HS` | `true` | (layer, plane, block) | same LMC layout as format 16. The pointer table is one base `data_ptr()` per layer; plane `p` is `base + plane_engine_base_offset_bytes[p]` |
+| 2 | `NL_X_NB_TWO_BS_NH_HS` | `true` | (layer, plane, block) | same LMC layout as format 16. The pointer table is one base `data_ptr()` per layer; plane `p` is `base + engine_base_offset_bytes[p]` (derived by `prepare_group`, section 6) |
 | 13 | `NL_X_NB_BS_NH_CS` | `false` | (layer, block) | `[L, T, NH*CS]`, one fused K/V plane |
 | 16 | `NL_X_TWO_X_NB_BS_NH_HS` | `true` | (layer, plane, block) | `[2, L, T, NH*HS]`, K slab then V slab |
 | 17 | `NL_X_NP_X_NB_BS_ONE_HS` | `false` | (layer, block), all planes moved by one core | `[L, T, sum(payload)]` packed byte rows |
@@ -29,6 +29,10 @@ cache lines with their row neighbours).
 
 Geometry (`prepare_group`, resolved once per group):
 
+- `PageBufferShapeDesc` is upstream's type and must stay byte-identical to
+  `LMCache csrc/kv_transfer_plan_types.h`: upstream hands this module its own
+  `lmcache_native` instance, pybind11 accepts it by C++ type name, and the
+  by-value copy at the module boundary reads past a smaller object
 - `nl, nb, bs, nh, hs > 0`; `element_size in {1, 2, 4}`
 - `kv_size == 2` for formats 2 and 16, `== 1` for formats 13 and 17
 - format 13 with `num_planes == 0` derives its single-plane geometry in
@@ -46,9 +50,9 @@ Geometry (`prepare_group`, resolved once per group):
   overlap) and `engine_block_stride_bytes % 32 == 0`
 - address-range probe `(nb - 1) * block_stride + bs * payload` fits int64
 - formats 2, 13 and 16: `payload_bytes == nh * hs * element_size` per plane
-- format 2: `plane_engine_base_offset_bytes >= 0`, both planes share one block
-  stride, `offset + bs * payload <= block_stride`, and the two plane windows do
-  not overlap. Formats 13, 16 and 17 require every offset to be 0
+- format 2: both plane base offsets are derived from the scalar descriptor
+  (section 6), and `offset + bs * payload <= block_stride` for each plane. No
+  format reads a base offset from the descriptor
 - format 17: `sum(payload_bytes) == nh * hs * element_size`
   (the packed row width)
 - `bs * lmc_row_bytes % 32 == 0` (adjacent LMC pages do not share a 32B line)
@@ -131,7 +135,7 @@ format **17**).
 
 **One pointer per layer with multiple planes:** `ptrs[layer]` only (`nl`
 entries). Plane `p` is reached at
-`ptrs[layer] + plane_engine_base_offset_bytes[p]`. For format **2**,
+`ptrs[layer] + engine_base_offset_bytes[p]`. For format **2**,
 `prepare_group` derives those offsets from the scalar descriptor: plane 0
 is `0`, plane 1 is
 `bs * nh * hs * element_size`, and both planes share
@@ -150,7 +154,7 @@ The table must live on the NPU.
 Normally, `num_planes > 1` implies one `data_ptr()` per plane (section 6).
 The Ascend MP bridge is the opposite: **`one_pointer_per_layer` with
 `separate_plane` work items**—one base pointer per layer, but the kernel
-still copies multiple planes using `plane_engine_base_offset_bytes`.
+still copies multiple planes using `engine_base_offset_bytes`.
 
 That path is used today to move **hybrid interleaved attention** by
 registering engine enum format **2**: LMCache presents a synthetic 5D view
@@ -176,7 +180,7 @@ offsets forever.
   `data_ptr()` per layer (`nl` pointers), `separate_plane == false` so one
   work item moves the whole page (same scheduling idea as enum format **17**).
 - One opaque byte span per logical page (interleaved K/V as the runner laid
-  it out), copied in one shot—no `plane_engine_base_offset_bytes`, no
+  it out), copied in one shot—no plane base offsets, no
   `one_pointer_per_layer` branch in the device kernel.
 - LMCache would register the true page width from the runner instead of
   splitting a format-**2** tensor at axis 1.
