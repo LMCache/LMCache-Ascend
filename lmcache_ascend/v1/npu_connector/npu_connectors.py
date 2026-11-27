@@ -504,6 +504,27 @@ class VLLMPagedMemNPUConnectorV2(VLLMPagedMemGPUConnectorV2):
             layout_hints=layout_hints,
         )
 
+    def initialize_kvcaches_ptr(self, **kwargs):
+        """Structure-preserving override for the vllm-ascend layout.
+
+        vLLM-Ascend hands a ``(k, v)`` tuple of 4-D tensors per layer
+        (nb, bs, nh, hs). The upstream implementation routes the value
+        through ``attempt_permute_to_contiguous_view``, which flattens
+        tuples into plain lists; ``KVCacheFormat.detect`` then no longer
+        recognizes the separated format and raises UNDEFINED.
+
+        The engine tensors arrive contiguous (verified on the vllm-ascend
+        pool), so the view normalization is a no-op here anyway: store
+        the structure verbatim on first use.
+        """
+        if self.kvcaches is None:
+            self.kvcaches = kwargs.get("kvcaches", None)
+            if self.kvcaches is None:
+                raise ValueError(
+                    "'kvcaches' should be provided in kwargs or "
+                    "initialized beforehand."
+                )
+
     def _initialize_pointers(self, kv_caches: List[torch.Tensor]) -> torch.Tensor:
         self.kv_format = KVCacheFormat.detect(kv_caches, use_mla=self.use_mla)
 

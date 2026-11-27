@@ -58,11 +58,69 @@ class AscendPDReceiverMixin:
             self._sender_done_urls: dict[str, str] = {}
             self._pull_done_sockets: dict[str, zmq.Socket] = {}
 
+    def _l1_covered_key_indexes(self, msg) -> set:
+        """Key indexes of ``msg`` the decoder can already serve from its
+        own L1 (its LMCache server), for messages that carry token
+        context (``AscendAllocRequest`` / token-carrying
+        ``PullReadyNotif``).
+
+        The oracle answers at server-chunk granularity; a PD chunk is
+        covered when its containing server chunk is L1-resident (the PD
+        chunk size always divides the server chunk size -- enforced at
+        connector init). The returned indexes feed the same
+        ``already_sent_indexes`` channel as the receive-buffer dedup,
+        so the sender skips gathering and transmitting them.
+
+        Fail-open by construction: no oracle, no tokens, or a failed
+        query all yield an empty set (the sender just transmits, which
+        is today's behavior).
+        """
+        oracle = getattr(self, "l1_oracle", None)
+        token_ids = getattr(msg, "token_ids", None)
+        if oracle is None or not token_ids:
+            return set()
+        try:
+            fmt = MemoryFormat(msg.fmt)
+            pd_chunk = msg.shape[fmt.token_dim()]
+            if pd_chunk <= 0:
+                return set()
+            token_start = int(getattr(msg, "token_start", 0) or 0)
+            # Snap onto the PD chunk grid: a block-coverage clamp on the
+            # sender can leave token_start mid-chunk (a head-clipped
+            # first chunk), and key idx always represents the chunk at
+            # grid position first_chunk + idx regardless of clipping.
+            base = token_start // pd_chunk * pd_chunk
+            end_tok = base + len(msg.keys) * pd_chunk
+            present = oracle.present_server_chunks(
+                list(token_ids), base, end_tok
+            )
+            if not present:
+                return set()
+            server_chunk = oracle.chunk_size
+            covered = {
+                idx
+                for idx in range(len(msg.keys))
+                if (base + idx * pd_chunk) // server_chunk in present
+            }
+            if covered:
+                logger.debug(
+                    "L1 dedup: %d/%d chunks already in decoder L1",
+                    len(covered),
+                    len(msg.keys),
+                )
+            return covered
+        except Exception:  # noqa: BLE001 - fail open by contract
+            logger.exception("L1 dedup check failed; treating all as miss")
+            return set()
+
     def _allocate_and_put(self, alloc_request: AllocRequest) -> AscendAllocResponse:
         """Allocate memory for incoming chunks and return UUID-based refs.
 
         Used in **push mode** only.  The receiver pre-allocates NPU pages
         and returns their HCCL buffer references so the sender can write.
+
+        Chunks neither in the receive buffer nor in the decoder's L1
+        get pages; the rest are reported back as ``already_sent``.
         """
         total_allocs = len(alloc_request.keys)
         fmt = MemoryFormat(alloc_request.fmt)
@@ -72,6 +130,12 @@ class AscendPDReceiverMixin:
         already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
             alloc_request.keys
         )
+        l1_indexes = self._l1_covered_key_indexes(alloc_request)
+        if l1_indexes:
+            new_indexes = [i for i in new_indexes if i not in l1_indexes]
+            already_sent_indexes = sorted(
+                set(already_sent_indexes) | l1_indexes
+            )
 
         remote_buffer_uuids: list[str] = []
         remote_mem_indexes: list[int] = []
@@ -170,6 +234,12 @@ class AscendPDReceiverMixin:
         already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
             msg.keys
         )
+        l1_indexes = self._l1_covered_key_indexes(msg)
+        if l1_indexes:
+            new_indexes = [i for i in new_indexes if i not in l1_indexes]
+            already_sent_indexes = sorted(
+                set(already_sent_indexes) | l1_indexes
+            )
 
         remote_buffer_uuids: list[str] = []
         remote_mem_indexes: list[int] = []
@@ -277,6 +347,12 @@ class AscendPDReceiverMixin:
         already_sent_indexes, already_sent_objs, new_indexes = self._partition_keys(
             msg.keys
         )
+        l1_indexes = self._l1_covered_key_indexes(msg)
+        if l1_indexes:
+            new_indexes = [i for i in new_indexes if i not in l1_indexes]
+            already_sent_indexes = sorted(
+                set(already_sent_indexes) | l1_indexes
+            )
 
         num_proxies = len(new_indexes)
 
