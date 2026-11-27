@@ -7,10 +7,13 @@ the format enums and ``is_*`` predicates that upstream keeps on
 ``lmcache_native`` alone. Binding either through
 ``bind_native`` would violate the device-ops facade contract or shadow
 the class-level NPU overrides, so both are filtered out here.
+
+Host allocation prepares the NPU runtime on demand before calling ``c_ops``.
 """
 
 # Third Party
 from lmcache.v1.platform import torch_ops as _torch_ops
+import torch as _torch
 
 # First Party
 import lmcache_ascend.c_ops as _c_ops
@@ -37,3 +40,25 @@ for _name in dir(_c_ops):
     if _symbol is getattr(_torch_ops, _name, None):
         continue  # merged torch fallback; class-level NPU overrides win
     globals()[_name] = _symbol
+
+
+def alloc_pinned_ptr(size: int, flags: int) -> int:
+    """Initialize NPU runtime on demand and allocate unmapped ACL Host bytes.
+
+    L1 allocation can precede transfer-channel and MP server initialization.
+    Initialize through PyTorch without overriding an existing device selection.
+
+    Args:
+        size: Nonzero allocation size in bytes.
+        flags: Forwarded to the native allocator, which currently ignores it.
+
+    Returns:
+        Host address owned by the caller. Keep runtime alive until all users and
+        communication registrations are finished and the address is freed.
+
+    Raises:
+        ValueError: The allocation size is zero.
+        RuntimeError: NPU initialization or ACL Host allocation fails.
+    """
+    _torch.npu.init()  # type: ignore[attr-defined]
+    return _c_ops.alloc_pinned_ptr(size, flags)
