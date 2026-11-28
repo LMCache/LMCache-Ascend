@@ -10,7 +10,6 @@
 /lmcache_ascend/v1/                    @matthewygf @chloroethylene @marcobarlo @larksudo
 
 # STORAGE BACKENDS
-/lmcache_ascend/v1/storage_backend/    @matthewygf @chloroethylene @marcobarlo @shengyan-chen
 
 # TRANSFER CHANNELS
 /lmcache_ascend/v1/transfer_channel/   @matthewygf @chloroethylene @shengyan-chen
@@ -18,12 +17,10 @@
 # NATIVE OPS
 /csrc/                                 @matthewygf @chloroethylene @marcobarlo @larksudo
 /third_party/                          @matthewygf @chloroethylene @marcobarlo @larksudo
-/lmcache_ascend/serde/                 @matthewygf @chloroethylene @marcobarlo
 /csrc/hccl/                            @matthewygf @chloroethylene @marcobarlo @shengyan-chen
 /csrc/hixl/                            @matthewygf @chloroethylene @marcobarlo @shengyan-chen
 
 # CACHEBLEND
-/lmcache_ascend/v1/blend/              @matthewygf @chloroethylene @larksudo
 
 # SERVING-STACK INTEGRATION
 /lmcache_ascend/integration/           @matthewygf @chloroethylene @marcobarlo @larksudo
@@ -40,6 +37,5 @@ pyproject.toml                         @matthewygf @chloroethylene @marcobarlo
 
 # CI / INFRASTRUCTURE
 .github/                               @matthewygf @chloroethylene @marcobarlo
-docker/                                @matthewygf @chloroethylene @marcobarlo
 *.yaml                                 @matthewygf @chloroethylene @marcobarlo
 *.yml                                  @matthewygf @chloroethylene @marcobarlo

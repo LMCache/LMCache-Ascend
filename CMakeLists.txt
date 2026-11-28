@@ -13,14 +13,6 @@ if (NOT GLIBCXX_USE_CXX11_ABI)
 endif()
 add_compile_definitions(_GLIBCXX_USE_CXX11_ABI=${GLIBCXX_USE_CXX11_ABI})
 
-set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
-
-# for the device kernels compilation
-set(SOC_VERSION ${SOC_VERSION})
-set(ARCH ${ARCH})
-# custom compile definition for kernels hostside compilation
-set(ASCEND_AICORE_ARCH ${ASCEND_AICORE_ARCH})
-
 if (NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE "Release" CACHE STRINGS "Build type Release/Debug (default Release)" FORCE)
 endif()
@@ -33,7 +25,6 @@ else()
     message(FATAL_ERROR "Unsupported architecture: ${CMAKE_SYSTEM_PROCESSOR}")
 endif()
 
-add_subdirectory(csrc/kernels)
 add_subdirectory(csrc)
 set(TORCH_LIBS_DIR "${TORCH_PATH}/lib")
 
@@ -54,7 +45,6 @@ target_link_libraries(
   PUBLIC
   ${TORCH_LIBRARIES}
   libtorch_npu.so
-  cache_kernels
   ascendcl
   platform
   ascend_hal
@@ -62,4 +52,4 @@ target_link_libraries(
   numa
 )
 
-install(TARGETS c_ops cache_kernels DESTINATION ${LMC_INSTALL_PATH})
+install(TARGETS c_ops DESTINATION ${LMC_INSTALL_PATH})
