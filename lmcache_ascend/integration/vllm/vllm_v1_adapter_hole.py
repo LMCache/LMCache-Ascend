@@ -41,10 +41,10 @@ from lmcache.integration.vllm.vllm_v1_adapter import (
 from lmcache.logging import init_logger
 from lmcache.utils import _lmcache_nvtx_annotate
 from lmcache.v1.cache_engine import LMCacheEngine, LMCacheEngineBuilder
+from lmcache.v1.common.utils import need_gpu_interm_buffer
 from lmcache.v1.compute.models.utils import VLLMModelTracker
 from lmcache.v1.config import LMCacheEngineConfig
 from lmcache.v1.gpu_connector import GPUConnectorInterface
-from lmcache.v1.gpu_connector.utils import need_gpu_interm_buffer
 from lmcache.v1.lookup_client.lmcache_lookup_client import (
     LMCacheLookupClient,
     LMCacheLookupServer,

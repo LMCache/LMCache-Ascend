@@ -157,11 +157,17 @@ class _FakeStorageManager:
             self.objects[key] = obj
         return reserved
 
-    def finish_write(self, keys: list[Any], read_locks: int = 0) -> None:
-        pass
+    def finish_write(
+        self, keys: list[ObjectKey], l1_owners: dict[ObjectKey, int]
+    ) -> None:
+        assert l1_owners == {key: self.objects[key].get_l1_manager() for key in keys}
 
-    def abort_write(self, keys: list[Any], l1_owners: dict[Any, int]) -> None:
-        pass
+    def abort_write(
+        self, keys: list[ObjectKey], l1_owners: dict[ObjectKey, int]
+    ) -> None:
+        for key in keys:
+            assert self.objects[key].get_l1_manager() == l1_owners[key]
+            del self.objects[key]
 
     def finish_read_prefetched(self, keys: list[Any], read_locks: int = 0) -> None:
         pass

@@ -112,8 +112,12 @@ PYBIND11_MODULE(c_ops, m) {
   m.def("decode_fast_prefsum", &decode_ascend_prefsum);
   m.def("calculate_cdf", &calculate_cdf);
   m.def("rotary_embedding_k_fused", &rotary_embedding_k_fused);
-  m.def("alloc_pinned_ptr", &alloc_pinned_ptr);
-  m.def("free_pinned_ptr", &free_pinned_ptr);
+  m.def("alloc_pinned_ptr", &alloc_pinned_ptr,
+        "Allocate ACL Host bytes without device mapping. Caller prepares the "
+        "runtime and owns the returned address.");
+  m.def("free_pinned_ptr", &free_pinned_ptr,
+        "Free an original alloc_pinned_ptr address after all users and "
+        "communication registrations are finished.");
   m.def("alloc_pinned_numa_ptr", &alloc_pinned_numa_ptr);
   m.def("free_pinned_numa_ptr", &free_pinned_numa_ptr);
   m.def("get_gpu_pci_bus_id", &get_npu_pci_bus_id);

@@ -78,8 +78,8 @@ def _seed_partial_lmcache_device_ops() -> None:
     # as the platform import currently in progress returns.
     lmcache.device_ops = _LazyDeviceOpsProxy()  # type: ignore[assignment]
 
-    # Third Party
-    from lmcache.v1.common.logging import init_logger
+    # First Party
+    from lmcache_ascend._logging import init_logger
 
     init_logger(__name__).debug("Seeded lazy lmcache.device_ops proxy (partial import)")
 
