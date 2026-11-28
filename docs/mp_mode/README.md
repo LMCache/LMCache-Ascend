@@ -6,5 +6,3 @@ This document has moved to the upstream LMCache documentation:
 
 The source lives at `docs/source/platform/devices/npu/mp_mode.rst` in the
 [LMCache repository](https://github.com/LMCache/LMCache).
-
-In-process (non-MP) documentation in this repository is unchanged.

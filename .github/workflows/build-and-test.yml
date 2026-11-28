@@ -151,7 +151,11 @@ jobs:
           # -W ignore:... : Suppress console spam from asyncio cleanup
           # --log-cli-level=CRITICAL : Keep Console Quiet (Only real errors)
           # --log-file=debug_logs.txt : Save Logs to File
-          python3 -u -m pytest -v tests/v1 \
+          # MP tests run in mp-npu-ci.yml against LMCache dev; everything else
+          # under tests/ was the in-process connector and has been removed.
+          python3 -u -m pytest -v tests/test_version_integrity.py \
+            tests/v1/test_logical_block_size_patch.py \
+            tests/v1/transfer_channel \
             -W "ignore:coroutine 'AsyncPQThreadPoolExecutor._worker' was never awaited" \
             -W "ignore:coroutine 'AsyncPQExecutor._worker' was never awaited" \
             -W "ignore:Task was destroyed but it is pending!" \
@@ -368,7 +372,11 @@ jobs:
           # -W ignore:... : Suppress console spam from asyncio cleanup
           # --log-cli-level=CRITICAL : Keep Console Quiet (Only real errors)
           # --log-file=debug_logs.txt : Save Logs to File
-          python3 -u -m pytest -v tests/v1 \
+          # MP tests run in mp-npu-ci.yml against LMCache dev; everything else
+          # under tests/ was the in-process connector and has been removed.
+          python3 -u -m pytest -v tests/test_version_integrity.py \
+            tests/v1/test_logical_block_size_patch.py \
+            tests/v1/transfer_channel \
             -W "ignore:coroutine 'AsyncPQThreadPoolExecutor._worker' was never awaited" \
             -W "ignore:coroutine 'AsyncPQExecutor._worker' was never awaited" \
             -W "ignore:Task was destroyed but it is pending!" \

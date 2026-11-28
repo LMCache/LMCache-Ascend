@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Standard
 from pathlib import Path
-import configparser
 import glob
 import logging
 import os
@@ -23,21 +22,6 @@ ROOT_DIR = Path(__file__).parent
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-# NOTE: Apply platform-specific patches during installation
-# to resolve environment issues
-def run_patches():
-    """Execute the patch script after installation."""
-    try:
-        sys.path.append(str(ROOT_DIR))
-        # First Party
-        from lmcache_ascend.integration.patch.apply_patch import run_integration_patches
-
-        run_integration_patches()
-    except Exception as e:
-        logger.error("Post-install patch system encountered an error: %s", e)
-        return
 
 
 def _get_ascend_home_path():
@@ -186,29 +170,6 @@ def _get_npu_soc():
     )
 
 
-def _get_aicore_arch_number(ascend_path, soc_version, host_arch):
-    platform_config_path = os.path.join(
-        ascend_path, f"{host_arch}-linux/data/platform_config"
-    )
-    ini_file = os.path.join(platform_config_path, f"{soc_version}.ini")
-
-    if not os.path.exists(ini_file):
-        raise ValueError(
-            f"The file '{ini_file}' is not found, please check your SOC_VERSION"
-        )
-
-    # read the file and extract
-    logger.info("Extracting AIC Version from: %s", ini_file)
-    cp = configparser.ConfigParser()
-    cp.read(ini_file)
-
-    aic_version = cp.get("version", "AIC_version")
-    logger.info("AIC Version: %s", aic_version)
-
-    version_number = aic_version.split("-")[-1]
-    return version_number
-
-
 class custom_build_info(build_py):
     def run(self):
         soc_version = _get_npu_soc()
@@ -268,9 +229,6 @@ class CustomAscendCmakeBuildExt(build_ext):
         self._cann_version_8_5 = _is_cann_85_or_later(cann_version_tuple)
         env_path = _get_ascend_env_path(self._cann_version_8_5)
 
-        _soc_version = _get_npu_soc()
-        arch = platform.machine()
-        _aicore_arch = _get_aicore_arch_number(ascend_home_path, _soc_version, arch)
         _cxx_compiler = os.getenv("CXX")
         _cc_compiler = os.getenv("CC")
         python_executable = sys.executable
@@ -309,9 +267,6 @@ class CustomAscendCmakeBuildExt(build_ext):
         cmake_cmd = [
             f". {env_path} && "
             f"cmake -S {ROOT_DIR} -B {BUILD_OPS_DIR}"
-            f"  -DSOC_VERSION={_soc_version}"
-            f"  -DASCEND_AICORE_ARCH={_aicore_arch}"
-            f"  -DARCH={arch}"
             "  -DUSE_ASCEND=1"
             f"  -DPYTHON_EXECUTABLE={python_executable}"
             f"  -DCMAKE_PREFIX_PATH={pybind11_cmake_path}"
@@ -362,7 +317,7 @@ class CustomAscendCmakeBuildExt(build_ext):
         src_dir = os.path.join(ROOT_DIR, "lmcache_ascend")
 
         # Expected file patterns (using glob patterns for flexibility)
-        expected_patterns = ["c_ops*.so", "libcache_kernels.so"]
+        expected_patterns = ["c_ops*.so"]
         if self._cann_version_8_5:
             expected_patterns.append("hccl_npu_comms*.so")
             expected_patterns.append("hixl_npu_comms*.so")
@@ -423,7 +378,6 @@ class CustomAscendCmakeBuildExt(build_ext):
                     )
 
         logger.info("All files copied successfully")
-        # run_patches()  # Temporarily disabled for v0.18.0rc1 build
 
 
 def ascend_extension():

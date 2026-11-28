@@ -24,14 +24,14 @@ def _seed_partial_lmcache_device_ops() -> None:
 
     On the serving path the plugin is first pulled in by lmcache's own
     platform init (``NpuDeviceOps.ensure_native`` -> ``import
-    lmcache_ascend.c_ops``), i.e. in the middle of ``import lmcache`` --
-    before ``lmcache/__init__.py`` binds its ``device_ops`` singleton (which
-    lives after the platform import that invoked us). Core modules imported
-    during the patch activation (``lmcache.v1.kv_layer_groups``, ...) do
-    ``from lmcache import device_ops`` at module level and would raise
-    ``ImportError`` on the half-initialized package, aborting the whole
-    activation -- lmcache then soft-fails to "plugin not found" and every MP
-    transfer stays on the torch baseline (~8x slower).
+    lmcache_ascend``, the activation hook), i.e. in the middle of ``import
+    lmcache`` -- before ``lmcache/__init__.py`` binds its ``device_ops``
+    singleton (which lives after the platform import that invoked us). Core
+    modules imported during the patch activation (``lmcache.v1.
+    kv_layer_groups``, ...) do ``from lmcache import device_ops`` at module
+    level and would raise ``ImportError`` on the half-initialized package,
+    aborting the whole activation -- lmcache then soft-fails to "plugin not
+    found" and every MP transfer stays on the torch baseline (~8x slower).
 
     Seed a lazy proxy for exactly that window: ``lmcache/__init__.py``
     overwrites the attribute with the real singleton right after platform
@@ -49,11 +49,11 @@ def _seed_partial_lmcache_device_ops() -> None:
         """Resolve the real ``lmcache.device_ops`` singleton per access.
 
         Accesses before lmcache binds its singleton (module-level grabs such
-        as ``system_detection``'s ``get_gpu_pci_bus_id = device_ops.
-        get_gpu_pci_bus_id``) are served from the ascend extension directly
-        -- the same function objects ``bind_native`` later puts on the real
-        instance -- and anything the extension does not export falls back to
-        the torch-baseline method, so no caller degrades to a broken binding.
+        as ``get_gpu_pci_bus_id = device_ops.get_gpu_pci_bus_id``) are served
+        from lmcache's in-tree ``lmcache.npu_ops`` extension -- the same
+        function objects ``bind_native`` later puts on the real instance --
+        and anything the extension does not export falls back to the
+        torch-baseline method, so no caller degrades to a broken binding.
         """
 
         def __getattr__(self, name: str) -> Any:
@@ -63,10 +63,10 @@ def _seed_partial_lmcache_device_ops() -> None:
             real = getattr(sys.modules.get("lmcache"), "device_ops", None)
             if real is not None and not isinstance(real, _LazyDeviceOpsProxy):
                 return getattr(real, name)
-            # First Party
-            import lmcache_ascend.c_ops as ascend_c_ops
+            # Third Party
+            import lmcache.npu_ops as npu_ops
 
-            sym = getattr(ascend_c_ops, name, None)
+            sym = getattr(npu_ops, name, None)
             if sym is not None:
                 return sym
             # Third Party
