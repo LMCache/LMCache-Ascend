@@ -28,83 +28,12 @@ LMCache-Ascend is a community maintained plugin for running LMCache on the Ascen
 
 > **Maintenance notice**: The stable in-process version (`LMCacheAscendConnectorV1Dynamic`) is maintained on the [`dsv4_support_045`](https://github.com/LMCache/LMCache-Ascend/tree/dsv4_support_045) branch and is **tightly coupled with LMCache 0.4.5** — pair it with the LMCache 0.4.5 release line, not newer versions. The `main` branch moves to MP mode (`LMCacheMPConnector`) and will no longer maintain the in-process mode.
 
-## Prerequisites
-
-To use LMCache-Ascend on the NPU hardware, please make sure the following prerequisites are satisfied.
-
-- **Hardware**: Atlas A2/A3 series (supported); Atlas A5 series (planned support); Atlas 300I Duo (not supported).
-- **OS**: Linux-based.
-- **Software**:
-  - **Python**: >= 3.10
-  - **CANN Toolkit**: >= 8.5.0
-  - **Ascend Driver**: >= 25.5
-  - **PyTorch**: >= 2.8.0
-  - **vLLM**: >= v0.23.0 & **vLLM-Ascend**: >= v0.23.0
-- **Container preparation**: see the official [vLLM-Ascend tutorials](https://docs.vllm.com.cn/projects/ascend/en/latest/tutorials/models/index.html) for preparing the base environment (NPU driver, CANN toolkit, and container images).
-
-### Compatibility Matrix
-
-Please ensure your environment matches the versions below.
-
-| LMCache-Ascend | LMCache | vLLM Version |
-| :--- | :--- | :--- |
-| **main** | **dev** | **>=v0.23.0** |
-| **v0.5.6** | **v0.5.6** | **>=v0.23.0** |
-
 ## Getting Started
 
-The minimal deployment is three steps: install the two packages, start the `lmcache server`, then start vLLM with the connector.
+The minimal deployment is three steps: install LMCache and LMCache-Ascend from source in the same environment (`main` tracks the LMCache `dev` branch), start the `lmcache server`, then start vLLM with `LMCacheMPConnector`. Prerequisites, version pairing, commands, and verification are documented upstream:
 
-### 1. Install
-
-```bash
-git clone https://github.com/LMCache/LMCache.git
-cd LMCache
-pip install -r requirements/build.txt   # grpcio-tools generates the gRPC bindings
-pip install -v --no-build-isolation -e .
-cd ..
-
-git clone --recurse-submodules https://github.com/LMCache/LMCache-Ascend.git
-cd LMCache-Ascend
-pip install -v --no-build-isolation -e .
-```
-
-> `third_party/hcomm` must match the container's CANN version — see [the LMCache-driven guide](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) for the full installation guide (environment preparation, container startup, source installation).
-
-### 2. Start the LMCache server
-
-```bash
-lmcache server \
-    --chunk-size 128 \
-    --l1-size-gb 50 \
-    --eviction-policy LRU
-```
-
-Wait for `LMCache INFO: LMCache grpc cache server is running on localhost:5555`.
-
-`--chunk-size 128` matches the vLLM block size and suits single-KV-format models (e.g. Qwen3); DeepSeek-V4 requires `4096` — see [the LMCache-driven guide](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) for the full deployment guide.
-
-### 3. Start vLLM with the connector
-
-```bash
-vllm serve /path/to/Qwen3-32B \
-    --served-model-name qwen3 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.9 \
-    --max-num-seqs 32 \
-    --tensor-parallel-size 8 \
-    --no-enable-prefix-caching \
-    --port 8900 \
-    --kv-transfer-config '{
-      "kv_connector": "LMCacheMPConnector",
-      "kv_role": "kv_both"
-    }'
-```
-
-The server address defaults to `localhost:5555` on both sides; on NPU the transfer mode defaults to `lmcache_driven`, so no extra config is needed here. A successful start shows `LMCache INFO: Creating transfer context (device_type=npu, mode=lmcache_driven)` for every worker.
-
-For the `engine_driven` transfer mode (workers copy KV from a named SHM pool), see [the engine-driven guide](https://docs.lmcache.ai/platform/devices/npu/engine_driven.html).
+- [Ascend NPU](https://docs.lmcache.ai/platform/devices/npu/index.html) — prerequisites, source installation, running vLLM-Ascend with LMCache, supported KV cache formats.
+- [LMCache-driven mode](https://docs.lmcache.ai/platform/devices/npu/lmcache_driven.html) — full deployment guide (environment preparation, container, installation, server, vLLM, verification).
 
 ## Documentation
 
