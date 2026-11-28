@@ -332,7 +332,7 @@ internally at runtime. The patch order ensures the NPU factory is registered bef
 
 ---
 
-## Phase 7 — Update CI and README
+## Phase 7 — Update CI and Dockerfiles
 
 ### 7a. Update CI workflow
 
@@ -359,49 +359,22 @@ Find and replace in ALL of these files:
 
 Use the `Edit` tool with `replace_all: true` on each file for the `pip install lmcache==` or `LMCACHE_TAG=` lines.
 
-### 7c. Update README compatibility matrix
+### 7c. README
 
-Read `README.md`. The compatibility table has columns: LMCache-Ascend version,
-Upstream LMCache, vLLM/SGLang version. Update:
-- The row for the current branch (`main`) to show the new upstream LMCache version
-- If adding a new verified row, mirror the format of existing rows
+`README.md` carries no compatibility matrix or installation commands: `main`
+tracks the LMCache `dev` branch, and version pairing and installation are
+documented in the upstream NPU docs
+(https://docs.lmcache.ai/platform/devices/npu/index.html). Nothing to update
+here.
 
-### 7d. Bump version in README and Dockerfiles (version-only refresh)
+### 7d. Bump version in Dockerfiles (version-only refresh)
 
-This step updates version numbers across documentation and Docker files when
-LMCache-Ascend has a new release that only bumps the upstream LMCache version
-(no source code changes to the NPU plugin). It is **not** the main upgrade
-skill — use this when the upstream LMCache version changed but no monkey-patch
-re-derivation is needed (e.g. releasing v0.4.3 after v0.4.2, where lmcache
-version also went from 0.4.2 to 0.4.3).
-
-#### Step 1 — Update README Compatibility Matrix
-
-For each row in the compatibility matrix,
-update only the **first two columns** (LMCache-Ascend version and Upstream
-LMCache) from the old version to the new version. Leave the vLLM/SGLang version
-column **unchanged**.
-
-Example — before:
-```
-| **v0.4.2** | **v0.4.2** | **0.5.8** |
-```
-After (only first two columns changed):
-```
-| **v0.4.3** | **v0.4.3** | **0.5.8** |
-```
-
-#### Step 2 — Update README Installation Sections
-
-Find and replace all occurrences in `README.md`:
-- `git clone --recurse-submodules -b v{old}` → `git clone --recurse-submodules -b v{new}`
-- `pip install lmcache=={old}` (all variants) → `pip install lmcache=={new}`
-- Docker image tags `lmcache-ascend:v{old}-*` → `lmcache-ascend:v{new}-*`
-- `docker build ... -t lmcache-ascend:v{old}-` → `docker build ... -t lmcache-ascend:v{new}-`
-
-Use `Edit` tool with `replace_all: true` for each pattern.
-
-#### Step 3 — Update all Dockerfiles
+This step updates version numbers across Docker files when LMCache-Ascend has
+a new release that only bumps the upstream LMCache version (no source code
+changes to the NPU plugin). It is **not** the main upgrade skill — use this
+when the upstream LMCache version changed but no monkey-patch re-derivation is
+needed (e.g. releasing v0.4.3 after v0.4.2, where lmcache version also went
+from 0.4.2 to 0.4.3).
 
 Find and replace in all Dockerfiles under `docker/`:
 - `pip install lmcache=={old}` → `pip install lmcache=={new}`
@@ -474,4 +447,4 @@ Typical files that may be updated include:
 - `integration/vllm/utils.py`
 - `integration/vllm/vllm_v1_adapter.py`
 - `integration/sglang/sglang_adapter.py`
-- CI and documentation files (`.github/workflows/build-and-test.yml`, `README.md`, `docker/Dockerfile.*`)
+- CI and Docker files (`.github/workflows/build-and-test.yml`, `docker/Dockerfile.*`)
